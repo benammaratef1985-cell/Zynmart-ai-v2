@@ -54,10 +54,10 @@ def get_gemini_response(user_message, is_admin_private=False):
             return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
         return DEFAULT_FALLBACK_TEXT
 
-    # تجربة النماذج الحديثة والمعتمدة
+    # تجربة النماذج المطلوبة حسب توصية جوجل الأخيرة
     models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro"
+        "gemini-3.1-pro-preview",
+        "gemini-2.5-flash"
     ]
 
     headers = {"Content-Type": "application/json"}

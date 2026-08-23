@@ -46,22 +46,31 @@ def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
     try:
-        requests.post(url, json=payload, timeout=5)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Telegram Send Error: {e}")
 
 def get_gemini_response(user_message):
     if not GEMINI_API_KEY:
-        return "مرحباً بك في ZYNMART! يمكنكم متابعة التحديثات عبر التطبيق في Pi Browser: zynmart.pages.dev وبوت التعدين: https://t.me/zynpibot"
+        return "تنبيه: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
     
-    try:
-        model = genai.GenerativeModel('gemini-1.5-flash-latest')
-        prompt = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        print(f"Gemini Error: {e}")
-        return "مرحباً بك في ZYNMART! يمكنكم متابعة التحديثات عبر التطبيق في Pi Browser: zynmart.pages.dev وبوت التعدين: https://t.me/zynpibot"
+    # قائمة بالنشر القياسي المعتمد لتفادي خطأ 404
+    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+    
+    last_error = ""
+    for model_name in models_to_try:
+        try:
+            model = genai.GenerativeModel(model_name)
+            prompt = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
+            response = model.generate_content(prompt)
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            last_error = str(e)
+            print(f"Error with {model_name}: {e}")
+            continue
+            
+    return f"تنبيه من النظام: تعذر الاتصال بـ Gemini API.\nالسبب: {last_error}"
 
 @app.route("/", methods=["GET"])
 def home():
@@ -80,13 +89,13 @@ def webhook():
         user_message = data["message"].get("text", "")
 
         if user_message:
-            # 1. التثبت من قاعدة المحادثات الخاصة (Private)
+            # 1. التثبت من المحادثات الخاصة (Private)
             if chat_type == "private":
                 if user_id != ADMIN_ID:
                     send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
                     return jsonify({"status": "ok"}), 200
             
-            # 2. التفاعل في المجموعات أو لـ Admin في الخاص
+            # 2. التفاعل بالذكاء الاصطناعي
             reply = get_gemini_response(user_message)
             send_telegram_message(chat_id, reply)
 

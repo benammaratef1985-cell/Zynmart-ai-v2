@@ -1,7 +1,6 @@
 import os
 import requests
 from flask import Flask, request, jsonify
-import google.generativeai as genai
 
 app = Flask(__name__)
 
@@ -9,10 +8,6 @@ app = Flask(__name__)
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = 7560871853  # معرف الأدمن المصرح له بالخاص
-
-# تهيئة Gemini
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
 
 # قاعدة البيانات والتعليمات الشاملة للمساعد الذكي
 ZYNMART_PROMPT = """
@@ -58,33 +53,47 @@ def get_gemini_response(user_message, is_admin_private=False):
         if is_admin_private:
             return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
         return DEFAULT_FALLBACK_TEXT
+
+    # الطلب المباشر عبر HTTP المعتمد رسمياً (v1beta/models/gemini-1.5-flash:generateContent)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
     
-    # قائمة بالنشر الحديثة والمعتمدة رسمياً
-    models_to_try = [
-        'gemini-2.5-flash',
-        'gemini-1.5-flash',
-        'gemini-2.5-pro',
-        'gemini-1.5-pro'
-    ]
+    headers = {"Content-Type": "application/json"}
     
-    last_error = ""
-    for model_name in models_to_try:
-        try:
-            model = genai.GenerativeModel(model_name)
-            prompt = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
-            response = model.generate_content(prompt)
-            if response and response.text:
-                return response.text
-        except Exception as e:
-            last_error = str(e)
-            print(f"Error with {model_name}: {e}")
-            continue
-            
-    # في حال فشل جميع النماذج
-    if is_admin_private:
-        return f"تنبيه للأدمن (خطأ في النظام):\nالسبب: {last_error}"
-    else:
-        return DEFAULT_FALLBACK_TEXT
+    prompt_text = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt_text}
+                ]
+            }
+        ]
+    }
+
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        res_data = response.json()
+
+        if response.status_code == 200:
+            candidates = res_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+        
+        # في حال وجود خطأ في الاستجابة
+        error_msg = res_data.get("error", {}).get("message", response.text)
+        if is_admin_private:
+            return f"تنبيه للأدمن (خطأ في النظام):\nالسبب: {error_msg}"
+        else:
+            return DEFAULT_FALLBACK_TEXT
+
+    except Exception as e:
+        if is_admin_private:
+            return f"تنبيه للأدمن (خطأ اتصال):\nالسبب: {str(e)}"
+        else:
+            return DEFAULT_FALLBACK_TEXT
 
 @app.route("/", methods=["GET"])
 def home():
@@ -103,18 +112,18 @@ def webhook():
         user_message = data["message"].get("text", "")
 
         if user_message:
-            # 1. إذا كانت المحادثة في الخاص
+            # 1. المحادثات الخاصة
             if chat_type == "private":
                 if user_id != ADMIN_ID:
                     send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
                     return jsonify({"status": "ok"}), 200
                 else:
-                    # أنت الأدمن في الخاص -> تصلك تفاصيل الخطأ لو حدث
+                    # الأدمن فقط في الخاص يرى تفاصيل الخطأ إن وجدت
                     reply = get_gemini_response(user_message, is_admin_private=True)
                     send_telegram_message(chat_id, reply)
                     return jsonify({"status": "ok"}), 200
             
-            # 2. إذا كانت المحادثة في المجموعة (أو أي مكان آخر) -> رد عادي ودون إظهار أخطاء
+            # 2. المجموعة العامة (رد ذكي دون إظهار أي رسائل أخطاء للعملاء)
             reply = get_gemini_response(user_message, is_admin_private=False)
             send_telegram_message(chat_id, reply)
 

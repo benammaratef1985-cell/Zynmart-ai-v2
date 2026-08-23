@@ -54,13 +54,14 @@ def get_gemini_response(user_message, is_admin_private=False):
             return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
         return DEFAULT_FALLBACK_TEXT
 
-    # الطلب المباشر عبر HTTP المعتمد رسمياً (v1beta/models/gemini-1.5-flash:generateContent)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
-    
+    # تجربة النماذج الحديثة والمعتمدة
+    models_to_try = [
+        "gemini-2.5-flash",
+        "gemini-2.5-pro"
+    ]
+
     headers = {"Content-Type": "application/json"}
-    
     prompt_text = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
-    
     payload = {
         "contents": [
             {
@@ -71,29 +72,33 @@ def get_gemini_response(user_message, is_admin_private=False):
         ]
     }
 
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        res_data = response.json()
+    last_error = ""
+    for model_name in models_to_try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=15)
+            res_data = response.json()
 
-        if response.status_code == 200:
-            candidates = res_data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
-        
-        # في حال وجود خطأ في الاستجابة
-        error_msg = res_data.get("error", {}).get("message", response.text)
-        if is_admin_private:
-            return f"تنبيه للأدمن (خطأ في النظام):\nالسبب: {error_msg}"
-        else:
-            return DEFAULT_FALLBACK_TEXT
+            if response.status_code == 200:
+                candidates = res_data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+            
+            # تسجيل الخلل وتجربة النموذج التالي
+            error_info = res_data.get("error", {}).get("message", response.text)
+            last_error = f"{model_name} -> {error_info}"
 
-    except Exception as e:
-        if is_admin_private:
-            return f"تنبيه للأدمن (خطأ اتصال):\nالسبب: {str(e)}"
-        else:
-            return DEFAULT_FALLBACK_TEXT
+        except Exception as e:
+            last_error = f"{model_name} Exception -> {str(e)}"
+            continue
+
+    # في حال فشل كل النماذج
+    if is_admin_private:
+        return f"تنبيه للأدمن (خطأ في النظام):\nالسبب: {last_error}"
+    else:
+        return DEFAULT_FALLBACK_TEXT
 
 @app.route("/", methods=["GET"])
 def home():
@@ -118,12 +123,12 @@ def webhook():
                     send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
                     return jsonify({"status": "ok"}), 200
                 else:
-                    # الأدمن فقط في الخاص يرى تفاصيل الخطأ إن وجدت
+                    # الأدمن فقط يرى الأخطاء في الخاص
                     reply = get_gemini_response(user_message, is_admin_private=True)
                     send_telegram_message(chat_id, reply)
                     return jsonify({"status": "ok"}), 200
             
-            # 2. المجموعة العامة (رد ذكي دون إظهار أي رسائل أخطاء للعملاء)
+            # 2. المجموعة العامة (رد عادي بدون إظهار أي أخطاء للأعضاء)
             reply = get_gemini_response(user_message, is_admin_private=False)
             send_telegram_message(chat_id, reply)
 

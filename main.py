@@ -4,12 +4,11 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# المتغيرات البيئية
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-ADMIN_ID = 7560871853  # معرف الأدمن المصرح له بالخاص
+GEMINI_API_KEYS = os.environ.get("GEMINI_API_KEY", "").split(",")
+ADMIN_ID = 7560871853
+BOT_USERNAME = "@zynmart_ai_bot"
 
-# قاعدة البيانات والتعليمات الشاملة للمساعد الذكي
 ZYNMART_PROMPT = """
 أنت المساعد الذكي الرسمي "AI for ZYNMART"، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
 
@@ -31,13 +30,19 @@ ZYNMART_PROMPT = """
 [قواعد وقوانين الرد]
 - الأسلوب: ودود، محترم، وبسيط (بالعربية أو الدارجة التونسية السلسة).
 - إذا سألك عضو عن سؤال لا تعرف إجابته، قل له بالضبط: "سؤالك مهم، دقيقة نخلي الأدمن يجاوبك".
-- حافظ على الاختصار وتجنب التكرار الطويل إذا كانت المحادثة مستمرة.
-
-مثال للترحيب:
-"مرحبا بيك في عائلة ZYNMART 🥳 أنا المساعد متاعكم AI for ZYNMART. تنجم تدخل للمتجر من هنا: zynmart.pages.dev ومتنساش تفعل بوت التعدين: https://t.me/zynpibot"
+- حافظ على الاختصار وتجنب التكرار الطويل.
 """
 
-# الرسالة الاحتياطية للأعضاء داخل القروب فقط
+# رسالة الترحيب التلقائية وعرض الخدمات
+GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركاته! 🌸
+مرحباً بك في عائلة ZYNMART 🚀
+
+أنا المساعد الذكي الخاص بالمشروع، وفي خدمتك دائماً:
+🛒 **رابط المتجر (في Pi Browser):** zynmart.pages.dev
+⛏️ **بوت التعدين والمهام اليومية:** https://t.me/zynpibot
+
+إذا كان لديك أي سؤال تفصيلي، يمكنك الإشارة لي بالمنشن: @zynmart_ai_bot وسأجيبك فوراً!"""
+
 DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل للمتجر التفاعلي عبر Pi Browser: zynmart.pages.dev\nولبدء تعدين عملة ZYN والمهام اليومية افتح البوت: https://t.me/zynpibot"
 
 def send_telegram_message(chat_id, text):
@@ -49,49 +54,40 @@ def send_telegram_message(chat_id, text):
         print(f"Telegram Send Error: {e}")
 
 def get_gemini_response(user_message, is_admin_private=False):
-    if not GEMINI_API_KEY:
+    keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
+    if not keys:
         if is_admin_private:
             return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
         return DEFAULT_FALLBACK_TEXT
 
     model_name = "gemini-3.6-flash"
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-
     headers = {"Content-Type": "application/json"}
     prompt_text = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": prompt_text}
-                ]
-            }
-        ]
-    }
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
 
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=15)
-        res_data = response.json()
+    last_error = ""
 
-        if response.status_code == 200:
-            candidates = res_data.get("candidates", [])
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
-        
-        # إظهار سبب الخطأ للـ Admin لمعرفته بشكل مباشر
-        error_info = res_data.get("error", {}).get("message", response.text)
-        if is_admin_private:
-            return f"تنبيه للأدمن (تجاوز حد الاستخدام أو خطأ):\nالسبب: {error_info}"
-        else:
-            return DEFAULT_FALLBACK_TEXT
+    for api_key in keys:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+        try:
+            response = requests.post(url, json=payload, headers=headers, timeout=12)
+            res_data = response.json()
 
-    except Exception as e:
-        if is_admin_private:
-            return f"تنبيه للأدمن (خطأ اتصال):\nالسبب: {str(e)}"
-        else:
-            return DEFAULT_FALLBACK_TEXT
+            if response.status_code == 200:
+                candidates = res_data.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+
+            last_error = res_data.get("error", {}).get("message", response.text)
+        except Exception as e:
+            last_error = str(e)
+            continue
+
+    if is_admin_private:
+        return f"تنبيه للأدمن (استنفاد مفاتيح API):\nالسبب: {last_error}"
+    return DEFAULT_FALLBACK_TEXT
 
 @app.route("/", methods=["GET"])
 def home():
@@ -116,14 +112,25 @@ def webhook():
                     send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
                     return jsonify({"status": "ok"}), 200
                 else:
-                    # الأدمن يرى سبب الخطأ
                     reply = get_gemini_response(user_message, is_admin_private=True)
                     send_telegram_message(chat_id, reply)
                     return jsonify({"status": "ok"}), 200
-            
-            # 2. المجموعة العامة (رد عادي بدون إرسال تفاصيل الخطأ البرمجي للأعضاء)
-            reply = get_gemini_response(user_message, is_admin_private=False)
-            send_telegram_message(chat_id, reply)
+
+            # 2. المحادثات في المجموعات (القروب)
+            clean_msg = user_message.strip().lower()
+            greetings = ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير", "السلام عليكم ورحمة الله"]
+
+            # الترحيب التلقائي للتحيات (بدون استهلاك API)
+            if any(g in clean_msg for g in greetings):
+                send_telegram_message(chat_id, GREETING_RESPONSE)
+                return jsonify({"status": "ok"}), 200
+
+            # لا يجيب على باقي الأسئلة إلا إذا احتوت الرسالة على المنشن
+            if BOT_USERNAME.lower() in clean_msg:
+                # إزالة المنشن من نص السؤال حتى لا يربك الذكاء الاصطناعي
+                query_text = user_message.replace(BOT_USERNAME, "").strip()
+                reply = get_gemini_response(query_text, is_admin_private=False)
+                send_telegram_message(chat_id, reply)
 
     return jsonify({"status": "ok"}), 200
 

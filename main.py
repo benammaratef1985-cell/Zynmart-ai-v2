@@ -5,7 +5,7 @@ import google.generativeai as genai
 
 app = Flask(__name__)
 
-# المتغيرات من البيئة
+# المتغيرات البيئية
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 ADMIN_ID = 7560871853  # معرف الأدمن المصرح له بالخاص
@@ -42,6 +42,9 @@ ZYNMART_PROMPT = """
 "مرحبا بيك في عائلة ZYNMART 🥳 أنا المساعد متاعكم AI for ZYNMART. تنجم تدخل للمتجر من هنا: zynmart.pages.dev ومتنساش تفعل بوت التعدين: https://t.me/zynpibot"
 """
 
+# الرسالة الاحتياطية العامة للقروب في حال فشل الذكاء الاصطناعي
+DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! يمكنكم متابعة التحديثات عبر التطبيق في Pi Browser: zynmart.pages.dev وبوت التعدين: https://t.me/zynpibot"
+
 def send_telegram_message(chat_id, text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text}
@@ -50,12 +53,19 @@ def send_telegram_message(chat_id, text):
     except Exception as e:
         print(f"Telegram Send Error: {e}")
 
-def get_gemini_response(user_message):
+def get_gemini_response(user_message, is_admin_private=False):
     if not GEMINI_API_KEY:
-        return "تنبيه: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
+        if is_admin_private:
+            return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
+        return DEFAULT_FALLBACK_TEXT
     
-    # قائمة بالنشر القياسي المعتمد لتفادي خطأ 404
-    models_to_try = ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-pro']
+    # قائمة بالنشر الحديثة والمعتمدة رسمياً
+    models_to_try = [
+        'gemini-2.5-flash',
+        'gemini-1.5-flash',
+        'gemini-2.5-pro',
+        'gemini-1.5-pro'
+    ]
     
     last_error = ""
     for model_name in models_to_try:
@@ -70,7 +80,11 @@ def get_gemini_response(user_message):
             print(f"Error with {model_name}: {e}")
             continue
             
-    return f"تنبيه من النظام: تعذر الاتصال بـ Gemini API.\nالسبب: {last_error}"
+    # في حال فشل جميع النماذج
+    if is_admin_private:
+        return f"تنبيه للأدمن (خطأ في النظام):\nالسبب: {last_error}"
+    else:
+        return DEFAULT_FALLBACK_TEXT
 
 @app.route("/", methods=["GET"])
 def home():
@@ -89,14 +103,19 @@ def webhook():
         user_message = data["message"].get("text", "")
 
         if user_message:
-            # 1. التثبت من المحادثات الخاصة (Private)
+            # 1. إذا كانت المحادثة في الخاص
             if chat_type == "private":
                 if user_id != ADMIN_ID:
                     send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
                     return jsonify({"status": "ok"}), 200
+                else:
+                    # أنت الأدمن في الخاص -> تصلك تفاصيل الخطأ لو حدث
+                    reply = get_gemini_response(user_message, is_admin_private=True)
+                    send_telegram_message(chat_id, reply)
+                    return jsonify({"status": "ok"}), 200
             
-            # 2. التفاعل بالذكاء الاصطناعي
-            reply = get_gemini_response(user_message)
+            # 2. إذا كانت المحادثة في المجموعة (أو أي مكان آخر) -> رد عادي ودون إظهار أخطاء
+            reply = get_gemini_response(user_message, is_admin_private=False)
             send_telegram_message(chat_id, reply)
 
     return jsonify({"status": "ok"}), 200

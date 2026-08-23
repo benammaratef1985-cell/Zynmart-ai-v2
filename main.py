@@ -55,7 +55,7 @@ def get_gemini_response(user_message):
         return "مرحباً بك في ZYNMART! يمكنكم متابعة التحديثات عبر التطبيق في Pi Browser: zynmart.pages.dev وبوت التعدين: https://t.me/zynpibot"
     
     try:
-        model = genai.GenerativeModel('gemini-1.5-flash')
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
         prompt = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
         response = model.generate_content(prompt)
         return response.text

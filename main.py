@@ -54,12 +54,9 @@ def get_gemini_response(user_message, is_admin_private=False):
             return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
         return DEFAULT_FALLBACK_TEXT
 
-    # النماذج الحديثة المطلوبة من جوجل رسمياً
-    models_to_try = [
-        "gemini-3.6-flash",
-        "gemini-3.1-pro-preview"
-    ]
-
+    # استخدام نموذج flash الخفيف والمستقر للخدمة المجانية
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key={GEMINI_API_KEY}"
+    
     headers = {"Content-Type": "application/json"}
     prompt_text = f"{ZYNMART_PROMPT}\n\nالمستخدم: {user_message}"
     payload = {
@@ -72,33 +69,29 @@ def get_gemini_response(user_message, is_admin_private=False):
         ]
     }
 
-    last_error = ""
-    for model_name in models_to_try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=15)
-            res_data = response.json()
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=15)
+        res_data = response.json()
 
-            if response.status_code == 200:
-                candidates = res_data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
-            
-            # تسجيل الخلل وتجربة النموذج التالي
-            error_info = res_data.get("error", {}).get("message", response.text)
-            last_error = f"{model_name} -> {error_info}"
+        if response.status_code == 200:
+            candidates = res_data.get("candidates", [])
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts", [])
+                if parts:
+                    return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+        
+        # في حال تجاوز الحدود أو حدوث خطأ
+        error_msg = res_data.get("error", {}).get("message", response.text)
+        if is_admin_private:
+            return f"تنبيه للأدمن (تجاوز حد الاستخدام أو خطأ):\nالسبب: {error_msg}"
+        else:
+            return DEFAULT_FALLBACK_TEXT
 
-        except Exception as e:
-            last_error = f"{model_name} Exception -> {str(e)}"
-            continue
-
-    # في حال فشل كل النماذج
-    if is_admin_private:
-        return f"تنبيه للأدمن (خطأ في النظام):\nالسبب: {last_error}"
-    else:
-        return DEFAULT_FALLBACK_TEXT
+    except Exception as e:
+        if is_admin_private:
+            return f"تنبيه للأدمن (خطأ اتصال):\nالسبب: {str(e)}"
+        else:
+            return DEFAULT_FALLBACK_TEXT
 
 @app.route("/", methods=["GET"])
 def home():

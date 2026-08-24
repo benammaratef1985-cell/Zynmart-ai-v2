@@ -31,7 +31,7 @@ ZYNMART_PROMPT = """
 [قواعد وقوانين الرد]
 - الأسلوب: ودود، محترم، احترافي وبسيط (بالعربية أو الدارجة التونسية السلسة).
 - تجيب بثقة وعمق على الأسئلة التقنية والمعرفية.
-- فقط إذا كان السؤال يتعلق بحساب شخصي خاص بعصو محدد أو مشكلة تنفيدية معقدة جداً تتطلب تدخل الإدارة، قل: "سؤالك مهم، دقيقة نخلي الأدمن يجاوبك".
+- فقط إذا كان السؤال يتعلق بحساب شخصي خاص بعضو محدد أو مشكلة تنفيذية معقدة جداً تتطلب تدخل الإدارة، قل: "سؤالك مهم، دقيقة نخلي الأدمن يجاوبك".
 - حافظ على الاختصار والوضوح وتجنب التكرار الطويل.
 """
 
@@ -72,7 +72,8 @@ def get_gemini_response(user_message, is_admin_private=False):
     for api_key in keys:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
         try:
-            response = requests.post(url, json=payload, headers=headers, timeout=12)
+            # رفع مهلة الانتظار إلى 30 ثانية لتلقي الإجابات التقنية الطويلة
+            response = requests.post(url, json=payload, headers=headers, timeout=30)
             res_data = response.json()
 
             if response.status_code == 200:

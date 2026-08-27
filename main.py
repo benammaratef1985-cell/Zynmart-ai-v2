@@ -13,9 +13,34 @@ BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
 GITHUB_REPO_API = "https://api.github.com/repos/zynmartpi/zynmartpi.github.io/events"
 
+# [تحديث 1/3]: رابط تطبيق Render لإنعاش السيرفر تلقائياً
+RENDER_APP_URL = "https://ai-for-zynmart.onrender.com"
+
 # قاعدة بيانات مؤقتة في الذاكرة لتخزين الأعضاء ومتابعة التحديثات
 known_users = {}  # {user_id: {"name": str, "username": str/None}}
 last_seen_github_id = None  # لتتبع آخر تحديث تم نشره من GitHub
+
+# [تحديث 2/3]: نص القوانين المعتمد لنشره دورياً كل ساعتين
+GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع Zynmart الرسمية:*
+
+حرصاً على حماية المنصة وتوفير بيئة جادة ومحترمة، نرجو من الجميع الالتزام الصارم بالقواعد التالية:
+
+1️⃣ *الجدية والاحترام:*
+المجموعة مخصصة للاستفسارات وتبادل المعرفة فقط. يُمنع السب، الإساءة، أو إثارة الفتنة. (ملاحظة: التذرع بـ "أنا أمزح" بعد إزعاج أي عضو لا يعفي صاحبه من المخالفة).
+
+2️⃣ *الأمان والهوية والروابط الرسمية:*
+• يمنع نشر الروابط الخارجية غير الرسمية أو الإعلانات التجارية.
+• *رابط المتجر الرسمي:* [zynmart.pages.dev](https://zynmart.pages.dev)
+• *رابط بوت التعدين الرسمي:* `@zynpibot`
+• يجب تعيين اسم مستخدم (@username) لحسابك، الحسابات الوهمية لا تمنح أي حماية ويتم تتبعها.
+
+3️⃣ *حماية النظام والعملة:*
+أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
+
+4️⃣ *النطاق والتطبيق:*
+تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram. للإدارة الحق في اتخاذ إجراءات فورية (حظر مؤقت/دائم) أو حظر إضافي عند محاولة الالتفاف على النظام.
+
+*هدفنا بناء مجتمع واعي، جاد وموثوق. نرحب بالجميع للتعلم والتطور معنا! 🚀*"""
 
 ZYNMART_PROMPT = """
 أنت المساعد الذكي الرسمي "AI for ZYNMART"، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
@@ -193,10 +218,30 @@ def task_check_github_updates():
     except Exception as e:
         print(f"Error checking GitHub API: {e}")
 
+# [تحديث 3/3]: دالة الإنعاش الآلي لمنع خمول سيرفر Render
+def task_keep_alive():
+    """تراسل الرابط تلقائياً لمنع السيرفر من دخول Sleep Mode"""
+    try:
+        requests.get(RENDER_APP_URL, timeout=10)
+    except Exception as e:
+        print(f"Keep-Alive Error: {e}")
+
+# [تحديث 3/3]: دالة نشر القوانين الرسمية دورياً
+def task_send_group_rules():
+    """نشر قوانين المجموعة تلقائياً كل ساعتين"""
+    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else None
+    if group_chat_id:
+        send_telegram_message(group_chat_id, GROUP_RULE_TEXT)
+
 # إعداد المجدول المكتبي لتشغيل المهام في الخلفية تلقائياً
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
 scheduler.add_job(task_check_github_updates, 'interval', minutes=10)
+
+# [تحديث 3/3]: ربط مهمة الإنعاش ومهمة نشر القوانين بالمجدول
+scheduler.add_job(task_keep_alive, 'interval', minutes=10)
+scheduler.add_job(task_send_group_rules, 'interval', hours=2)
+
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 

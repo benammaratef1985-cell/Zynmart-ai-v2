@@ -22,6 +22,9 @@ GITHUB_REPO_API = "https://api.github.com/repos/zynmartpi/zynmartpi.github.io/ev
 # [تحديث 1/3]: رابط تطبيق Render لإنعاش السيرفر تلقائياً
 RENDER_APP_URL = "https://ai-for-zynmart.onrender.com"
 
+# [إضافة حل مشكلة القوانين]: قراءة معرف القروب من البيئة إن وجد كخيار احتياطي
+DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
+
 # قاعدة بيانات مؤقتة في الذاكرة لتخزين الأعضاء ومتابعة التحديثات
 known_users = {}  # {user_id: {"name": str, "username": str/None}}
 last_seen_github_id = None  # لتتبع آخر تحديث تم نشره من GitHub
@@ -180,7 +183,7 @@ def task_check_usernames_daily():
             no_username_list.append(f"- {uinfo.get('name', 'عضو')}")
 
     if no_username_list:
-        group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else None
+        group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else DEFAULT_GROUP_CHAT_ID
         if group_chat_id:
             users_str = "\n".join(no_username_list)
             warning_msg = (
@@ -215,7 +218,7 @@ def task_check_github_updates():
                     )
                     announcement = get_gemini_response(prompt)
                     
-                    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else None
+                    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else DEFAULT_GROUP_CHAT_ID
                     if group_chat_id:
                         full_post = f"📢 **تحديث تقني جديد من GitHub!** 🚀\n\n{announcement}\n\n🌐 للمتابعة: {NEWS_URL}"
                         send_telegram_message(group_chat_id, full_post)
@@ -233,7 +236,7 @@ def task_keep_alive():
 
 def task_send_group_rules():
     """نشر قوانين المجموعة تلقائياً كل ساعتين"""
-    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else None
+    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else DEFAULT_GROUP_CHAT_ID
     if group_chat_id:
         send_telegram_message(group_chat_id, GROUP_RULE_TEXT)
 
@@ -252,6 +255,12 @@ atexit.register(lambda: scheduler.shutdown())
 @app.route("/", methods=["GET"])
 def home():
     return "AI FOR ZYNMART Bot is Live!"
+
+# [إضافة حل مضمون للنشر 100%]: مسار مجاني للربط مع UptimeRobot لضمان النشر دون نوم السيرفر
+@app.route("/send-rules", methods=["GET"])
+def trigger_rules_endpoint():
+    task_send_group_rules()
+    return "Rules Triggered Successfully", 200
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():

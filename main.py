@@ -35,7 +35,7 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 • يجب تعيين اسم مستخدم (@username) لحسابك، الحسابات الوهمية لا تمنح أي حماية ويتم تتبعها.
 
 3️⃣ *حماية النظام والعملة:*
-أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
+أي محاولة لااختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
 
 4️⃣ *النطاق والتطبيق:*
 تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram. للإدارة الحق في اتخاذ إجراءات فورية (حظر مؤقت/دائم) أو حظر إضافي عند محاولة الالتفاف على النظام.
@@ -80,7 +80,7 @@ ZYNMART_PROMPT = """
 - حافظ على الاختصار والوضوح وتجنب التكرار الطويل.
 """
 
-# رسالة الترحيب التلقائية وعرض الخدمات
+# رسالة الترحيب التلقائية وعرض الخدمات (تم تصحيح اليوزر نيم فيها)
 GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركاته! 🌸
 مرحباً بك في عائلة ZYNMART 🚀
 
@@ -103,9 +103,11 @@ def get_latest_news():
         print(f"Error fetching news site: {e}")
     return "تابعوا أحدث التحديثات والأخبار الرسمية عبر الموقع: https://zynmartpi.github.io/"
 
-def send_telegram_message(chat_id, text):
+def send_telegram_message(chat_id, text, reply_to_message_id=None):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
@@ -195,12 +197,10 @@ def task_check_github_updates():
                 latest_event = events[0]
                 event_id = latest_event.get("id")
                 
-                # إذا وجدنا تحديثاً جديداً لم يُنشر سابقاً
                 if last_seen_github_id is not None and event_id != last_seen_github_id:
                     event_type = latest_event.get("type", "Update")
                     repo_name = latest_event.get("repo", {}).get("name", "ZynMart Repo")
                     
-                    # صياغة منشور تقني واحترافي عبر Gemini
                     prompt = (
                         f"قم بصياغة منشور تقني واحترافي مشوق جداً لمجموعة تليجرام مشروع ZYNMART، "
                         f"تعلن فيه عن تحديث جديد تم إنشاؤه على GitHub الخاص بالمنصة.\n"
@@ -218,7 +218,6 @@ def task_check_github_updates():
     except Exception as e:
         print(f"Error checking GitHub API: {e}")
 
-# [تحديث 3/3]: دالة الإنعاش الآلي لمنع خمول سيرفر Render
 def task_keep_alive():
     """تراسل الرابط تلقائياً لمنع السيرفر من دخول Sleep Mode"""
     try:
@@ -226,7 +225,6 @@ def task_keep_alive():
     except Exception as e:
         print(f"Keep-Alive Error: {e}")
 
-# [تحديث 3/3]: دالة نشر القوانين الرسمية دورياً
 def task_send_group_rules():
     """نشر قوانين المجموعة تلقائياً كل ساعتين"""
     group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else None
@@ -237,8 +235,6 @@ def task_send_group_rules():
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
 scheduler.add_job(task_check_github_updates, 'interval', minutes=10)
-
-# [تحديث 3/3]: ربط مهمة الإنعاش ومهمة نشر القوانين بالمجدول
 scheduler.add_job(task_keep_alive, 'interval', minutes=10)
 scheduler.add_job(task_send_group_rules, 'interval', hours=2)
 
@@ -258,13 +254,15 @@ def webhook():
 
     data = request.get_json()
     if data and "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        chat_type = data["message"]["chat"]["type"]
-        from_user = data["message"]["from"]
+        msg_obj = data["message"]
+        chat_id = msg_obj["chat"]["id"]
+        chat_type = msg_obj["chat"]["type"]
+        from_user = msg_obj["from"]
         user_id = from_user["id"]
         first_name = from_user.get("first_name", "صديقنا")
         username = from_user.get("username")
-        user_message = data["message"].get("text", "")
+        user_message = msg_obj.get("text", "")
+        message_id = msg_obj.get("message_id")
 
         # حفظ العضو في الذاكرة للفحص الدوري
         if chat_type in ["group", "supergroup"]:
@@ -274,9 +272,9 @@ def webhook():
                 "chat_id": chat_id
             }
 
-        # المهمة 2: التعامل مع مغادرة الأعضاء وحظرهم
-        if "left_chat_member" in data["message"]:
-            left_member = data["message"]["left_chat_member"]
+        # التعامل مع مغادرة الأعضاء وحظرهم
+        if "left_chat_member" in msg_obj:
+            left_member = msg_obj["left_chat_member"]
             left_name = left_member.get("first_name", "العضو")
             left_id = left_member.get("id")
 
@@ -306,7 +304,7 @@ def webhook():
             # 2. المحادثات في المجموعات (القروب)
             clean_msg = user_message.strip().lower()
 
-            # المهمة 1 (التنبيه اللحظي عند التفاعل بدون Username)
+            # التنبيه اللحظي عند التفاعل بدون Username
             if not username and chat_type in ["group", "supergroup"]:
                 no_user_warn = (
                     f"أهلاً بك {first_name} ⚠️\n"
@@ -317,20 +315,33 @@ def webhook():
 
             greetings = ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير", "السلام عليكم ورحمة الله"]
 
-            # الترحيب التلقائي للتحيات (بدون استهلاك API)
+            # الترحيب التلقائي للتحيات
             if any(g in clean_msg for g in greetings):
                 greeting_text = f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE
                 send_telegram_message(chat_id, greeting_text)
                 return jsonify({"status": "ok"}), 200
 
-            # الرد فقط إذا احتوت الرسالة على المنشن
-            if BOT_USERNAME.lower() in clean_msg:
-                query_text = user_message.replace(BOT_USERNAME, "").strip()
-                reply = get_gemini_response(query_text, is_admin_private=False, user_name=first_name)
+            # --- فحص المنشن أو الرد على البوت ---
+            clean_bot_name = BOT_USERNAME.replace("@", "").lower()
+            
+            # فحص المنشن المباشر
+            is_mentioned = BOT_USERNAME.lower() in clean_msg
+            
+            # فحص الرد (Reply) على رسائل البوت
+            reply_to = msg_obj.get("reply_to_message", {})
+            reply_from = reply_to.get("from", {})
+            is_reply_to_bot = reply_from.get("username", "").lower() == clean_bot_name
+
+            if is_mentioned or is_reply_to_bot:
+                query_text = user_message.replace(BOT_USERNAME, "").replace(f"@{clean_bot_name}", "").strip()
+                if not query_text:
+                    query_text = user_message
                 
-                # إضافة المنشن والاسم لشد انتباه المتابعين
+                reply = get_gemini_response(query_text, is_admin_private=False, user_name=first_name)
                 formatted_reply = f"مرحباً بك {first_name} 🌟\n\n{reply}"
-                send_telegram_message(chat_id, formatted_reply)
+                
+                # إرسال الرد المباشر على رسالة العضو
+                send_telegram_message(chat_id, formatted_reply, reply_to_message_id=message_id)
 
     return jsonify({"status": "ok"}), 200
 

@@ -7,7 +7,13 @@ import atexit
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-GEMINI_API_KEYS = os.environ.get("GEMINI_API_KEY", "").split(",")
+
+# [التعديل الوحيد]: جلب كافة مفاتيح Gemini المعرفة في Render تلقائياً
+GEMINI_API_KEYS = []
+for key, val in os.environ.items():
+    if key.startswith("GEMINI_API_KEY") and val:
+        GEMINI_API_KEYS.extend([k.strip() for k in val.split(",") if k.strip()])
+
 ADMIN_ID = 7560871853
 BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
@@ -35,7 +41,7 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 • يجب تعيين اسم مستخدم (@username) لحسابك، الحسابات الوهمية لا تمنح أي حماية ويتم تتبعها.
 
 3️⃣ *حماية النظام والعملة:*
-أي محاولة لااختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
+أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
 
 4️⃣ *النطاق والتطبيق:*
 تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram. للإدارة الحق في اتخاذ إجراءات فورية (حظر مؤقت/دائم) أو حظر إضافي عند محاولة الالتفاف على النظام.

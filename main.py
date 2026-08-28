@@ -174,11 +174,11 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     latest_news = get_latest_news()
     active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
 
-    # قائمة الموديلات الحديثة والمتاحة مجاناً
+    # قائمة الموديلات المحثة والمستقرة مجاناً
     models_to_try = [
         "gemini-2.5-flash",
         "gemini-2.5-pro",
-        "gemini-1.5-flash"
+        "gemini-1.5-flash-8b"
     ]
     
     headers = {"Content-Type": "application/json"}

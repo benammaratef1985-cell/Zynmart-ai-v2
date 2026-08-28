@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -8,7 +9,7 @@ app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# [التعديل الوحيد]: جلب كافة مفاتيح Gemini المعرفة في Render تلقائياً
+# جلب كافة مفاتيح Gemini المعرفة في Render تلقائياً
 GEMINI_API_KEYS = []
 for key, val in os.environ.items():
     if key.startswith("GEMINI_API_KEY") and val:
@@ -19,17 +20,39 @@ BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
 GITHUB_REPO_API = "https://api.github.com/repos/zynmartpi/zynmartpi.github.io/events"
 
-# [تحديث 1/3]: رابط تطبيق Render لإنعاش السيرفر تلقائياً
 RENDER_APP_URL = "https://ai-for-zynmart.onrender.com"
-
-# [إضافة حل مشكلة القوانين]: قراءة معرف القروب من البيئة إن وجد كخيار احتياطي
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
 
-# قاعدة بيانات مؤقتة في الذاكرة لتخزين الأعضاء ومتابعة التحديثات
-known_users = {}  # {user_id: {"name": str, "username": str/None}}
-last_seen_github_id = None  # لتتبع آخر تحديث تم نشره من GitHub
+known_users = {}
+last_seen_github_id = None
 
-# [تحديث 2/3]: نص القوانين المعتمد لنشره دورياً كل ساعتين
+# ==================== دوال التعامل مع users.json ====================
+
+def save_users_to_file():
+    """حفظ بيانات الأعضاء في ملف users.json"""
+    try:
+        with open("users.json", "w", encoding="utf-8") as f:
+            json.dump(known_users, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"Error saving users: {e}")
+
+def load_users_from_file():
+    """قراءة بيانات الأعضاء من ملف users.json عند التشغيل"""
+    global known_users
+    try:
+        if os.path.exists("users.json"):
+            with open("users.json", "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    known_users = {int(k): v for k, v in loaded.items()}
+    except Exception as e:
+        print(f"Error loading users: {e}")
+
+# تحميل الملف فور تشغيل السيرفر
+load_users_from_file()
+
+# =================================================================
+
 GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع Zynmart الرسمية:*
 
 حرصاً على حماية المنصة وتوفير بيئة جادة ومحترمة، نرجو من الجميع الالتزام الصارم بالقواعد التالية:
@@ -89,7 +112,6 @@ ZYNMART_PROMPT = """
 - حافظ على الاختصار والوضوح وتجنب التكرار الطويل.
 """
 
-# رسالة الترحيب التلقائية وعرض الخدمات (تم تصحيح اليوزر نيم فيها)
 GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركاته! 🌸
 مرحباً بك في عائلة ZYNMART 🚀
 
@@ -103,7 +125,6 @@ GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركا�
 DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل للمتجر التفاعلي عبر Pi Browser: zynmart.pages.dev\nولبدء تعدين عملة ZYN والمهام اليومية افتح البوت: https://t.me/zynpibot\nلمتابعة أحدث الأخبار والتحديثات: https://zynmartpi.github.io/"
 
 def get_latest_news():
-    """جلب محتوى التحديثات والأخبار من موقع GitHub Pages الرسمي"""
     try:
         response = requests.get(NEWS_URL, timeout=5)
         if response.status_code == 200:
@@ -123,7 +144,6 @@ def send_telegram_message(chat_id, text, reply_to_message_id=None):
         print(f"Telegram Send Error: {e}")
 
 def ban_telegram_member(chat_id, user_id):
-    """حظر عضو من المجموعة"""
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/banChatMember"
     payload = {"chat_id": chat_id, "user_id": user_id}
     try:
@@ -172,31 +192,36 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
         return f"تنبيه للأدمن (استنفاد مفاتيح API):\nالسبب: {last_error}"
     return DEFAULT_FALLBACK_TEXT
 
-# ==================== المهام الجديدة المضافة ====================
+# ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
-    """المهمة 1: فحص واستعراض قائمة الأعضاء بدون اسم مستخدم كل 24 ساعة"""
+    """فحص ونشر أسماء الأعضاء الذين لا يملكون username دون كشف بياناتهم"""
     no_username_list = []
     
     for uid, uinfo in list(known_users.items()):
         if not uinfo.get("username"):
-            no_username_list.append(f"- {uinfo.get('name', 'عضو')}")
+            first_name = uinfo.get("name", "عضو").split()[0]
+            no_username_list.append(f"• {first_name}")
 
     if no_username_list:
-        group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else DEFAULT_GROUP_CHAT_ID
+        group_chat_id = DEFAULT_GROUP_CHAT_ID
+        for uinfo in known_users.values():
+            if uinfo.get("chat_id"):
+                group_chat_id = uinfo.get("chat_id")
+                break
+        
         if group_chat_id:
-            users_str = "\n".join(no_username_list)
+            users_str = "\n".join(no_username_list[:30])
             warning_msg = (
-                "⚠️ **تنبيه هام ومكرر (فحص 24 ساعة الدوري)**\n\n"
-                "قائمة الأعضاء الذين لا يملكون اسم مستخدم (Username):\n"
+                "⚠️ **تنبيه هام (الفحص الدوري للأعضاء)**\n\n"
+                "الأعضاء الكرام التالية أسماؤهم لا يملكون اسم مستخدم (@username):\n\n"
                 f"{users_str}\n\n"
-                "🔴 **يرجى إنشاء اسم مستخدم لحسابكم في التيليجرام فوراً!**\n"
-                "قد تتعرضون لبعض المشاكل في حسابكم المرتبط بتعدين عملة **ZYN** عند إطلاق الشبكة الرسمية في حال عدم وجود Username."
+                "📢 **يرجى إنشاء اسم مستخدم (Username) لحساباتكم فوراً!**\n"
+                "ذلك لضمان توثيق حساباتكم وحمايتها عند التفاعل مع المتجر وبوت التعدين."
             )
             send_telegram_message(group_chat_id, warning_msg)
 
 def task_check_github_updates():
-    """المهمة 3: المتابعة التلقائية وتفقّد أحداث وتحديثات GitHub"""
     global last_seen_github_id
     try:
         response = requests.get(GITHUB_REPO_API, timeout=10)
@@ -218,7 +243,11 @@ def task_check_github_updates():
                     )
                     announcement = get_gemini_response(prompt)
                     
-                    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else DEFAULT_GROUP_CHAT_ID
+                    group_chat_id = DEFAULT_GROUP_CHAT_ID
+                    for uinfo in known_users.values():
+                        if uinfo.get("chat_id"):
+                            group_chat_id = uinfo.get("chat_id")
+                            break
                     if group_chat_id:
                         full_post = f"📢 **تحديث تقني جديد من GitHub!** 🚀\n\n{announcement}\n\n🌐 للمتابعة: {NEWS_URL}"
                         send_telegram_message(group_chat_id, full_post)
@@ -228,19 +257,20 @@ def task_check_github_updates():
         print(f"Error checking GitHub API: {e}")
 
 def task_keep_alive():
-    """تراسل الرابط تلقائياً لمنع السيرفر من دخول Sleep Mode"""
     try:
         requests.get(RENDER_APP_URL, timeout=10)
     except Exception as e:
         print(f"Keep-Alive Error: {e}")
 
 def task_send_group_rules():
-    """نشر قوانين المجموعة تلقائياً كل ساعتين"""
-    group_chat_id = list(known_users.values())[0].get("chat_id") if known_users else DEFAULT_GROUP_CHAT_ID
+    group_chat_id = DEFAULT_GROUP_CHAT_ID
+    for uinfo in known_users.values():
+        if uinfo.get("chat_id"):
+            group_chat_id = uinfo.get("chat_id")
+            break
     if group_chat_id:
         send_telegram_message(group_chat_id, GROUP_RULE_TEXT)
 
-# إعداد المجدول المكتبي لتشغيل المهام في الخلفية تلقائياً
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
 scheduler.add_job(task_check_github_updates, 'interval', minutes=10)
@@ -250,17 +280,21 @@ scheduler.add_job(task_send_group_rules, 'interval', hours=2)
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
-# ===============================================================
+# ==================== المسارات والويب هوك ====================
 
 @app.route("/", methods=["GET"])
 def home():
     return "AI FOR ZYNMART Bot is Live!"
 
-# [إضافة حل مضمون للنشر 100%]: مسار مجاني للربط مع UptimeRobot لضمان النشر دون نوم السيرفر
 @app.route("/send-rules", methods=["GET"])
 def trigger_rules_endpoint():
     task_send_group_rules()
     return "Rules Triggered Successfully", 200
+
+@app.route("/check-users", methods=["GET"])
+def trigger_users_check_endpoint():
+    task_check_usernames_daily()
+    return "Users Check Triggered Successfully", 200
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
@@ -279,15 +313,14 @@ def webhook():
         user_message = msg_obj.get("text", "")
         message_id = msg_obj.get("message_id")
 
-        # حفظ العضو في الذاكرة للفحص الدوري
         if chat_type in ["group", "supergroup"]:
             known_users[user_id] = {
                 "name": first_name,
                 "username": username,
                 "chat_id": chat_id
             }
+            save_users_to_file()
 
-        # التعامل مع مغادرة الأعضاء وحظرهم
         if "left_chat_member" in msg_obj:
             left_member = msg_obj["left_chat_member"]
             left_name = left_member.get("first_name", "العضو")
@@ -303,10 +336,10 @@ def webhook():
             
             if left_id in known_users:
                 del known_users[left_id]
+                save_users_to_file()
             return jsonify({"status": "ok"}), 200
 
         if user_message:
-            # 1. المحادثات الخاصة
             if chat_type == "private":
                 if user_id != ADMIN_ID:
                     send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
@@ -316,10 +349,8 @@ def webhook():
                     send_telegram_message(chat_id, reply)
                     return jsonify({"status": "ok"}), 200
 
-            # 2. المحادثات في المجموعات (القروب)
             clean_msg = user_message.strip().lower()
 
-            # التنبيه اللحظي عند التفاعل بدون Username
             if not username and chat_type in ["group", "supergroup"]:
                 no_user_warn = (
                     f"أهلاً بك {first_name} ⚠️\n"
@@ -330,19 +361,14 @@ def webhook():
 
             greetings = ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير", "السلام عليكم ورحمة الله"]
 
-            # الترحيب التلقائي للتحيات
             if any(g in clean_msg for g in greetings):
                 greeting_text = f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE
                 send_telegram_message(chat_id, greeting_text)
                 return jsonify({"status": "ok"}), 200
 
-            # --- فحص المنشن أو الرد على البوت ---
             clean_bot_name = BOT_USERNAME.replace("@", "").lower()
-            
-            # فحص المنشن المباشر
             is_mentioned = BOT_USERNAME.lower() in clean_msg
             
-            # فحص الرد (Reply) على رسائل البوت
             reply_to = msg_obj.get("reply_to_message", {})
             reply_from = reply_to.get("from", {})
             is_reply_to_bot = reply_from.get("username", "").lower() == clean_bot_name
@@ -354,8 +380,6 @@ def webhook():
                 
                 reply = get_gemini_response(query_text, is_admin_private=False, user_name=first_name)
                 formatted_reply = f"مرحباً بك {first_name} 🌟\n\n{reply}"
-                
-                # إرسال الرد المباشر على رسالة العضو
                 send_telegram_message(chat_id, formatted_reply, reply_to_message_id=message_id)
 
     return jsonify({"status": "ok"}), 200

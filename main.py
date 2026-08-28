@@ -71,7 +71,7 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 • يجب تعيين اسم مستخدم (@username) لحسابك، الحسابات الوهمية لا تمنح أي حماية ويتم تتبعها.
 
 3️⃣ *حماية النظام والعملة:*
-أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
+أي محاولة لااختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
 
 4️⃣ *النطاق والتطبيق:*
 تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram. للإدارة الحق في اتخاذ إجراءات فورية (حظر مؤقت/دائم) أو حظر إضافي عند محاولة الالتفاف على النظام.
@@ -165,35 +165,42 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     latest_news = get_latest_news()
     active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
 
-    model_name = "gemini-3.6-flash"
-    headers = {"Content-Type": "application/json"}
+    # قائمة الموديلات التي سيتنقل بينها البوت في حال حدوث أي خطأ
+    models_to_try = [
+        "gemini-2.5-flash",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro"
+    ]
     
+    headers = {"Content-Type": "application/json"}
     context_prefix = f"اسم العضو السائل: {user_name}\n" if user_name else ""
     prompt_text = f"{active_prompt}\n\n{context_prefix}المستخدم: {user_message}"
     payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
 
     last_error = ""
 
+    # تجربة كل مفتاح API مع كل الموديلات بالترتيب
     for api_key in keys:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-        try:
-            response = requests.post(url, json=payload, headers=headers, timeout=30)
-            res_data = response.json()
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=20)
+                res_data = response.json()
 
-            if response.status_code == 200:
-                candidates = res_data.get("candidates", [])
-                if candidates:
-                    parts = candidates[0].get("content", {}).get("parts", [])
-                    if parts:
-                        return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+                if response.status_code == 200:
+                    candidates = res_data.get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
 
-            last_error = res_data.get("error", {}).get("message", response.text)
-        except Exception as e:
-            last_error = str(e)
-            continue
+                last_error = res_data.get("error", {}).get("message", response.text)
+            except Exception as e:
+                last_error = str(e)
+                continue
 
     if is_admin_private:
-        return f"تنبيه للأدمن (استنفاد مفاتيح API):\nالسبب: {last_error}"
+        return f"تنبيه للأدمن (استنفاد مفاتيح API والموديلات):\nالسبب: {last_error}"
     return DEFAULT_FALLBACK_TEXT
 
 # ==================== المهام الدوريّة ====================
@@ -238,7 +245,7 @@ def task_check_github_updates():
                     repo_name = latest_event.get("repo", {}).get("name", "ZynMart Repo")
                     
                     prompt = (
-                        f"قم بصياغة منشور تقني واحترافي مشوق جداً لمجموعة تليجرام مشروع ZYNMART، "
+                        f"قم بصياغة منشور تقني وااحترافي مشوق جداً لمجموعة تليجرام مشروع ZYNMART، "
                         f"تعلن فيه عن تحديث جديد تم إنشاؤه على GitHub الخاص بالمنصة.\n"
                         f"نوع التحديث: {event_type}\nاسم المستودع: {repo_name}\n"
                         f"اشرح بأسلوب راقٍ أن المنصة تواصل التطوير والتحديث لضمان أقصى حماية وسرعة للأرصدة والمعاملات."

@@ -9,7 +9,6 @@ app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
-# جلب كافة مفاتيح Gemini المعرفة في Render تلقائياً
 GEMINI_API_KEYS = []
 for key, val in os.environ.items():
     if key.startswith("GEMINI_API_KEY") and val:
@@ -25,6 +24,7 @@ DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
 
 known_users = {}
 last_seen_github_id = None
+active_group_chat_id = DEFAULT_GROUP_CHAT_ID
 
 # ==================== دوال التعامل مع users.json ====================
 
@@ -38,17 +38,21 @@ def save_users_to_file():
 
 def load_users_from_file():
     """قراءة بيانات الأعضاء من ملف users.json عند التشغيل"""
-    global known_users
+    global known_users, active_group_chat_id
     try:
         if os.path.exists("users.json"):
             with open("users.json", "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
-                    known_users = {int(k): v for k, v in loaded.items()}
+                    known_users = {str(k): v for k, v in loaded.items()}
+                    # البحث عن أول chat_id محفوظ
+                    for uinfo in known_users.values():
+                        if isinstance(uinfo, dict) and uinfo.get("chat_id"):
+                            active_group_chat_id = uinfo.get("chat_id")
+                            break
     except Exception as e:
         print(f"Error loading users: {e}")
 
-# تحميل الملف فور تشغيل السيرفر
 load_users_from_file()
 
 # =================================================================
@@ -196,33 +200,31 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
 
 def task_check_usernames_daily():
     """فحص ونشر أسماء الأعضاء الذين لا يملكون username دون كشف بياناتهم"""
+    global active_group_chat_id
     no_username_list = []
     
     for uid, uinfo in list(known_users.items()):
-        if not uinfo.get("username"):
-            first_name = uinfo.get("name", "عضو").split()[0]
-            no_username_list.append(f"• {first_name}")
+        if isinstance(uinfo, dict):
+            # فحص عدم وجود username أو كونه خالياً
+            uname = uinfo.get("username")
+            if not uname or uname == "None" or str(uname).strip() == "":
+                name = uinfo.get("name") or uinfo.get("first_name") or "عضو"
+                first_name = str(name).split()[0]
+                no_username_list.append(f"• {first_name}")
 
-    if no_username_list:
-        group_chat_id = DEFAULT_GROUP_CHAT_ID
-        for uinfo in known_users.values():
-            if uinfo.get("chat_id"):
-                group_chat_id = uinfo.get("chat_id")
-                break
-        
-        if group_chat_id:
-            users_str = "\n".join(no_username_list[:30])
-            warning_msg = (
-                "⚠️ **تنبيه هام (الفحص الدوري للأعضاء)**\n\n"
-                "الأعضاء الكرام التالية أسماؤهم لا يملكون اسم مستخدم (@username):\n\n"
-                f"{users_str}\n\n"
-                "📢 **يرجى إنشاء اسم مستخدم (Username) لحساباتكم فوراً!**\n"
-                "ذلك لضمان توثيق حساباتكم وحمايتها عند التفاعل مع المتجر وبوت التعدين."
-            )
-            send_telegram_message(group_chat_id, warning_msg)
+    if no_username_list and active_group_chat_id:
+        users_str = "\n".join(no_username_list[:30])
+        warning_msg = (
+            "⚠️ **تنبيه هام (الفحص الدوري للأعضاء)**\n\n"
+            "الأعضاء الكرام التالية أسماؤهم لا يملكون اسم مستخدم (@username):\n\n"
+            f"{users_str}\n\n"
+            "📢 **يرجى إنشاء اسم مستخدم (Username) لحساباتكم فوراً!**\n"
+            "ذلك لضمان توثيق حساباتكم وحمايتها عند التفاعل مع المتجر وبوت التعدين."
+        )
+        send_telegram_message(active_group_chat_id, warning_msg)
 
 def task_check_github_updates():
-    global last_seen_github_id
+    global last_seen_github_id, active_group_chat_id
     try:
         response = requests.get(GITHUB_REPO_API, timeout=10)
         if response.status_code == 200:
@@ -243,14 +245,9 @@ def task_check_github_updates():
                     )
                     announcement = get_gemini_response(prompt)
                     
-                    group_chat_id = DEFAULT_GROUP_CHAT_ID
-                    for uinfo in known_users.values():
-                        if uinfo.get("chat_id"):
-                            group_chat_id = uinfo.get("chat_id")
-                            break
-                    if group_chat_id:
+                    if active_group_chat_id:
                         full_post = f"📢 **تحديث تقني جديد من GitHub!** 🚀\n\n{announcement}\n\n🌐 للمتابعة: {NEWS_URL}"
-                        send_telegram_message(group_chat_id, full_post)
+                        send_telegram_message(active_group_chat_id, full_post)
                 
                 last_seen_github_id = event_id
     except Exception as e:
@@ -263,13 +260,8 @@ def task_keep_alive():
         print(f"Keep-Alive Error: {e}")
 
 def task_send_group_rules():
-    group_chat_id = DEFAULT_GROUP_CHAT_ID
-    for uinfo in known_users.values():
-        if uinfo.get("chat_id"):
-            group_chat_id = uinfo.get("chat_id")
-            break
-    if group_chat_id:
-        send_telegram_message(group_chat_id, GROUP_RULE_TEXT)
+    if active_group_chat_id:
+        send_telegram_message(active_group_chat_id, GROUP_RULE_TEXT)
 
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
@@ -298,6 +290,7 @@ def trigger_users_check_endpoint():
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
+    global active_group_chat_id
     if request.method == "GET":
         return "Webhook Endpoint is Active!", 200
 
@@ -314,7 +307,8 @@ def webhook():
         message_id = msg_obj.get("message_id")
 
         if chat_type in ["group", "supergroup"]:
-            known_users[user_id] = {
+            active_group_chat_id = chat_id
+            known_users[str(user_id)] = {
                 "name": first_name,
                 "username": username,
                 "chat_id": chat_id
@@ -334,8 +328,8 @@ def webhook():
             send_telegram_message(chat_id, farewell_msg)
             ban_telegram_member(chat_id, left_id)
             
-            if left_id in known_users:
-                del known_users[left_id]
+            if str(left_id) in known_users:
+                del known_users[str(left_id)]
                 save_users_to_file()
             return jsonify({"status": "ok"}), 200
 

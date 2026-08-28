@@ -17,7 +17,7 @@ for key, val in os.environ.items():
 ADMIN_ID = 7560871853
 BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
-GITHUB_REPO_API = "https://api.github.com/repos/zynmartpi/zynmartpi.github.io/events"
+GITHUB_REPO_API = "https://api.github.com/repos/benammaratef1985-cell/Zynmart-ai-v2/events"
 
 RENDER_APP_URL = "https://ai-for-zynmart.onrender.com"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
@@ -31,8 +31,12 @@ active_group_chat_id = DEFAULT_GROUP_CHAT_ID
 def save_users_to_file():
     """حفظ بيانات الأعضاء في ملف users.json"""
     try:
+        data_to_save = {
+            "active_group_chat_id": active_group_chat_id,
+            "users": known_users
+        }
         with open("users.json", "w", encoding="utf-8") as f:
-            json.dump(known_users, f, ensure_ascii=False, indent=2)
+            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"Error saving users: {e}")
 
@@ -44,11 +48,12 @@ def load_users_from_file():
             with open("users.json", "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
-                    known_users = {str(k): v for k, v in loaded.items()}
-                    for uinfo in known_users.values():
-                        if isinstance(uinfo, dict) and uinfo.get("chat_id"):
-                            active_group_chat_id = uinfo.get("chat_id")
-                            break
+                    if "users" in loaded:
+                        known_users = loaded.get("users", {})
+                        if loaded.get("active_group_chat_id"):
+                            active_group_chat_id = loaded.get("active_group_chat_id")
+                    else:
+                        known_users = {str(k): v for k, v in loaded.items()}
     except Exception as e:
         print(f"Error loading users: {e}")
 
@@ -94,7 +99,7 @@ ZYNMART_PROMPT = """
 - عمليات المتجر والشراء (Marketplace): إدارة فائقة للمنتجات والمخزون، التحقق من الرصيد الكافي قبل الشراء، وتحديث الرصيد والطلب والمخزون بشكل متناسق ومضمون دون أخطاء.
 - دورة الطلبات المكتملة: تتبع دقيق ومحمي للطلب (طلب جديد ← دفع ← شحن ← تأكيد الاستلام ← إتمام العملية) مع تحكم كامل بالصلاحيات بين البائع والمشتري.
 - الأداء وقواعد البيانات: تحسين الاستعلامات المالية والبيانات بنسبة 97.5% (39/40) لإلغاء أي بطء، مع إضافة مراقبة آلية للعمليات البطيئة لضمان أقصى سرعة.
-- جودة وااختبارات النظام: اجتياز 140 اختباراً ناجحاً من أصل 140 (100%) تغطي الحماية، المتاجر، الأرصدة، والتدفق العملياتي (Flows)، بالإضافة لنظام نشر وتحديث آمن ومستقر.
+- جودة واختبارات النظام: اجتياز 140 اختباراً ناجحاً من أصل 140 (100%) تغطي الحماية، المتاجر، الأرصدة، والتدفق العملياتي (Flows)، بالإضافة لنظام نشر وتحديث آمن ومستقر.
 
 [التحديثات والأخبار الحينية المجلوبة من الموقع الرسمي]
 {DYNAMIC_NEWS}
@@ -129,7 +134,8 @@ DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل
 
 def get_latest_news():
     try:
-        response = requests.get(NEWS_URL, timeout=5)
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(NEWS_URL, headers=headers, timeout=5)
         if response.status_code == 200:
             return response.text[:1500]
     except Exception as e:
@@ -137,6 +143,8 @@ def get_latest_news():
     return "تابعوا أحدث التحديثات والأخبار الرسمية عبر الموقع: https://zynmartpi.github.io/"
 
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
+    if not chat_id:
+        return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_to_message_id:
@@ -147,6 +155,8 @@ def send_telegram_message(chat_id, text, reply_to_message_id=None):
         print(f"Telegram Send Error: {e}")
 
 def ban_telegram_member(chat_id, user_id):
+    if not chat_id:
+        return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/banChatMember"
     payload = {"chat_id": chat_id, "user_id": user_id}
     try:
@@ -164,11 +174,11 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     latest_news = get_latest_news()
     active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
 
-    # الموديلات المعتمدة رسمياً بشبكة Gemini
+    # الأسماء الرسمية المعتمدة لدى Gemini API
     models_to_try = [
-        "gemini-2.5-flash",
         "gemini-1.5-flash",
-        "gemini-1.5-flash-latest"
+        "gemini-1.5-pro",
+        "gemini-2.0-flash"
     ]
     
     headers = {"Content-Type": "application/json"}
@@ -215,7 +225,8 @@ def task_check_usernames_daily():
                 first_name = str(name).split()[0]
                 no_username_list.append(f"• {first_name}")
 
-    if no_username_list and active_group_chat_id:
+    target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+    if no_username_list and target_chat:
         users_str = "\n".join(no_username_list[:30])
         warning_msg = (
             "⚠️ **تنبيه هام (الفحص الدوري للأعضاء)**\n\n"
@@ -224,7 +235,7 @@ def task_check_usernames_daily():
             "📢 **يرجى إنشاء اسم مستخدم (Username) لحساباتكم فوراً!**\n"
             "ذلك لضمان توثيق حساباتكم وحمايتها عند التفاعل مع المتجر وبوت التعدين."
         )
-        send_telegram_message(active_group_chat_id, warning_msg)
+        send_telegram_message(target_chat, warning_msg)
         return f"Found {len(no_username_list)} users without username. Message sent!"
     
     return f"Checked {len(known_users)} total users. Found {len(no_username_list)} without username. No message sent."
@@ -232,10 +243,11 @@ def task_check_usernames_daily():
 def task_check_github_updates():
     global last_seen_github_id, active_group_chat_id
     try:
-        response = requests.get(GITHUB_REPO_API, timeout=10)
+        headers = {"User-Agent": "ZynmartBot/1.0"}
+        response = requests.get(GITHUB_REPO_API, headers=headers, timeout=10)
         if response.status_code == 200:
             events = response.json()
-            if events:
+            if isinstance(events, list) and events:
                 latest_event = events[0]
                 event_id = latest_event.get("id")
                 
@@ -251,9 +263,10 @@ def task_check_github_updates():
                     )
                     announcement = get_gemini_response(prompt)
                     
-                    if active_group_chat_id:
+                    target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+                    if target_chat:
                         full_post = f"📢 **تحديث تقني جديد من GitHub!** 🚀\n\n{announcement}\n\n🌐 للمتابعة: {NEWS_URL}"
-                        send_telegram_message(active_group_chat_id, full_post)
+                        send_telegram_message(target_chat, full_post)
                 
                 last_seen_github_id = event_id
     except Exception as e:
@@ -266,8 +279,9 @@ def task_keep_alive():
         print(f"Keep-Alive Error: {e}")
 
 def task_send_group_rules():
-    if active_group_chat_id:
-        send_telegram_message(active_group_chat_id, GROUP_RULE_TEXT)
+    target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+    if target_chat:
+        send_telegram_message(target_chat, GROUP_RULE_TEXT)
 
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
@@ -317,7 +331,8 @@ def webhook():
             known_users[str(user_id)] = {
                 "name": first_name,
                 "username": username,
-                "chat_id": chat_id
+                "chat_id": chat_id,
+                "chat_type": chat_type
             }
             save_users_to_file()
 
@@ -351,17 +366,8 @@ def webhook():
 
             clean_msg = user_message.strip().lower()
 
-            if not username and chat_type in ["group", "supergroup"]:
-                no_user_warn = (
-                    f"أهلاً بك {first_name} ⚠️\n"
-                    f"لاحظنا أن حسابك لا يملك اسم مستخدم (Username).\n"
-                    f"يرجى إنشاء اسم مستخدم لحسابك فوراً لتجنب أي مشاكل في حسابك المرتبط بتعدين عملة ZYN عند إطلاق الشبكة الرسمية."
-                )
-                send_telegram_message(chat_id, no_user_warn)
-
             greetings = ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير", "السلام عليكم ورحمة الله"]
 
-            # الرد التلقائي بالتحية فقط إذا كانت الرسالة تحية مجردة
             if clean_msg in greetings:
                 greeting_text = f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE
                 send_telegram_message(chat_id, greeting_text)

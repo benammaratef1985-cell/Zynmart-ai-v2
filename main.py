@@ -61,7 +61,7 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 • يجب تعيين اسم مستخدم (@username) لحسابك.
 
 3️⃣ *حماية النظام والعملة:*
-أي محاولة لاختراق التطبيق أو التحايل تؤدي للحظر الدائم.
+أي محاولة لااختراق التطبيق أو التحايل تؤدي للحظر الدائم.
 
 *هدفنا بناء مجتمع واعي، جاد وموثوق! 🚀*"""
 
@@ -159,7 +159,7 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
 # ==================== المهام المجدولة ====================
 
 def task_check_usernames_daily():
-    """فحص الأعضاء ونشر القائمة فوراً عند التحديث ثم كل 24 ساعة بدون parse_mode"""
+    """فحص الأعضاء ونشر القائمة فوراً عند التحديث ثم كل 5 ساعات بدون parse_mode"""
     no_username_list = []
     target_chat_id = None
     
@@ -176,7 +176,7 @@ def task_check_usernames_daily():
     if no_username_list and target_chat_id:
         users_str = "\n".join(no_username_list)
         warning_msg = (
-            "⚠️ تنبيه هام ومكرر (فحص 24 ساعة الدوري)\n\n"
+            "⚠️ تنبيه هام ومكرر (فحص الدوري كل 5 ساعات)\n\n"
             "قائمة الأعضاء الذين لا يملكون اسم مستخدم (Username):\n"
             f"{users_str}\n\n"
             "🔴 يرجى إنشاء اسم مستخدم لحسابكم في التيليجرام فوراً!"
@@ -199,8 +199,8 @@ def task_send_group_rules():
 # إعداد المجدول المكتبي لتشغيل المهام
 scheduler = BackgroundScheduler(daemon=True)
 
-# ستعمل هذه المهمة فور رفع التحديث مباشرة (next_run_time=datetime.now()) ثم تتكرر كل 24 ساعة
-scheduler.add_job(task_check_usernames_daily, 'interval', hours=24, next_run_time=datetime.now())
+# التحديث الجديد: تعمل المهمة فور رفع الكود وتتكرر كل 5 ساعات تلقائياً
+scheduler.add_job(task_check_usernames_daily, 'interval', hours=5, next_run_time=datetime.now())
 scheduler.add_job(task_keep_alive, 'interval', minutes=10)
 scheduler.add_job(task_send_group_rules, 'interval', hours=2)
 
@@ -212,6 +212,12 @@ atexit.register(lambda: scheduler.shutdown())
 @app.route("/", methods=["GET"])
 def home():
     return "AI FOR ZYNMART Bot is Live!"
+
+# مسار لإجبار البوت على نشر القائمة يدوياً من المتصفح في أي وقت
+@app.route("/check-users", methods=["GET"])
+def trigger_users_check():
+    task_check_usernames_daily()
+    return f"Users check executed! Registered users count: {len(known_users)}", 200
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
@@ -263,6 +269,7 @@ def webhook():
 
             clean_msg = user_message.strip().lower()
 
+            # التنبيه اللحظي للعضو الذي يفتقد اسم مستخدم
             if not username and chat_type in ["group", "supergroup"]:
                 no_user_warn = f"أهلاً بك {first_name} ⚠️\nلاحظنا أن حسابك لا يملك اسم مستخدم (Username). يرجى إنشاؤه لتجنب أي مشاكل."
                 send_telegram_message(chat_id, no_user_warn, parse_mode=None)

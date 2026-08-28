@@ -164,6 +164,24 @@ def ban_telegram_member(chat_id, user_id):
     except Exception as e:
         print(f"Telegram Ban Error: {e}")
 
+def get_available_gemini_models(api_key):
+    """جلب قائمة الموديلات المتاحة والمدعومة تلقائياً"""
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
+        res = requests.get(url, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            supported_models = []
+            for m in data.get("models", []):
+                methods = m.get("supportedGenerationMethods", [])
+                if "generateContent" in methods:
+                    name = m.get("name", "").replace("models/", "")
+                    supported_models.append(name)
+            return supported_models
+    except Exception as e:
+        print(f"Error fetching models list: {e}")
+    return []
+
 def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
     if not keys:
@@ -174,14 +192,6 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     latest_news = get_latest_news()
     active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
 
-    # الموديلات الرسمية الفعالة حالياً على API v1beta
-    models_to_try = [
-        "gemini-2.5-flash",
-        "gemini-2.5-pro",
-        "gemini-2.0-flash",
-        "gemini-1.5-pro"
-    ]
-    
     headers = {"Content-Type": "application/json"}
     context_prefix = f"اسم العضو السائل: {user_name}\n" if user_name else ""
     prompt_text = f"{active_prompt}\n\n{context_prefix}المستخدم: {user_message}"
@@ -190,7 +200,13 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     last_error = ""
 
     for api_key in keys:
-        for model_name in models_to_try:
+        available_models = get_available_gemini_models(api_key)
+        
+        # قائمة احتياطية إن تعذر الجلب الآلي
+        if not available_models:
+            available_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+
+        for model_name in available_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             try:
                 response = requests.post(url, json=payload, headers=headers, timeout=20)

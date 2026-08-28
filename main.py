@@ -26,10 +26,12 @@ known_users = {}
 last_seen_github_id = None
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
 
+# ذاكرة مؤقتة للموديلات الشغالة لتفادي مهلة Gunicorn Timeout
+CACHED_WORKING_MODELS = {}
+
 # ==================== دوال التعامل مع users.json ====================
 
 def save_users_to_file():
-    """حفظ بيانات الأعضاء في ملف users.json"""
     try:
         data_to_save = {
             "active_group_chat_id": active_group_chat_id,
@@ -41,7 +43,6 @@ def save_users_to_file():
         print(f"Error saving users: {e}")
 
 def load_users_from_file():
-    """قراءة بيانات الأعضاء من ملف users.json عند التشغيل"""
     global known_users, active_group_chat_id
     try:
         if os.path.exists("users.json"):
@@ -135,7 +136,7 @@ DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل
 def get_latest_news():
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(NEWS_URL, headers=headers, timeout=5)
+        response = requests.get(NEWS_URL, headers=headers, timeout=3)
         if response.status_code == 200:
             return response.text[:1500]
     except Exception as e:
@@ -150,7 +151,7 @@ def send_telegram_message(chat_id, text, reply_to_message_id=None):
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
     try:
-        requests.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"Telegram Send Error: {e}")
 
@@ -160,15 +161,15 @@ def ban_telegram_member(chat_id, user_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/banChatMember"
     payload = {"chat_id": chat_id, "user_id": user_id}
     try:
-        requests.post(url, json=payload, timeout=10)
+        requests.post(url, json=payload, timeout=5)
     except Exception as e:
         print(f"Telegram Ban Error: {e}")
 
 def get_available_gemini_models(api_key):
-    """جلب قائمة الموديلات المتاحة والمدعومة تلقائياً"""
+    """جلب الموديلات مع مهلة استجابة قصيرة ومباشرة"""
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        res = requests.get(url, timeout=10)
+        res = requests.get(url, timeout=4)
         if res.status_code == 200:
             data = res.json()
             supported_models = []
@@ -183,6 +184,7 @@ def get_available_gemini_models(api_key):
     return []
 
 def get_gemini_response(user_message, is_admin_private=False, user_name=""):
+    global CACHED_WORKING_MODELS
     keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
     if not keys:
         if is_admin_private:
@@ -200,16 +202,17 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     last_error = ""
 
     for api_key in keys:
-        available_models = get_available_gemini_models(api_key)
-        
-        # قائمة احتياطية إن تعذر الجلب الآلي
-        if not available_models:
-            available_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
+        # استخدام الذاكرة المؤقتة إن وُجدت لمنع البطء والـ Timeout
+        models_to_try = CACHED_WORKING_MODELS.get(api_key, [])
+        if not models_to_try:
+            fetched = get_available_gemini_models(api_key)
+            models_to_try = fetched if fetched else ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
 
-        for model_name in available_models:
+        for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=20)
+                # مهلة 8 ثوان كحد أقصى لكل موديل لعدم تجاوز مهلة Render
+                response = requests.post(url, json=payload, headers=headers, timeout=8)
                 res_data = response.json()
 
                 if response.status_code == 200:
@@ -217,6 +220,8 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
                     if candidates:
                         parts = candidates[0].get("content", {}).get("parts", [])
                         if parts:
+                            # حفظ الموديل الشغال في الذاكرة للطلبات القادمة
+                            CACHED_WORKING_MODELS[api_key] = [model_name]
                             return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
 
                 last_error = res_data.get("error", {}).get("message", response.text)
@@ -261,7 +266,7 @@ def task_check_github_updates():
     global last_seen_github_id, active_group_chat_id
     try:
         headers = {"User-Agent": "ZynmartBot/1.0"}
-        response = requests.get(GITHUB_REPO_API, headers=headers, timeout=10)
+        response = requests.get(GITHUB_REPO_API, headers=headers, timeout=5)
         if response.status_code == 200:
             events = response.json()
             if isinstance(events, list) and events:
@@ -291,7 +296,7 @@ def task_check_github_updates():
 
 def task_keep_alive():
     try:
-        requests.get(RENDER_APP_URL, timeout=10)
+        requests.get(RENDER_APP_URL, timeout=5)
     except Exception as e:
         print(f"Keep-Alive Error: {e}")
 

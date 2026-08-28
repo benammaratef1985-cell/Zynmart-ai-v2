@@ -45,7 +45,6 @@ def load_users_from_file():
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
                     known_users = {str(k): v for k, v in loaded.items()}
-                    # البحث عن أول chat_id محفوظ
                     for uinfo in known_users.values():
                         if isinstance(uinfo, dict) and uinfo.get("chat_id"):
                             active_group_chat_id = uinfo.get("chat_id")
@@ -71,7 +70,7 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 • يجب تعيين اسم مستخدم (@username) لحسابك، الحسابات الوهمية لا تمنح أي حماية ويتم تتبعها.
 
 3️⃣ *حماية النظام والعملة:*
-أي محاولة لااختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
+أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
 
 4️⃣ *النطاق والتطبيق:*
 تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram. للإدارة الحق في اتخاذ إجراءات فورية (حظر مؤقت/دائم) أو حظر إضافي عند محاولة الالتفاف على النظام.
@@ -165,11 +164,11 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
     latest_news = get_latest_news()
     active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
 
-    # قائمة الموديلات التي سيتنقل بينها البوت في حال حدوث أي خطأ
+    # الموديلات المعتمدة رسمياً بشبكة Gemini
     models_to_try = [
         "gemini-2.5-flash",
         "gemini-1.5-flash",
-        "gemini-1.5-pro"
+        "gemini-1.5-flash-latest"
     ]
     
     headers = {"Content-Type": "application/json"}
@@ -179,7 +178,6 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
 
     last_error = ""
 
-    # تجربة كل مفتاح API مع كل الموديلات بالترتيب
     for api_key in keys:
         for model_name in models_to_try:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
@@ -200,19 +198,17 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
                 continue
 
     if is_admin_private:
-        return f"تنبيه للأدمن (استنفاد مفاتيح API والموديلات):\nالسبب: {last_error}"
+        return f"تنبيه للأدمن (استنفاد كافة المفاتيح والموديلات):\nالسبب: {last_error}"
     return DEFAULT_FALLBACK_TEXT
 
 # ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
-    """فحص ونشر أسماء الأعضاء الذين لا يملكون username دون كشف بياناتهم"""
     global active_group_chat_id
     no_username_list = []
     
     for uid, uinfo in list(known_users.items()):
         if isinstance(uinfo, dict):
-            # فحص عدم وجود username أو كونه خالياً
             uname = uinfo.get("username")
             if not uname or uname == "None" or str(uname).strip() == "":
                 name = uinfo.get("name") or uinfo.get("first_name") or "عضو"
@@ -229,6 +225,9 @@ def task_check_usernames_daily():
             "ذلك لضمان توثيق حساباتكم وحمايتها عند التفاعل مع المتجر وبوت التعدين."
         )
         send_telegram_message(active_group_chat_id, warning_msg)
+        return f"Found {len(no_username_list)} users without username. Message sent!"
+    
+    return f"Checked {len(known_users)} total users. Found {len(no_username_list)} without username. No message sent."
 
 def task_check_github_updates():
     global last_seen_github_id, active_group_chat_id
@@ -245,7 +244,7 @@ def task_check_github_updates():
                     repo_name = latest_event.get("repo", {}).get("name", "ZynMart Repo")
                     
                     prompt = (
-                        f"قم بصياغة منشور تقني وااحترافي مشوق جداً لمجموعة تليجرام مشروع ZYNMART، "
+                        f"قم بصياغة منشور تقني واحترافي مشوق جداً لمجموعة تليجرام مشروع ZYNMART، "
                         f"تعلن فيه عن تحديث جديد تم إنشاؤه على GitHub الخاص بالمنصة.\n"
                         f"نوع التحديث: {event_type}\nاسم المستودع: {repo_name}\n"
                         f"اشرح بأسلوب راقٍ أن المنصة تواصل التطوير والتحديث لضمان أقصى حماية وسرعة للأرصدة والمعاملات."
@@ -292,8 +291,8 @@ def trigger_rules_endpoint():
 
 @app.route("/check-users", methods=["GET"])
 def trigger_users_check_endpoint():
-    task_check_usernames_daily()
-    return "Users Check Triggered Successfully", 200
+    result_status = task_check_usernames_daily()
+    return f"Check Result: {result_status}", 200
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
@@ -362,7 +361,8 @@ def webhook():
 
             greetings = ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير", "السلام عليكم ورحمة الله"]
 
-            if any(g in clean_msg for g in greetings):
+            # الرد التلقائي بالتحية فقط إذا كانت الرسالة تحية مجردة
+            if clean_msg in greetings:
                 greeting_text = f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE
                 send_telegram_message(chat_id, greeting_text)
                 return jsonify({"status": "ok"}), 200

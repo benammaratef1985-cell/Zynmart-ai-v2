@@ -45,12 +45,20 @@ def load_users_from_file():
             with open("users.json", "r", encoding="utf-8") as f:
                 loaded = json.load(f)
                 if isinstance(loaded, dict):
-                    if "users" in loaded:
+                    if "users" in loaded and isinstance(loaded["users"], dict):
                         known_users = loaded.get("users", {})
                         if loaded.get("active_group_chat_id"):
                             active_group_chat_id = loaded.get("active_group_chat_id")
                     else:
-                        known_users = {str(k): v for k, v in loaded.items()}
+                        # دعم ملفات users.json القديمة المباشرة
+                        for k, v in loaded.items():
+                            if k == "active_group_chat_id":
+                                active_group_chat_id = str(v)
+                                continue
+                            if isinstance(v, dict):
+                                known_users[str(k)] = v
+                            else:
+                                known_users[str(k)] = {"name": str(v), "username": None}
     except Exception as e:
         print(f"Error loading users: {e}")
 
@@ -145,7 +153,6 @@ def search_duckduckgo(query):
     return ""
 
 def get_hermes_response(user_message, user_name=""):
-    """دالة Hermes المحسنة لمنع التخمين والرموز الصينية"""
     if not HERMES_API_KEY:
         return None
 
@@ -190,7 +197,6 @@ def get_hermes_response(user_message, user_name=""):
     return None
 
 def get_gemini_response(user_message, is_admin_private=False, user_name=""):
-    """دالة Gemini الاحتياطية"""
     keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
     if not keys:
         return DEFAULT_FALLBACK_TEXT
@@ -224,15 +230,17 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
 
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
     if not chat_id:
-        return
+        return False
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     if reply_to_message_id:
         payload["reply_to_message_id"] = reply_to_message_id
     try:
-        requests.post(url, json=payload, timeout=5)
+        res = requests.post(url, json=payload, timeout=5)
+        return res.status_code == 200
     except Exception as e:
         print(f"Telegram Send Error: {e}")
+        return False
 
 def ban_telegram_member(chat_id, user_id):
     if not chat_id:
@@ -247,15 +255,18 @@ def ban_telegram_member(chat_id, user_id):
 # ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
-    """مهمة إرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم"""
+    """تجهيز وإرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم"""
     global active_group_chat_id
     no_username_list = []
+    
     for uid, uinfo in list(known_users.items()):
         if isinstance(uinfo, dict):
             uname = uinfo.get("username")
-            if not uname or uname == "None" or str(uname).strip() == "":
+            if not uname or str(uname).strip().lower() in ["none", "null", ""]:
                 name = uinfo.get("name") or "عضو"
                 no_username_list.append(f"• {str(name).split()[0]}")
+        elif isinstance(uinfo, str):
+            no_username_list.append(f"• {uinfo.split()[0]}")
 
     target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
     if no_username_list and target_chat:
@@ -266,7 +277,8 @@ def task_check_usernames_daily():
             f"{users_str}\n\n"
             "📢 **يرجى إنشاء اسم مستخدم لحساباتكم فوراً لحماية بياناتكم!**"
         )
-        send_telegram_message(target_chat, warning_msg)
+        return send_telegram_message(target_chat, warning_msg)
+    return False
 
 def task_keep_alive():
     try:
@@ -277,7 +289,8 @@ def task_keep_alive():
 def task_send_group_rules():
     target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
     if target_chat:
-        send_telegram_message(target_chat, GROUP_RULE_TEXT)
+        return send_telegram_message(target_chat, GROUP_RULE_TEXT)
+    return False
 
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
@@ -291,13 +304,19 @@ atexit.register(lambda: scheduler.shutdown())
 
 @app.route("/", methods=["GET"])
 def home():
-    return "AI FOR ZYNMART Bot is Live with Hermes Agent!"
+    """عند فتح الرابط المباشر يتم إرسال القوانين للقروب فوراً"""
+    sent = task_send_group_rules()
+    if sent:
+        return "AI FOR ZYNMART Bot is Live! Group rules sent successfully.", 200
+    return "AI FOR ZYNMART Bot is Live! Waiting for group Chat ID...", 200
 
 @app.route("/test-usernames", methods=["GET"])
 def test_usernames():
     """مسار لاختبار إرسال قائمة الأعضاء فوراً من المتصفح"""
-    task_check_usernames_daily()
-    return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
+    sent = task_check_usernames_daily()
+    if sent:
+        return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
+    return "لم يتم إرسال القائمة (إما لا توجد أسماء ناقصة أو لم يتم تحديد Chat ID)", 200
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
@@ -311,7 +330,7 @@ def webhook():
         chat_id = msg_obj["chat"]["id"]
         chat_type = msg_obj["chat"]["type"]
         from_user = msg_obj["from"]
-        user_id = from_user["id"]
+        user_id = str(from_user["id"])
         first_name = from_user.get("first_name", "صديقنا")
         username = from_user.get("username")
         user_message = msg_obj.get("text", "")
@@ -319,11 +338,26 @@ def webhook():
 
         if chat_type in ["group", "supergroup"]:
             active_group_chat_id = chat_id
-            known_users[str(user_id)] = {
+            
+            # تسجيل العضو الجديد أو تحديث بيانات العضو الحالي
+            # إذا قام بإنشاء اسم مستخدم يتم حفظه وبالتالي إزالته تلقائياً من قائمة التنبيهات
+            known_users[user_id] = {
                 "name": first_name,
-                "username": username,
+                "username": username if username else None,
                 "chat_id": chat_id
             }
+            save_users_to_file()
+
+        if "new_chat_members" in msg_obj:
+            for new_member in msg_obj["new_chat_members"]:
+                nm_id = str(new_member["id"])
+                nm_name = new_member.get("first_name", "عضو")
+                nm_user = new_member.get("username")
+                known_users[nm_id] = {
+                    "name": nm_name,
+                    "username": nm_user if nm_user else None,
+                    "chat_id": chat_id
+                }
             save_users_to_file()
 
         if "left_chat_member" in msg_obj:
@@ -337,7 +371,7 @@ def webhook():
             return jsonify({"status": "ok"}), 200
 
         if user_message:
-            if chat_type == "private" and user_id != ADMIN_ID:
+            if chat_type == "private" and int(user_id) != ADMIN_ID:
                 send_telegram_message(chat_id, "عذراً، الخاص مخصص للإدارة فقط. يرجى التواصل في القروب 🙏")
                 return jsonify({"status": "ok"}), 200
 
@@ -359,7 +393,7 @@ def webhook():
                 reply = get_hermes_response(query_text, user_name=first_name)
                 
                 if not reply:
-                    reply = get_gemini_response(query_text, is_admin_private=(user_id == ADMIN_ID), user_name=first_name)
+                    reply = get_gemini_response(query_text, is_admin_private=(int(user_id) == ADMIN_ID), user_name=first_name)
 
                 formatted_reply = f"مرحباً بك {first_name} 🌟\n\n{reply}"
                 send_telegram_message(chat_id, formatted_reply, reply_to_message_id=message_id)

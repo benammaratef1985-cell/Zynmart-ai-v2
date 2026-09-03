@@ -18,16 +18,12 @@ for key, val in os.environ.items():
 ADMIN_ID = 7560871853
 BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
-GITHUB_REPO_API = "https://api.github.com/repos/benammaratef1985-cell/Zynmart-ai-v2/events"
 
 RENDER_APP_URL = "https://ai-for-zynmart.onrender.com"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
 
 known_users = {}
-last_seen_github_id = None
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
-
-CACHED_WORKING_MODELS = {}
 
 # ==================== دوال التعامل مع users.json ====================
 
@@ -60,7 +56,7 @@ def load_users_from_file():
 
 load_users_from_file()
 
-# =================================================================
+# ==================== القواعد والبرومبت ====================
 
 GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع Zynmart الرسمية:*
 
@@ -84,9 +80,9 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 *هدفنا بناء مجتمع واعي، جاد وموثوق! 🚀*"""
 
 ZYNMART_PROMPT = """
-أنت المساعد الذكي الرسمي "AI for ZYNMART" (مدعوم بـ Hermes Agent)، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
+أنت المساعد الذكي الرسمي "AI for ZYNMART"، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
 
-[معلومات المشروع والمنظومة]
+[حقائق ومعلومات المشروع الرسمية - التزم بها بنسبة 100% ولا تخترع أي معلومة خارجية]:
 - اسم المنصة/المتجر: ZYNMART (سوق عالمي مرخص ومتكامل ضمن شبكة Pi Network).
 - صاحب المشروع: صالح التونسي.
 - مطور التطبيق: أيوب.
@@ -98,11 +94,12 @@ ZYNMART_PROMPT = """
 [التحديثات والأخبار الحينية المجلوبة تلقائياً]
 {DYNAMIC_NEWS}
 
-[مهامك وأسلوب الرد]
-1. توجيه الإجابة بأسلوب ذكي وجذاب يبدأ بالترحيب باسم العضو السائل.
-2. استخدام مهاراتك الذكية كـ Agent لتقديم إجابات دقيقة ومدعومة بالمعلومات.
+[قواعد صارمة للإجابة]:
+1. أجب بأسلوب ذكي وجذاب يبدأ بالترحيب باسم العضو السائل.
+2. التزم فقط بالحقائق المذكورة أعلاه. إذا سُئلت عن شيء لا تملك عنه معلومة مؤكدة، صرّح بوضوح أنك لا تملك المعلومة ووجّه المستخدم للموقع الرسمي.
 3. التوجيه الدائم لرواد المتجر نحو رابط Pi Browser وبوت التعدين الرسمي.
-4. الإجابة على الاستفسارات التقنية المتعلقة بالبلوكشين والعقود الذكية بأسلوب موثوق ومبسط.
+4. يمنع منعاً باتاً اختراع أسماء، تواريخ، أو ميزات غير موجودة في التعليمات.
+5. أجب باللغة العربية الفصحى أو التونسية المبسطة فقط، ويُمنع تماماً استخدام أي رموز أو لغات أجنبية غير مفهومة.
 """
 
 GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركاته! 🌸
@@ -117,6 +114,8 @@ GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركا�
 
 DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل للمتجر التفاعلي عبر Pi Browser: http://zynmart3401.pinet.com\nولبدء تعدين عملة ZYN والمهام اليومية افتح البوت: https://t.me/zynpibot"
 
+# ==================== دوال المعالجة والبحث ====================
+
 def get_latest_news():
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -128,7 +127,6 @@ def get_latest_news():
     return "تابعوا أحدث التحديثات عبر الموقع الرسمي: https://zynmartpi.github.io/"
 
 def search_duckduckgo(query):
-    """وظيفة البحث الخارجي لـ Hermes Agent لجلب الدلائل والحقائق من الويب"""
     try:
         url = f"https://html.duckduckgo.com/html/?q={query}"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -141,13 +139,13 @@ def search_duckduckgo(query):
                 if results:
                     return "\n".join(results)
             except ImportError:
-                print("bs4 library not installed, skipping html parsing.")
+                print("bs4 library not installed.")
     except Exception as e:
         print(f"Web Search Error: {e}")
     return ""
 
 def get_hermes_response(user_message, user_name=""):
-    """دالة Hermes Agent الرئيسية (تجيب أولاً)"""
+    """دالة Hermes المحسنة لمنع التخمين والرموز الصينية"""
     if not HERMES_API_KEY:
         return None
 
@@ -157,7 +155,7 @@ def get_hermes_response(user_message, user_name=""):
         
         system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
         if web_info:
-            system_prompt += f"\n\n[معلومات إضافية مجلوبة من البحث الخارجي]:\n{web_info}"
+            system_prompt += f"\n\n[معلومات من البحث الخارجي]:\n{web_info}"
 
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
@@ -170,20 +168,29 @@ def get_hermes_response(user_message, user_name=""):
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"اسم العضو: {user_name}\nالرسالة: {user_message}"}
-            ]
+            ],
+            "temperature": 0.2,
+            "top_p": 0.8,
+            "max_tokens": 600
         }
 
         response = requests.post(url, json=payload, headers=headers, timeout=10)
         if response.status_code == 200:
             res_data = response.json()
-            return res_data['choices'][0]['message']['content']
+            reply_text = res_data['choices'][0]['message']['content']
+            
+            if any('\u4e00' <= char <= '\u9fff' for char in reply_text):
+                print("Hermes returned Chinese. Fallback to Gemini.")
+                return None
+                
+            return reply_text
     except Exception as e:
         print(f"Hermes Agent Error: {e}")
     
     return None
 
 def get_gemini_response(user_message, is_admin_private=False, user_name=""):
-    """دالة Gemini الاحتياطية (تستدعى عند تعذر Hermes)"""
+    """دالة Gemini الاحتياطية"""
     keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
     if not keys:
         return DEFAULT_FALLBACK_TEXT
@@ -193,7 +200,10 @@ def get_gemini_response(user_message, is_admin_private=False, user_name=""):
 
     headers = {"Content-Type": "application/json"}
     prompt_text = f"{active_prompt}\n\nاسم العضو: {user_name}\nالمستخدم: {user_message}"
-    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+    payload = {
+        "contents": [{"parts": [{"text": prompt_text}]}],
+        "generationConfig": {"temperature": 0.2}
+    }
 
     for api_key in keys:
         models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
@@ -237,6 +247,7 @@ def ban_telegram_member(chat_id, user_id):
 # ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
+    """مهمة إرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم"""
     global active_group_chat_id
     no_username_list = []
     for uid, uinfo in list(known_users.items()):
@@ -339,10 +350,8 @@ def webhook():
                 if not query_text:
                     query_text = user_message
 
-                # 1. محاولة الرد عبر Hermes Agent أولاً
                 reply = get_hermes_response(query_text, user_name=first_name)
                 
-                # 2. التراجع لـ Gemini تلقائياً إذا تعذر Hermes
                 if not reply:
                     reply = get_gemini_response(query_text, is_admin_private=(user_id == ADMIN_ID), user_name=first_name)
 

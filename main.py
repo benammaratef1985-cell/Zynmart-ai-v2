@@ -254,7 +254,7 @@ def ban_telegram_member(chat_id, user_id):
 # ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
-    """تجهيز وإرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم (الاسم الأول فقط)"""
+    """تجهيز وإرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم"""
     global active_group_chat_id
     no_username_list = []
     
@@ -303,15 +303,20 @@ atexit.register(lambda: scheduler.shutdown())
 
 @app.route("/", methods=["GET"])
 def home():
-    """إرسال القوانين للمجموعة فوراً عند زيارة الرابط"""
+    """مسار خفيف لا يرسل رسائل لتأمين UptimeRobot"""
+    return "AI FOR ZYNMART Bot is Live and Running!", 200
+
+@app.route("/send-rules", methods=["GET"])
+def trigger_send_rules():
+    """مسار يتيح لك إرسال القوانين للمجموعة فوراً من المتصفح"""
     sent = task_send_group_rules()
     if sent:
-        return "AI FOR ZYNMART Bot is Live! Group rules sent successfully.", 200
-    return "AI FOR ZYNMART Bot is Live! Waiting for group Chat ID...", 200
+        return "تم إرسال القوانين للقروب بنجاح!", 200
+    return "فشل إرسال القوانين (تأكد من وجود Chat ID)", 200
 
 @app.route("/test-usernames", methods=["GET"])
 def test_usernames():
-    """إرسال قائمة الأسماء الناقصة للمجموعة فوراً"""
+    """مسار يتيح لك إرسال قائمة الأعضاء فوراً من المتصفح"""
     sent = task_check_usernames_daily()
     if sent:
         return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
@@ -338,7 +343,6 @@ def webhook():
         if chat_type in ["group", "supergroup"]:
             active_group_chat_id = chat_id
             
-            # تسجيل العضو وتحديث بياناته فورياً (استبعاده إن أنشأ username)
             known_users[user_id] = {
                 "name": first_name,
                 "username": username if username else None,

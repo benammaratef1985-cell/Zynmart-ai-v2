@@ -287,11 +287,17 @@ scheduler.add_job(task_send_group_rules, 'interval', hours=2)
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
-# ==================== الويب هوك ====================
+# ==================== الويب هوك والمسارات ====================
 
 @app.route("/", methods=["GET"])
 def home():
     return "AI FOR ZYNMART Bot is Live with Hermes Agent!"
+
+@app.route("/test-usernames", methods=["GET"])
+def test_usernames():
+    """مسار لاختبار إرسال قائمة الأعضاء فوراً من المتصفح"""
+    task_check_usernames_daily()
+    return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():

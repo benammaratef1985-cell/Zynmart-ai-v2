@@ -136,8 +136,11 @@ def get_latest_news():
 def search_duckduckgo(query):
     try:
         url = f"https://html.duckduckgo.com/html/?q={query}"
-        headers = {"User-Agent": "Mozilla/5.0"}
-        res = requests.get(url, headers=headers, timeout=4)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+        }
+        # تم رفع المهلة إلى 8 ثوانٍ لمنع انتهاء الوقت
+        res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             try:
                 from bs4 import BeautifulSoup
@@ -148,7 +151,8 @@ def search_duckduckgo(query):
             except ImportError:
                 print("bs4 library not installed.")
     except Exception as e:
-        print(f"Web Search Error: {e}")
+        # التقاط الخطأ بهدوء دون تعطيل السيرفر
+        print(f"تنبيه: تعذر جلب نتائج DuckDuckGo ({e})")
     return ""
 
 def get_hermes_response(user_message, user_name=""):
@@ -322,13 +326,15 @@ def test_usernames():
         return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
     return "لم يتم إرسال القائمة (إما لا توجد أسماء ناقصة أو لم يتم تحديد Chat ID)", 200
 
-@app.route("/webhook", methods=["POST", "GET"])
+@app.route("/webhook", methods=["POST", "GET", "HEAD"])
 def webhook():
     global active_group_chat_id
-    if request.method == "GET":
+    
+    # دعم طلبات HEAD و GET لمنع أخطاء UptimeRobot (خطأ 415)
+    if request.method in ["GET", "HEAD"]:
         return "Webhook Endpoint Active!", 200
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
     if data and "message" in data:
         msg_obj = data["message"]
         chat_id = msg_obj["chat"]["id"]

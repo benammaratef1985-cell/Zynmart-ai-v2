@@ -50,7 +50,6 @@ def load_users_from_file():
                         if loaded.get("active_group_chat_id"):
                             active_group_chat_id = loaded.get("active_group_chat_id")
                     else:
-                        # دعم ملفات users.json القديمة المباشرة
                         for k, v in loaded.items():
                             if k == "active_group_chat_id":
                                 active_group_chat_id = str(v)
@@ -255,7 +254,7 @@ def ban_telegram_member(chat_id, user_id):
 # ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
-    """تجهيز وإرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم"""
+    """تجهيز وإرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم (الاسم الأول فقط)"""
     global active_group_chat_id
     no_username_list = []
     
@@ -304,7 +303,7 @@ atexit.register(lambda: scheduler.shutdown())
 
 @app.route("/", methods=["GET"])
 def home():
-    """عند فتح الرابط المباشر يتم إرسال القوانين للقروب فوراً"""
+    """إرسال القوانين للمجموعة فوراً عند زيارة الرابط"""
     sent = task_send_group_rules()
     if sent:
         return "AI FOR ZYNMART Bot is Live! Group rules sent successfully.", 200
@@ -312,7 +311,7 @@ def home():
 
 @app.route("/test-usernames", methods=["GET"])
 def test_usernames():
-    """مسار لاختبار إرسال قائمة الأعضاء فوراً من المتصفح"""
+    """إرسال قائمة الأسماء الناقصة للمجموعة فوراً"""
     sent = task_check_usernames_daily()
     if sent:
         return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
@@ -339,8 +338,7 @@ def webhook():
         if chat_type in ["group", "supergroup"]:
             active_group_chat_id = chat_id
             
-            # تسجيل العضو الجديد أو تحديث بيانات العضو الحالي
-            # إذا قام بإنشاء اسم مستخدم يتم حفظه وبالتالي إزالته تلقائياً من قائمة التنبيهات
+            # تسجيل العضو وتحديث بياناته فورياً (استبعاده إن أنشأ username)
             known_users[user_id] = {
                 "name": first_name,
                 "username": username if username else None,

@@ -139,7 +139,6 @@ def search_duckduckgo(query):
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
         }
-        # تم رفع المهلة إلى 8 ثوانٍ لمنع انتهاء الوقت
         res = requests.get(url, headers=headers, timeout=8)
         if res.status_code == 200:
             try:
@@ -151,7 +150,6 @@ def search_duckduckgo(query):
             except ImportError:
                 print("bs4 library not installed.")
     except Exception as e:
-        # التقاط الخطأ بهدوء دون تعطيل السيرفر
         print(f"تنبيه: تعذر جلب نتائج DuckDuckGo ({e})")
     return ""
 
@@ -249,7 +247,7 @@ def ban_telegram_member(chat_id, user_id):
     if not chat_id:
         return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/banChatMember"
-    payload = {"chat_id": chat_id, "user_id": user_id}
+    payload = {"chat_id": chat_id, "user_id": int(user_id)}
     try:
         requests.post(url, json=payload, timeout=5)
     except Exception as e:
@@ -285,7 +283,7 @@ def task_check_usernames_daily():
 
 def task_keep_alive():
     try:
-        requests.get(RENDER_APP_URL, timeout=5)
+        requests.get(f"{RENDER_APP_URL}/", timeout=5)
     except Exception as e:
         print(f"Keep-Alive Error: {e}")
 
@@ -305,22 +303,20 @@ atexit.register(lambda: scheduler.shutdown())
 
 # ==================== الويب هوك والمسارات ====================
 
-@app.route("/", methods=["GET"])
+@app.route("/", methods=["GET", "HEAD"])
 def home():
-    """مسار خفيف لا يرسل رسائل لتأمين UptimeRobot"""
+    """مسار خفيف لا يرسل رسائل لتأمين UptimeRobot و Render Keep-Alive"""
     return "AI FOR ZYNMART Bot is Live and Running!", 200
 
 @app.route("/send-rules", methods=["GET"])
 def trigger_send_rules():
-    """مسار يتيح لك إرسال القوانين للمجموعة فوراً من المتصفح"""
     sent = task_send_group_rules()
     if sent:
         return "تم إرسال القوانين للقروب بنجاح!", 200
-    return "فشل إرسال القوانين (تأكد من وجود Chat ID)", 200
+    return "فشل إرسال القوانين (تأكد من وجود Chat ID في البيئة)", 200
 
 @app.route("/test-usernames", methods=["GET"])
 def test_usernames():
-    """مسار يتيح لك إرسال قائمة الأعضاء فوراً من المتصفح"""
     sent = task_check_usernames_daily()
     if sent:
         return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
@@ -330,7 +326,6 @@ def test_usernames():
 def webhook():
     global active_group_chat_id
     
-    # دعم طلبات HEAD و GET لمنع أخطاء UptimeRobot (خطأ 415)
     if request.method in ["GET", "HEAD"]:
         return "Webhook Endpoint Active!", 200
 

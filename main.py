@@ -8,6 +8,7 @@ import atexit
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+HERMES_API_KEY = os.environ.get("HERMES_API_KEY")
 
 GEMINI_API_KEYS = []
 for key, val in os.environ.items():
@@ -26,7 +27,6 @@ known_users = {}
 last_seen_github_id = None
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
 
-# ذاكرة مؤقتة للموديلات الشغالة لتفادي مهلة Gunicorn Timeout
 CACHED_WORKING_MODELS = {}
 
 # ==================== دوال التعامل مع users.json ====================
@@ -67,81 +67,150 @@ GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع
 حرصاً على حماية المنصة وتوفير بيئة جادة ومحترمة، نرجو من الجميع الالتزام الصارم بالقواعد التالية:
 
 1️⃣ *الجدية والاحترام:*
-المجموعة مخصصة للاستفسارات وتبادل المعرفة فقط. يُمنع السب، الإساءة، أو إثارة الفتنة. (ملاحظة: التذرع بـ "أنا أمزح" بعد إزعاج أي عضو لا يعفي صاحبه من المخالفة).
+المجموعة مخصصة للاستفسارات وتبادل المعرفة فقط. يُمنع السب، الإساءة، أو إثارة الفتنة.
 
 2️⃣ *الأمان والهوية والروابط الرسمية:*
 • يمنع نشر الروابط الخارجية غير الرسمية أو الإعلانات التجارية.
-• *رابط المتجر الرسمي:* [zynmart.pages.dev](https://zynmart.pages.dev)
+• *رابط المتجر الرسمي على Pi Browser:* http://zynmart3401.pinet.com
 • *رابط بوت التعدين الرسمي:* `@zynpibot`
-• يجب تعيين اسم مستخدم (@username) لحسابك، الحسابات الوهمية لا تمنح أي حماية ويتم تتبعها.
+• يجب تعيين اسم مستخدم (@username) لحسابك.
 
 3️⃣ *حماية النظام والعملة:*
-أي محاولة لااختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN مع حظر الجهاز بالكامل.
+أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN.
 
 4️⃣ *النطاق والتطبيق:*
-تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram. للإدارة الحق في اتخاذ إجراءات فورية (حظر مؤقت/دائم) أو حظر إضافي عند محاولة الالتفاف على النظام.
+تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram.
 
-*هدفنا بناء مجتمع واعي، جاد وموثوق. نرحب بالجميع للتعلم والتطور معنا! 🚀*"""
+*هدفنا بناء مجتمع واعي، جاد وموثوق! 🚀*"""
 
 ZYNMART_PROMPT = """
-أنت المساعد الذكي الرسمي "AI for ZYNMART"، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
+أنت المساعد الذكي الرسمي "AI for ZYNMART" (مدعوم بـ Hermes Agent)، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
 
 [معلومات المشروع والمنظومة]
 - اسم المنصة/المتجر: ZYNMART (سوق عالمي مرخص ومتكامل ضمن شبكة Pi Network).
 - صاحب المشروع: صالح التونسي.
 - مطور التطبيق: أيوب.
-- العملة الرسمية للمتجر: ZYN (حالية في انتظار Testnet الخاص بـ Pi Network في الماينت).
-- رابط المتجر التطبيقي: zynmart.pages.dev (يفتح حصرياً داخل Pi Browser عبر الرابط: zynmart.pages.dev).
-- رابط بوت التعدين: https://t.me/zynpibot (تذكر الأعضاء بتفعيل بوت التعدين والمهام اليومية).
+- العملة الرسمية للمتجر: ZYN.
+- رابط المتجر التطبيقي: يفتح حصرياً داخل Pi Browser عبر الرابط الرسمي: http://zynmart3401.pinet.com
+- رابط بوت التعدين: https://t.me/zynpibot
 - الموقع الرسمي للأخبار والتحديثات: https://zynmartpi.github.io/
 
-[التحديثات الأخيرة الشاملة للمنصة (الأمان، الأداء، والطلبات)]
-- الأمان والحماية: تعزيز الحماية بالكامل؛ التأكد من هوية المستخدم وصلاحياته قبل أي عملية، حماية الأرصدة والعمليات المالية من الوصول أو التعديل غير المصرح به، وحماية البيانات الحساسة.
-- عمليات المتجر والشراء (Marketplace): إدارة فائقة للممنتجات والمخزون، التحقق من الرصيد الكافي قبل الشراء، وتحديث الرصيد والطلب والمخزون بشكل متناسق ومضمون دون أخطاء.
-- دورة الطلبات المكتملة: تتبع دقيق ومحمي للطلب (طلب جديد ← دفع ← شحن ← تأكيد الاستلام ← إتمام العملية) مع تحكم كامل بالصلاحيات بين البائع والمشتري.
-- الأداء وقواعد البيانات: تحسين الاستعلامات المالية والبيانات بنسبة 97.5% (39/40) لإلغاء أي بطء، مع إضافة مراقبة آلية للعمليات البطيئة لضمان أقصى سرعة.
-- جودة واختبارات النظام: اجتياز 140 اختباراً ناجحاً من أصل 140 (100%) تغطي الحماية، المتاجر، الأرصدة، والتدفق العملياتي (Flows)، بالإضافة لنظام نشر وتحديث آمن ومستقر.
-
-[التحديثات والأخبار الحينية المجلوبة من الموقع الرسمي]
+[التحديثات والأخبار الحينية المجلوبة تلقائياً]
 {DYNAMIC_NEWS}
 
 [مهامك وأسلوب الرد]
-1. توجيه الإجابة بأسلوب ذكي وجذاب: ابدأ الرد بالترحيب بالسائل بأناقة باسمه، واستخدم أسلوباً مشوقاً يلفت انتباه باقي الأعضاء والمتابعين في القروب للاستفادة من المعلومة.
-2. الاستدلال بأحدث الأخبار والتحديثات المجلوبة من الموقع الرسمي zynmartpi.github.io عند الإجابة على استفسارات الأعضاء.
-3. شرح وتوضيح كفاءة وأمان منصة ZYNMART بناءً على التحديثات الأخيرة وطمأنة المستخدمين حول أرصدتهم ومعاملاتهم.
-4. مساعدة رواد المتجر وشرح كيفية الدخول للتطبيق zynmart.pages.dev عبر Pi Browser وتصفح المنتجات.
-5. شرح بوت التعدين zynboot ورابطه https://t.me/zynpibot وكيفية التفاعل مع المهام اليومية لجمع عملة ZYN.
-6. الترحيب بالأعضاء الجدد وتشجيع التجار والبائعين على الانضمام لمنصة آمنة وسريعة وموثوقة.
-7. الإجابة على جميع الاستفسارات التقنية العامة المتعلقة بالبلوكشين، العقود الذكية، الـ Launchpad، الـ DEX، والعملات المشفرة بشكل احترافي ومبسط.
-
-[قواعد وقوانين الرد]
-- الأسلوب: ودود، محترم، احترافي وبسيط (بالعربية أو الدارجة التونسية السلسة).
-- تجيب بثقة وعمق على الأسئلة التقنية والمستجدات بناءً على معلومات المشروع والموقع الرسمي.
-- فقط إذا كان السؤال يتعلق بحساب شخصي خاص بعضو محدد أو مشكلة تنفيذية معقدة جداً تتطلب تدخل الإدارة المباشر، قل: "سؤالك مهم، دقيقة نخلي الأدمن يجاوبك".
-- حافظ على الاختصار والوضوح وتجنب التكرار الطويل.
+1. توجيه الإجابة بأسلوب ذكي وجذاب يبدأ بالترحيب باسم العضو السائل.
+2. استخدام مهاراتك الذكية كـ Agent لتقديم إجابات دقيقة ومدعومة بالمعلومات.
+3. التوجيه الدائم لرواد المتجر نحو رابط Pi Browser وبوت التعدين الرسمي.
+4. الإجابة على الاستفسارات التقنية المتعلقة بالبلوكشين والعقود الذكية بأسلوب موثوق ومبسط.
 """
 
 GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركاته! 🌸
 مرحباً بك في عائلة ZYNMART 🚀
 
 أنا المساعد الذكي الخاص بالمشروع، وفي خدمتك دائماً:
-🛒 **رابط المتجر (في Pi Browser):** zynmart.pages.dev
+🛒 **رابط المتجر (في Pi Browser):** http://zynmart3401.pinet.com
 ⛏️ **بوت التعدين والمهام اليومية:** https://t.me/zynpibot
 🌐 **موقع التحديثات والأخبار الرسمية:** https://zynmartpi.github.io/
 
-إذا كان لديك أي سؤال تفصيلي، يمكنك الإشارة لي بالمنشن: @zynmart_ai_bot وسأجيبك فوراً!"""
+إذا كان لديك أي سؤال، يمكنك الإشارة لي بالمنشن: @zynmart_ai_bot وسأجيبك فوراً!"""
 
-DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل للمتجر التفاعلي عبر Pi Browser: zynmart.pages.dev\nولبدء تعدين عملة ZYN والمهام اليومية افتح البوت: https://t.me/zynpibot\nلمتابعة أحدث الأخبار والتحديثات: https://zynmartpi.github.io/"
+DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل للمتجر التفاعلي عبر Pi Browser: http://zynmart3401.pinet.com\nولبدء تعدين عملة ZYN والمهام اليومية افتح البوت: https://t.me/zynpibot"
 
 def get_latest_news():
     try:
         headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(NEWS_URL, headers=headers, timeout=3)
+        response = requests.get(NEWS_URL, headers=headers, timeout=5)
         if response.status_code == 200:
-            return response.text[:1500]
+            return f"مستجدات المنصة من الموقع الرسمي:\n{response.text[:2000]}"
     except Exception as e:
         print(f"Error fetching news site: {e}")
-    return "تابعوا أحدث التحديثات والأخبار الرسمية عبر الموقع: https://zynmartpi.github.io/"
+    return "تابعوا أحدث التحديثات عبر الموقع الرسمي: https://zynmartpi.github.io/"
+
+def search_duckduckgo(query):
+    """وظيفة البحث الخارجي لـ Hermes Agent لجلب الدلائل والحقائق من الويب"""
+    try:
+        url = f"https://html.duckduckgo.com/html/?q={query}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        res = requests.get(url, headers=headers, timeout=4)
+        if res.status_code == 200:
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(res.text, "html.parser")
+                results = [a.get_text() for a in soup.find_all("a", class_="result__snippet")[:3]]
+                if results:
+                    return "\n".join(results)
+            except ImportError:
+                print("bs4 library not installed, skipping html parsing.")
+    except Exception as e:
+        print(f"Web Search Error: {e}")
+    return ""
+
+def get_hermes_response(user_message, user_name=""):
+    """دالة Hermes Agent الرئيسية (تجيب أولاً)"""
+    if not HERMES_API_KEY:
+        return None
+
+    try:
+        latest_news = get_latest_news()
+        web_info = search_duckduckgo(user_message)
+        
+        system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
+        if web_info:
+            system_prompt += f"\n\n[معلومات إضافية مجلوبة من البحث الخارجي]:\n{web_info}"
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {HERMES_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": "nousresearch/hermes-3-llama-3.1-405b",
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"اسم العضو: {user_name}\nالرسالة: {user_message}"}
+            ]
+        }
+
+        response = requests.post(url, json=payload, headers=headers, timeout=10)
+        if response.status_code == 200:
+            res_data = response.json()
+            return res_data['choices'][0]['message']['content']
+    except Exception as e:
+        print(f"Hermes Agent Error: {e}")
+    
+    return None
+
+def get_gemini_response(user_message, is_admin_private=False, user_name=""):
+    """دالة Gemini الاحتياطية (تستدعى عند تعذر Hermes)"""
+    keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
+    if not keys:
+        return DEFAULT_FALLBACK_TEXT
+
+    latest_news = get_latest_news()
+    active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
+
+    headers = {"Content-Type": "application/json"}
+    prompt_text = f"{active_prompt}\n\nاسم العضو: {user_name}\nالمستخدم: {user_message}"
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+
+    for api_key in keys:
+        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
+        for model_name in models_to_try:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+            try:
+                response = requests.post(url, json=payload, headers=headers, timeout=8)
+                if response.status_code == 200:
+                    candidates = response.json().get("candidates", [])
+                    if candidates:
+                        parts = candidates[0].get("content", {}).get("parts", [])
+                        if parts:
+                            return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+            except Exception:
+                continue
+
+    return DEFAULT_FALLBACK_TEXT
 
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
     if not chat_id:
@@ -165,134 +234,28 @@ def ban_telegram_member(chat_id, user_id):
     except Exception as e:
         print(f"Telegram Ban Error: {e}")
 
-def get_available_gemini_models(api_key):
-    """جلب الموديلات مع مهلة استجابة قصيرة ومباشرة"""
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={api_key}"
-        res = requests.get(url, timeout=4)
-        if res.status_code == 200:
-            data = res.json()
-            supported_models = []
-            for m in data.get("models", []):
-                methods = m.get("supportedGenerationMethods", [])
-                if "generateContent" in methods:
-                    name = m.get("name", "").replace("models/", "")
-                    supported_models.append(name)
-            return supported_models
-    except Exception as e:
-        print(f"Error fetching models list: {e}")
-    return []
-
-def get_gemini_response(user_message, is_admin_private=False, user_name=""):
-    global CACHED_WORKING_MODELS
-    keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
-    if not keys:
-        if is_admin_private:
-            return "تنبيه للأدمن: مفتاح GEMINI_API_KEY غير مضاف في إعدادات Render!"
-        return DEFAULT_FALLBACK_TEXT
-
-    latest_news = get_latest_news()
-    active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
-
-    headers = {"Content-Type": "application/json"}
-    context_prefix = f"اسم العضو السائل: {user_name}\n" if user_name else ""
-    prompt_text = f"{active_prompt}\n\n{context_prefix}المستخدم: {user_message}"
-    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
-
-    last_error = ""
-
-    for api_key in keys:
-        # استخدام الذاكرة المؤقتة إن وُجدت لمنع البطء والـ Timeout
-        models_to_try = CACHED_WORKING_MODELS.get(api_key, [])
-        if not models_to_try:
-            fetched = get_available_gemini_models(api_key)
-            models_to_try = fetched if fetched else ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
-
-        for model_name in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
-            try:
-                # مهلة 8 ثوان كحد أقصى لكل موديل لعدم تجاوز مهلة Render
-                response = requests.post(url, json=payload, headers=headers, timeout=8)
-                res_data = response.json()
-
-                if response.status_code == 200:
-                    candidates = res_data.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts:
-                            # حفظ الموديل الشغال في الذاكرة للطلبات القادمة
-                            CACHED_WORKING_MODELS[api_key] = [model_name]
-                            return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
-
-                last_error = res_data.get("error", {}).get("message", response.text)
-            except Exception as e:
-                last_error = str(e)
-                continue
-
-    if is_admin_private:
-        return f"تنبيه للأدمن (استنفاد كافة المفاتيح والموديلات):\nالسبب: {last_error}"
-    return DEFAULT_FALLBACK_TEXT
-
 # ==================== المهام الدوريّة ====================
 
 def task_check_usernames_daily():
     global active_group_chat_id
     no_username_list = []
-    
     for uid, uinfo in list(known_users.items()):
         if isinstance(uinfo, dict):
             uname = uinfo.get("username")
             if not uname or uname == "None" or str(uname).strip() == "":
-                name = uinfo.get("name") or uinfo.get("first_name") or "عضو"
-                first_name = str(name).split()[0]
-                no_username_list.append(f"• {first_name}")
+                name = uinfo.get("name") or "عضو"
+                no_username_list.append(f"• {str(name).split()[0]}")
 
     target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
     if no_username_list and target_chat:
         users_str = "\n".join(no_username_list[:30])
         warning_msg = (
-            "⚠️ **تنبيه هام (الفحص الدوري للأعضاء)**\n\n"
+            "⚠️ **تنبيه هام (الفحص الدوري)**\n\n"
             "الأعضاء الكرام التالية أسماؤهم لا يملكون اسم مستخدم (@username):\n\n"
             f"{users_str}\n\n"
-            "📢 **يرجى إنشاء اسم مستخدم (Username) لحساباتكم فوراً!**\n"
-            "ذلك لضمان توثيق حساباتكم وحمايتها عند التفاعل مع المتجر وبوت التعدين."
+            "📢 **يرجى إنشاء اسم مستخدم لحساباتكم فوراً لحماية بياناتكم!**"
         )
         send_telegram_message(target_chat, warning_msg)
-        return f"Found {len(no_username_list)} users without username. Message sent!"
-    
-    return f"Checked {len(known_users)} total users. Found {len(no_username_list)} without username. No message sent."
-
-def task_check_github_updates():
-    global last_seen_github_id, active_group_chat_id
-    try:
-        headers = {"User-Agent": "ZynmartBot/1.0"}
-        response = requests.get(GITHUB_REPO_API, headers=headers, timeout=5)
-        if response.status_code == 200:
-            events = response.json()
-            if isinstance(events, list) and events:
-                latest_event = events[0]
-                event_id = latest_event.get("id")
-                
-                if last_seen_github_id is not None and event_id != last_seen_github_id:
-                    event_type = latest_event.get("type", "Update")
-                    repo_name = latest_event.get("repo", {}).get("name", "ZynMart Repo")
-                    
-                    prompt = (
-                        f"قم بصياغة منشور تقني واحترافي مشوق جداً لمجموعة تليجرام مشروع ZYNMART، "
-                        f"تعلن فيه عن تحديث جديد تم إنشاؤه على GitHub الخاص بالمنصة.\n"
-                        f"نوع التحديث: {event_type}\nاسم المستودع: {repo_name}\n"
-                        f"اشرح بأسلوب راقٍ أن المنصة تواصل التطوير والتحديث لضمان أقصى حماية وسرعة للأرصدة والمعاملات."
-                    )
-                    announcement = get_gemini_response(prompt)
-                    
-                    target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
-                    if target_chat:
-                        full_post = f"📢 **تحديث تقني جديد من GitHub!** 🚀\n\n{announcement}\n\n🌐 للمتابعة: {NEWS_URL}"
-                        send_telegram_message(target_chat, full_post)
-                
-                last_seen_github_id = event_id
-    except Exception as e:
-        print(f"Error checking GitHub API: {e}")
 
 def task_keep_alive():
     try:
@@ -307,34 +270,23 @@ def task_send_group_rules():
 
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
-scheduler.add_job(task_check_github_updates, 'interval', minutes=10)
 scheduler.add_job(task_keep_alive, 'interval', minutes=10)
 scheduler.add_job(task_send_group_rules, 'interval', hours=2)
 
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
-# ==================== المسارات والويب هوك ====================
+# ==================== الويب هوك ====================
 
 @app.route("/", methods=["GET"])
 def home():
-    return "AI FOR ZYNMART Bot is Live!"
-
-@app.route("/send-rules", methods=["GET"])
-def trigger_rules_endpoint():
-    task_send_group_rules()
-    return "Rules Triggered Successfully", 200
-
-@app.route("/check-users", methods=["GET"])
-def trigger_users_check_endpoint():
-    result_status = task_check_usernames_daily()
-    return f"Check Result: {result_status}", 200
+    return "AI FOR ZYNMART Bot is Live with Hermes Agent!"
 
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     global active_group_chat_id
     if request.method == "GET":
-        return "Webhook Endpoint is Active!", 200
+        return "Webhook Endpoint Active!", 200
 
     data = request.get_json()
     if data and "message" in data:
@@ -353,8 +305,7 @@ def webhook():
             known_users[str(user_id)] = {
                 "name": first_name,
                 "username": username,
-                "chat_id": chat_id,
-                "chat_type": chat_type
+                "chat_id": chat_id
             }
             save_users_to_file()
 
@@ -363,51 +314,38 @@ def webhook():
             left_name = left_member.get("first_name", "العضو")
             left_id = left_member.get("id")
 
-            farewell_msg = (
-                f"وداعاً {left_name} 👋\n\n"
-                f"بما أنك اخترت المغادرة بنفسك، نعلمك بأنه قد تم حظرك رسمياً من العودة للمجموعة مجدداً.\n"
-                f"نتمنى لك التوفيق!"
-            )
+            farewell_msg = f"وداعاً {left_name} 👋\nتم حظرك رسمياً من العودة للمجموعة."
             send_telegram_message(chat_id, farewell_msg)
             ban_telegram_member(chat_id, left_id)
-            
-            if str(left_id) in known_users:
-                del known_users[str(left_id)]
-                save_users_to_file()
             return jsonify({"status": "ok"}), 200
 
         if user_message:
-            if chat_type == "private":
-                if user_id != ADMIN_ID:
-                    send_telegram_message(chat_id, "عذراً، هذا الخاص مخصص لإدارة ZYNMART فقط. الرجاء التواصل في القروب 🙏")
-                    return jsonify({"status": "ok"}), 200
-                else:
-                    reply = get_gemini_response(user_message, is_admin_private=True, user_name=first_name)
-                    send_telegram_message(chat_id, reply)
-                    return jsonify({"status": "ok"}), 200
+            if chat_type == "private" and user_id != ADMIN_ID:
+                send_telegram_message(chat_id, "عذراً، الخاص مخصص للإدارة فقط. يرجى التواصل في القروب 🙏")
+                return jsonify({"status": "ok"}), 200
 
             clean_msg = user_message.strip().lower()
-
-            greetings = ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير", "السلام عليكم ورحمة الله"]
-
-            if clean_msg in greetings:
-                greeting_text = f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE
-                send_telegram_message(chat_id, greeting_text)
+            if clean_msg in ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير"]:
+                send_telegram_message(chat_id, f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE)
                 return jsonify({"status": "ok"}), 200
 
             clean_bot_name = BOT_USERNAME.replace("@", "").lower()
             is_mentioned = BOT_USERNAME.lower() in clean_msg
-            
             reply_to = msg_obj.get("reply_to_message", {})
-            reply_from = reply_to.get("from", {})
-            is_reply_to_bot = reply_from.get("username", "").lower() == clean_bot_name
+            is_reply_to_bot = reply_to.get("from", {}).get("username", "").lower() == clean_bot_name
 
-            if is_mentioned or is_reply_to_bot:
+            if is_mentioned or is_reply_to_bot or chat_type == "private":
                 query_text = user_message.replace(BOT_USERNAME, "").replace(f"@{clean_bot_name}", "").strip()
                 if not query_text:
                     query_text = user_message
+
+                # 1. محاولة الرد عبر Hermes Agent أولاً
+                reply = get_hermes_response(query_text, user_name=first_name)
                 
-                reply = get_gemini_response(query_text, is_admin_private=False, user_name=first_name)
+                # 2. التراجع لـ Gemini تلقائياً إذا تعذر Hermes
+                if not reply:
+                    reply = get_gemini_response(query_text, is_admin_private=(user_id == ADMIN_ID), user_name=first_name)
+
                 formatted_reply = f"مرحباً بك {first_name} 🌟\n\n{reply}"
                 send_telegram_message(chat_id, formatted_reply, reply_to_message_id=message_id)
 

@@ -74,7 +74,26 @@ def fetch_real_evidence(user_message):
         except: pass
     return "\n".join(evidences) if evidences else "خبرة ZYNMART"
 
-# 1. Hermes الخيار الأول
+# 1. دالة تصحيح وهلوسة الأسعار
+def fix_price_hallucination(text):
+    if not text:
+        return text
+    low = text.lower()
+    if "pi" in low and ("$32" in text or "32.27" in text or "32.35" in text):
+        try:
+            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd", timeout=5).json()
+            real = cg.get("pi-network",{}).get("usd",0.34)
+            text = text.replace("$32.27","$"+str(real))
+            text = text.replace("$32.35","$"+str(real))
+            text = text.replace("$32","$"+str(real))
+            text = text.replace("32.27",""+str(real))
+            text = text.replace("32.35",""+str(real))
+            text = text + "\n\nتصحيح Live: السعر الحقيقي $"+str(real)+" من Coingecko"
+        except:
+            pass
+    return text
+
+# 2. دالة Hermes مع التعديل
 def get_hermes_response(user_message,user_name=""):
     if not HERMES_API_KEY: return None
     try:
@@ -82,11 +101,14 @@ def get_hermes_response(user_message,user_name=""):
         system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار انسخ الرقم حرفيا ابدا ب ⏳ واختم ب ✅ تمت المهمة"
         payload={"model":"nousresearch/hermes-3-llama-3.1-405b","messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_name+": "+user_message}],"temperature":0.1,"max_tokens":900}
         res=requests.post("https://openrouter.ai/api/v1/chat/completions",json=payload,headers={"Authorization":"Bearer "+HERMES_API_KEY,"Content-Type":"application/json"},timeout=15)
-        if res.status_code==200: return res.json()["choices"][0]["message"]["content"]
+        if res.status_code==200:
+            txt = res.json()["choices"][0]["message"]["content"]
+            txt = fix_price_hallucination(txt)
+            return txt
     except: pass
     return None
 
-# 2. Gemini الخيار الاحتياطي
+# 3. دالة Gemini مع التعديل
 def get_gemini_response(user_message,user_name=""):
     if not GEMINI_API_KEYS: return DEFAULT_FALLBACK_TEXT
     system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())
@@ -96,11 +118,14 @@ def get_gemini_response(user_message,user_name=""):
             url="https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key="+k
             res=requests.post(url,json=payload,headers={"Content-Type":"application/json"},timeout=10)
             if res.status_code==200:
-                return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+                parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                if parts:
+                    txt = parts[0].get("text",DEFAULT_FALLBACK_TEXT)
+                    txt = fix_price_hallucination(txt)
+                    return txt
         except: continue
     return DEFAULT_FALLBACK_TEXT
 
-# الدالة الرئيسية لتحديد الأولوية
 def get_ai_response(user_message,user_name=""):
     res = get_hermes_response(user_message, user_name)
     if res: return res

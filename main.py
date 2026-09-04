@@ -1,6 +1,7 @@
 import os
 import json
 import requests
+import threading
 from flask import Flask, request, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
@@ -9,34 +10,31 @@ app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 HERMES_API_KEY = os.environ.get("HERMES_API_KEY")
-
 GEMINI_API_KEYS = []
 for key, val in os.environ.items():
     if key.startswith("GEMINI_API_KEY") and val:
-        GEMINI_API_KEYS.extend([k.strip() for k in val.split(",") if k.strip()])
+        for k in val.split(","):
+            k = k.strip()
+            if k and k not in GEMINI_API_KEYS:
+                GEMINI_API_KEYS.append(k)
 
 ADMIN_ID = 7560871853
 BOT_USERNAME = "@zynmart_ai_bot"
+BOT_ID = BOT_TOKEN.split(":")[0] if BOT_TOKEN and ":" in BOT_TOKEN else "0"
 NEWS_URL = "https://zynmartpi.github.io/"
-
 RENDER_APP_URL = "https://ai-for-zynmart.onrender.com"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID")
 
 known_users = {}
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
-
-# ==================== دوال التعامل مع users.json ====================
+file_lock = threading.Lock()
 
 def save_users_to_file():
     try:
-        data_to_save = {
-            "active_group_chat_id": active_group_chat_id,
-            "users": known_users
-        }
-        with open("users.json", "w", encoding="utf-8") as f:
-            json.dump(data_to_save, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        print(f"Error saving users: {e}")
+        with file_lock:
+            with open("users.json", "w", encoding="utf-8") as f:
+                json.dump({"active_group_chat_id": active_group_chat_id, "users": known_users}, f, ensure_ascii=False, indent=2)
+    except: pass
 
 def load_users_from_file():
     global known_users, active_group_chat_id
@@ -44,362 +42,241 @@ def load_users_from_file():
         if os.path.exists("users.json"):
             with open("users.json", "r", encoding="utf-8") as f:
                 loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    if "users" in loaded and isinstance(loaded["users"], dict):
-                        known_users = loaded.get("users", {})
-                        if loaded.get("active_group_chat_id"):
-                            active_group_chat_id = loaded.get("active_group_chat_id")
-                    else:
-                        for k, v in loaded.items():
-                            if k == "active_group_chat_id":
-                                active_group_chat_id = str(v)
-                                continue
-                            if isinstance(v, dict):
-                                known_users[str(k)] = v
-                            else:
-                                known_users[str(k)] = {"name": str(v), "username": None}
-    except Exception as e:
-        print(f"Error loading users: {e}")
-
+            if isinstance(loaded, dict) and "users" in loaded:
+                known_users = loaded.get("users", {})
+                if loaded.get("active_group_chat_id"):
+                    active_group_chat_id = loaded.get("active_group_chat_id")
+    except: pass
 load_users_from_file()
 
-# ==================== القواعد والبرومبت ====================
-
-GROUP_RULE_TEXT = """📜 *سياسة الانضباط وقوانين مجتمع Zynmart الرسمية:*
-
-حرصاً على حماية المنصة وتوفير بيئة جادة ومحترمة، نرجو من الجميع الالتزام الصارم بالقواعد التالية:
-
-1️⃣ *الجدية والاحترام:*
-المجموعة مخصصة للاستفسارات وتبادل المعرفة فقط. يُمنع السب، الإساءة، أو إثارة الفتنة.
-
-2️⃣ *الأمان والهوية والروابط الرسمية:*
-• يمنع نشر الروابط الخارجية غير الرسمية أو الإعلانات التجارية.
-• *رابط المتجر الرسمي على Pi Browser:* http://zynmart3401.pinet.com
-• *رابط بوت التعدين الرسمي:* `@zynpibot`
-• يجب تعيين اسم مستخدم (@username) لحسابك.
-
-3️⃣ *حماية النظام والعملة:*
-أي محاولة لاختراق التطبيق، استغلال الثغرات، أو التحايل تؤدي للحظر الدائم وتجميد رصيد عملة ZYN.
-
-4️⃣ *النطاق والتطبيق:*
-تسري هذه القوانين داخل التطبيق وفي كافة مجموعات Telegram.
-
-*هدفنا بناء مجتمع واعي، جاد وموثوق! 🚀*"""
+GROUP_RULE_TEXT = """📜 *قوانين Zynmart:*
+1️⃣ الاحترام واجب
+2️⃣ الرسمي فقط: http://zynmart3401.pinet.com و @zynpibot
+3️⃣ لازم @username"""
 
 ZYNMART_PROMPT = """
-أنت المساعد الذكي الرسمي "AI for ZYNMART"، وظيفتك هي إرشاد ومساعدة رواد متجر "ZYNMART" داخل مجموعة التليجرام.
-
-[حقائق ومعلومات المشروع الرسمية - التزم بها بنسبة 100% ولا تخترع أي معلومة خارجية]:
-- اسم المنصة/المتجر: ZYNMART (سوق عالمي مرخص ومتكامل ضمن شبكة Pi Network).
-- صاحب المشروع: صالح التونسي.
-- مطور التطبيق: أيوب.
-- العملة الرسمية للمتجر: ZYN.
-- رابط المتجر التطبيقي: يفتح حصرياً داخل Pi Browser عبر الرابط الرسمي: http://zynmart3401.pinet.com
-- رابط بوت التعدين: https://t.me/zynpibot
-- الموقع الرسمي للأخبار والتحديثات: https://zynmartpi.github.io/
-
-[التحديثات والأخبار الحينية المجلوبة تلقائياً]
-{DYNAMIC_NEWS}
-
-[قواعد صارمة للإجابة]:
-1. أجب بأسلوب ذكي وجذاب يبدأ بالترحيب باسم العضو السائل.
-2. التزم فقط بالحقائق المذكورة أعلاه. إذا سُئلت عن شيء لا تملك عنه معلومة مؤكدة، صرّح بوضوح أنك لا تملك المعلومة ووجّه المستخدم للموقع الرسمي.
-3. التوجيه الدائم لرواد المتجر نحو رابط Pi Browser وبوت التعدين الرسمي.
-4. يمنع منعاً باتاً اختراع أسماء، تواريخ، أو ميزات غير موجودة في التعليمات.
-5. أجب باللغة العربية الفصحى أو التونسية المبسطة فقط، ويُمنع تماماً استخدام أي رموز أو لغات أجنبية غير مفهومة.
+أنت ZYNMART Sovereign Engine.
+1- سؤال ZYNMART: جاوب من الحقائق:
+- ZYNMART سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور أيوب - العملة ZYN
+- المتجر: http://zynmart3401.pinet.com (Pi Browser)
+- التعدين: https://t.me/zynpibot - الاخبار: https://zynmartpi.github.io/
+2- سؤال تقني: مهندس بلوكتشين، جاوب بمعادلة وكود مختصر. اذا غير متأكد قل "حسب خبرتي:"
+قوانين: عربي مبسط، قصير 5-12 سطر، ممنوع "لا املك معلومة".
+[الاخبار] {DYNAMIC_NEWS}
 """
 
-GREETING_RESPONSE = """وعليكم السلام ورحمة الله وبركاته! 🌸
-مرحباً بك في عائلة ZYNMART 🚀
-
-أنا المساعد الذكي الخاص بالمشروع، وفي خدمتك دائماً:
-🛒 **رابط المتجر (في Pi Browser):** http://zynmart3401.pinet.com
-⛏️ **بوت التعدين والمهام اليومية:** https://t.me/zynpibot
-🌐 **موقع التحديثات والأخبار الرسمية:** https://zynmartpi.github.io/
-
-إذا كان لديك أي سؤال، يمكنك الإشارة لي بالمنشن: @zynmart_ai_bot وسأجيبك فوراً!"""
-
-DEFAULT_FALLBACK_TEXT = "مرحباً بك في ZYNMART! 🚀\nتنجم تدخل للمتجر التفاعلي عبر Pi Browser: http://zynmart3401.pinet.com\nولبدء تعدين عملة ZYN والمهام اليومية افتح البوت: https://t.me/zynpibot"
-
-# ==================== دوال المعالجة والبحث ====================
+GREETING_RESPONSE = "🛒 http://zynmart3401.pinet.com\n⛏️ https://t.me/zynpibot\n🌐 https://zynmartpi.github.io/"
+DEFAULT_FALLBACK_TEXT = "ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
 def get_latest_news():
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        response = requests.get(NEWS_URL, headers=headers, timeout=5)
-        if response.status_code == 200:
-            return f"مستجدات المنصة من الموقع الرسمي:\n{response.text[:2000]}"
-    except Exception as e:
-        print(f"Error fetching news site: {e}")
-    return "تابعوا أحدث التحديثات عبر الموقع الرسمي: https://zynmartpi.github.io/"
-
-def search_duckduckgo(query):
-    try:
-        url = f"https://html.duckduckgo.com/html/?q={query}"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        }
-        res = requests.get(url, headers=headers, timeout=8)
-        if res.status_code == 200:
+        r = requests.get(NEWS_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        if r.status_code == 200:
             try:
                 from bs4 import BeautifulSoup
-                soup = BeautifulSoup(res.text, "html.parser")
-                results = [a.get_text() for a in soup.find_all("a", class_="result__snippet")[:3]]
-                if results:
-                    return "\n".join(results)
-            except ImportError:
-                print("bs4 library not installed.")
-    except Exception as e:
-        print(f"تنبيه: تعذر جلب نتائج DuckDuckGo ({e})")
-    return ""
+                txt = BeautifulSoup(r.text, "html.parser").get_text(separator=" ", strip=True)
+                return f"اخبار: {txt[:800]}"
+            except: return f"اخبار: {r.text[:800]}"
+    except: pass
+    return "التحديثات: https://zynmartpi.github.io/"
 
 def get_hermes_response(user_message, user_name=""):
-    if not HERMES_API_KEY:
-        return None
-
+    if not HERMES_API_KEY: return None
     try:
-        latest_news = get_latest_news()
-        web_info = search_duckduckgo(user_message)
-        
-        system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
-        if web_info:
-            system_prompt += f"\n\n[معلومات من البحث الخارجي]:\n{web_info}"
-
-        url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {HERMES_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        
-        payload = {
-            "model": "nousresearch/hermes-3-llama-3.1-405b",
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"اسم العضو: {user_name}\nالرسالة: {user_message}"}
-            ],
-            "temperature": 0.2,
-            "top_p": 0.8,
-            "max_tokens": 600
-        }
-
-        response = requests.post(url, json=payload, headers=headers, timeout=10)
-        if response.status_code == 200:
-            res_data = response.json()
-            reply_text = res_data['choices'][0]['message']['content']
-            
-            if any('\u4e00' <= char <= '\u9fff' for char in reply_text):
-                print("Hermes returned Chinese. Fallback to Gemini.")
-                return None
-                
-            return reply_text
-    except Exception as e:
-        print(f"Hermes Agent Error: {e}")
-    
+        system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", get_latest_news())
+        payload = {"model": "nousresearch/hermes-3-llama-3.1-405b","messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": f"{user_name}: {user_message}"}],"temperature": 0.1, "top_p": 0.7, "max_tokens": 450, "frequency_penalty": 0.3}
+        res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers={"Authorization": f"Bearer {HERMES_API_KEY}", "Content-Type": "application/json"}, timeout=10)
+        if res.status_code == 200:
+            txt = res.json()['choices'][0]['message']['content']
+            if any('\u4e00' <= c <= '\u9fff' for c in txt): return None
+            return txt
+    except: pass
     return None
 
-def get_gemini_response(user_message, is_admin_private=False, user_name=""):
-    keys = [k.strip() for k in GEMINI_API_KEYS if k.strip()]
-    if not keys:
-        return DEFAULT_FALLBACK_TEXT
-
-    latest_news = get_latest_news()
-    active_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", latest_news)
-
-    headers = {"Content-Type": "application/json"}
-    prompt_text = f"{active_prompt}\n\nاسم العضو: {user_name}\nالمستخدم: {user_message}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt_text}]}],
-        "generationConfig": {"temperature": 0.2}
-    }
-
-    for api_key in keys:
-        models_to_try = ["gemini-1.5-flash", "gemini-2.0-flash", "gemini-1.5-pro"]
-        for model_name in models_to_try:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={api_key}"
+def get_gemini_response(user_message, user_name=""):
+    if not GEMINI_API_KEYS: return DEFAULT_FALLBACK_TEXT
+    system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", get_latest_news())
+    payload = {"contents": [{"parts": [{"text": f"{system_prompt}\n\n{user_name}: {user_message}"}]}], "generationConfig": {"temperature": 0.1, "top_p": 0.7}}
+    for api_key in GEMINI_API_KEYS:
+        for model in ["gemini-1.5-flash", "gemini-2.0-flash"]:
             try:
-                response = requests.post(url, json=payload, headers=headers, timeout=8)
-                if response.status_code == 200:
-                    candidates = response.json().get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts:
-                            return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
-            except Exception:
-                continue
-
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+                r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
+                if r.status_code == 200:
+                    cand = r.json().get("candidates", [])
+                    if cand:
+                        parts = cand[0].get("content", {}).get("parts", [])
+                        if parts: return parts[0].get("text", DEFAULT_FALLBACK_TEXT)
+            except: continue
     return DEFAULT_FALLBACK_TEXT
 
 def send_telegram_message(chat_id, text, reply_to_message_id=None):
-    if not chat_id:
-        return False
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    if not chat_id or not BOT_TOKEN: return False
     payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
+    if reply_to_message_id: payload["reply_to_message_id"] = reply_to_message_id
     try:
-        res = requests.post(url, json=payload, timeout=5)
-        return res.status_code == 200
-    except Exception as e:
-        print(f"Telegram Send Error: {e}")
-        return False
+        r = requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json=payload, timeout=5)
+        return r.status_code == 200
+    except: return False
 
 def ban_telegram_member(chat_id, user_id):
-    if not chat_id:
-        return
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/banChatMember"
-    payload = {"chat_id": chat_id, "user_id": int(user_id)}
-    try:
-        requests.post(url, json=payload, timeout=5)
-    except Exception as e:
-        print(f"Telegram Ban Error: {e}")
+    try: requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/banChatMember", json={"chat_id": chat_id, "user_id": int(user_id)}, timeout=5)
+    except: pass
 
-# ==================== المهام الدوريّة ====================
+def find_user_by_username(username):
+    if not username: return None
+    username = username.replace("@","").lower()
+    for uid, info in known_users.items():
+        if isinstance(info, dict) and info.get("username","").lower() == username:
+            return uid, info
+    return None
 
 def task_check_usernames_daily():
-    """تجهيز وإرسال قائمة الأعضاء الذين لا يملكون اسم مستخدم"""
-    global active_group_chat_id
-    no_username_list = []
-    
-    for uid, uinfo in list(known_users.items()):
-        if isinstance(uinfo, dict):
-            uname = uinfo.get("username")
-            if not uname or str(uname).strip().lower() in ["none", "null", ""]:
-                name = uinfo.get("name") or "عضو"
-                no_username_list.append(f"• {str(name).split()[0]}")
-        elif isinstance(uinfo, str):
-            no_username_list.append(f"• {uinfo.split()[0]}")
-
-    target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
-    if no_username_list and target_chat:
-        users_str = "\n".join(no_username_list[:30])
-        warning_msg = (
-            "⚠️ **تنبيه هام (الفحص الدوري)**\n\n"
-            "الأعضاء الكرام التالية أسماؤهم لا يملكون اسم مستخدم (@username):\n\n"
-            f"{users_str}\n\n"
-            "📢 **يرجى إنشاء اسم مستخدم لحساباتكم فوراً لحماية بياناتكم!**"
-        )
-        return send_telegram_message(target_chat, warning_msg)
+    lst = [f"• {v.get('name','عضو').split()[0]}" for v in known_users.values() if isinstance(v, dict) and not v.get("username")]
+    target = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+    if lst and target: return send_telegram_message(target, f"⚠️ **تنبيه دوري**\nبدون @username:\n" + "\n".join(lst[:20]))
     return False
 
 def task_keep_alive():
-    try:
-        requests.get(f"{RENDER_APP_URL}/", timeout=5)
-    except Exception as e:
-        print(f"Keep-Alive Error: {e}")
+    try: requests.get(f"{RENDER_APP_URL}/", timeout=5)
+    except: pass
 
 def task_send_group_rules():
-    target_chat = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
-    if target_chat:
-        return send_telegram_message(target_chat, GROUP_RULE_TEXT)
+    target = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+    if target: return send_telegram_message(target, GROUP_RULE_TEXT)
     return False
 
 scheduler = BackgroundScheduler(daemon=True)
 scheduler.add_job(task_check_usernames_daily, 'interval', hours=24)
 scheduler.add_job(task_keep_alive, 'interval', minutes=10)
-scheduler.add_job(task_send_group_rules, 'interval', hours=2)
-
+scheduler.add_job(task_send_group_rules, 'interval', hours=6)
 scheduler.start()
 atexit.register(lambda: scheduler.shutdown())
 
-# ==================== الويب هوك والمسارات ====================
-
 @app.route("/", methods=["GET", "HEAD"])
 def home():
-    """مسار خفيف لا يرسل رسائل لتأمين UptimeRobot و Render Keep-Alive"""
-    return "AI FOR ZYNMART Bot is Live and Running!", 200
-
-@app.route("/send-rules", methods=["GET"])
-def trigger_send_rules():
-    sent = task_send_group_rules()
-    if sent:
-        return "تم إرسال القوانين للقروب بنجاح!", 200
-    return "فشل إرسال القوانين (تأكد من وجود Chat ID في البيئة)", 200
-
-@app.route("/test-usernames", methods=["GET"])
-def test_usernames():
-    sent = task_check_usernames_daily()
-    if sent:
-        return "تم إرسال قائمة الأعضاء بدون اسم مستخدم إلى القروب بنجاح!", 200
-    return "لم يتم إرسال القائمة (إما لا توجد أسماء ناقصة أو لم يتم تحديد Chat ID)", 200
+    return "ZYNMART Sovereign v7 - Admin Private Only!", 200
 
 @app.route("/webhook", methods=["POST", "GET", "HEAD"])
 def webhook():
     global active_group_chat_id
-    
-    if request.method in ["GET", "HEAD"]:
-        return "Webhook Endpoint Active!", 200
+    if request.method in ["GET", "HEAD"]: return "Webhook Active!", 200
 
     data = request.get_json(silent=True)
-    if data and "message" in data:
-        msg_obj = data["message"]
-        chat_id = msg_obj["chat"]["id"]
-        chat_type = msg_obj["chat"]["type"]
-        from_user = msg_obj["from"]
-        user_id = str(from_user["id"])
-        first_name = from_user.get("first_name", "صديقنا")
-        username = from_user.get("username")
-        user_message = msg_obj.get("text", "")
-        message_id = msg_obj.get("message_id")
+    if not data or "message" not in data: return jsonify({"status": "ok"}), 200
 
-        if chat_type in ["group", "supergroup"]:
-            active_group_chat_id = chat_id
-            
-            known_users[user_id] = {
-                "name": first_name,
-                "username": username if username else None,
-                "chat_id": chat_id
-            }
-            save_users_to_file()
+    msg_obj = data["message"]
+    if "from" not in msg_obj: return jsonify({"status": "ok"}), 200
 
-        if "new_chat_members" in msg_obj:
-            for new_member in msg_obj["new_chat_members"]:
-                nm_id = str(new_member["id"])
-                nm_name = new_member.get("first_name", "عضو")
-                nm_user = new_member.get("username")
-                known_users[nm_id] = {
-                    "name": nm_name,
-                    "username": nm_user if nm_user else None,
-                    "chat_id": chat_id
-                }
-            save_users_to_file()
+    chat_id = msg_obj["chat"]["id"]
+    chat_type = msg_obj["chat"]["type"]
+    from_user = msg_obj["from"]
+    user_id = str(from_user["id"])
 
-        if "left_chat_member" in msg_obj:
-            left_member = msg_obj["left_chat_member"]
-            left_name = left_member.get("first_name", "العضو")
-            left_id = left_member.get("id")
+    try: is_admin = int(user_id) == ADMIN_ID
+    except: is_admin = False
 
-            farewell_msg = f"وداعاً {left_name} 👋\nتم حظرك رسمياً من العودة للمجموعة."
-            send_telegram_message(chat_id, farewell_msg)
-            ban_telegram_member(chat_id, left_id)
+    first_name = from_user.get("first_name", "صديقنا")
+    username = from_user.get("username")
+    user_message = msg_obj.get("text") or msg_obj.get("caption") or ""
+    message_id = msg_obj.get("message_id")
+
+    # ===== السيادة: الخاص لك وحدك فقط =====
+    if chat_type == "private":
+        if not is_admin:
+            # اي واحد غيرك يحاول يكلم البوت في الخاص -> يتجاهله تماما بدون رد
+            return jsonify({"status": "ok - private blocked"}), 200
+
+        # من هنا و تحت انت فقط
+        if len(user_message) > 1000: user_message = user_message[:1000]
+
+        if user_message.startswith("/reset_warnings"):
+            parts = user_message.split()
+            if len(parts) >= 2:
+                found = find_user_by_username(parts[1])
+                if found:
+                    uid, info = found
+                    known_users[uid]["leave_count"] = 0
+                    save_users_to_file()
+                    send_telegram_message(chat_id, f"✅ تم مسح انذارات {parts[1]}\nالاسم: {info.get('name')}", reply_to_message_id=message_id)
+                else:
+                    send_telegram_message(chat_id, f"❌ لم اجد {parts[1]}", reply_to_message_id=message_id)
+            else:
+                send_telegram_message(chat_id, "استعمل: /reset_warnings @username", reply_to_message_id=message_id)
             return jsonify({"status": "ok"}), 200
 
+        if user_message.strip() == "/warnings":
+            warn_list = [f"• {v.get('name','مجهول')} (@{v.get('username','بدون')}) : {v.get('leave_count')}/2" for v in known_users.values() if isinstance(v, dict) and v.get("leave_count",0)>0]
+            if warn_list:
+                send_telegram_message(chat_id, "📋 **قائمة الانذارات (سيادي - سري):**\n" + "\n".join(warn_list[:30]), reply_to_message_id=message_id)
+            else:
+                send_telegram_message(chat_id, "✅ لا يوجد انذارات", reply_to_message_id=message_id)
+            return jsonify({"status": "ok"}), 200
+
+        if user_message.strip() == "/stats":
+            total = len(known_users)
+            with_warn = len([u for u in known_users.values() if isinstance(u, dict) and u.get("leave_count",0)>0])
+            send_telegram_message(chat_id, f"📊 **احصائيات سيادية:**\nالاجمالي: {total}\nعليهم انذارات: {with_warn}\nالقروب النشط: {active_group_chat_id}\nID السيادة: {ADMIN_ID}", reply_to_message_id=message_id)
+            return jsonify({"status": "ok"}), 200
+
+        # اسئلة عادية منك في الخاص -> البوت يجاوبك انت فقط
         if user_message:
-            if chat_type == "private" and int(user_id) != ADMIN_ID:
-                send_telegram_message(chat_id, "عذراً، الخاص مخصص للإدارة فقط. يرجى التواصل في القروب 🙏")
-                return jsonify({"status": "ok"}), 200
+            reply = get_hermes_response(user_message, user_name=first_name)
+            if not reply: reply = get_gemini_response(user_message, user_name=first_name)
+            send_telegram_message(chat_id, reply, reply_to_message_id=message_id)
+        return jsonify({"status": "ok"}), 200
 
-            clean_msg = user_message.strip().lower()
-            if clean_msg in ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير"]:
-                send_telegram_message(chat_id, f"أهلاً بك يا {first_name} 👋\n" + GREETING_RESPONSE)
-                return jsonify({"status": "ok"}), 200
+    # ===== القروب =====
+    if len(user_message) > 1000: user_message = user_message[:1000]
 
-            clean_bot_name = BOT_USERNAME.replace("@", "").lower()
-            is_mentioned = BOT_USERNAME.lower() in clean_msg
-            reply_to = msg_obj.get("reply_to_message", {})
-            is_reply_to_bot = reply_to.get("from", {}).get("username", "").lower() == clean_bot_name
+    if chat_type in ["group", "supergroup"]:
+        active_group_chat_id = chat_id
+        if user_id not in known_users:
+            known_users[user_id] = {"name": first_name, "username": username, "chat_id": chat_id, "leave_count": 0}
+        else:
+            known_users[user_id]["name"] = first_name
+            known_users[user_id]["username"] = username
+        save_users_to_file()
 
-            if is_mentioned or is_reply_to_bot or chat_type == "private":
-                query_text = user_message.replace(BOT_USERNAME, "").replace(f"@{clean_bot_name}", "").strip()
-                if not query_text:
-                    query_text = user_message
+    if "new_chat_members" in msg_obj:
+        for nm in msg_obj["new_chat_members"]:
+            nm_id = str(nm["id"])
+            if nm_id == BOT_ID: continue
+            existing = known_users.get(nm_id, {})
+            known_users[nm_id] = {"name": nm.get("first_name","عضو"), "username": nm.get("username"), "chat_id": chat_id, "leave_count": existing.get("leave_count", 0)}
+        save_users_to_file()
 
-                reply = get_hermes_response(query_text, user_name=first_name)
-                
-                if not reply:
-                    reply = get_gemini_response(query_text, is_admin_private=(int(user_id) == ADMIN_ID), user_name=first_name)
+    if "left_chat_member" in msg_obj:
+        left_member = msg_obj["left_chat_member"]
+        left_id = str(left_member.get("id"))
+        left_name = left_member.get("first_name", "العضو")
+        if left_id == BOT_ID: return jsonify({"status": "ok"}), 200
+        leave_count = known_users.get(left_id, {}).get("leave_count", 0) + 1
+        if left_id in known_users: known_users[left_id]["leave_count"] = leave_count
+        else: known_users[left_id] = {"name": left_name, "username": None, "leave_count": leave_count, "chat_id": chat_id}
+        save_users_to_file()
+        if leave_count == 1:
+            send_telegram_message(chat_id, f"⚠️ {left_name} خرج (إنذار 1/2). اذا عاد وخرج سيتم حظره.")
+        elif leave_count == 2:
+            send_telegram_message(chat_id, f"🚫 {left_name} تم حظره (إنذار 2/2).")
+            ban_telegram_member(chat_id, left_id)
+        return jsonify({"status": "ok"}), 200
 
-                formatted_reply = f"مرحباً بك {first_name} 🌟\n\n{reply}"
-                send_telegram_message(chat_id, formatted_reply, reply_to_message_id=message_id)
+    if user_message:
+        clean_msg = user_message.strip().lower()
+        if clean_msg in ["السلام عليكم", "سلام عليكم", "صباح الخير", "مساء الخير"]:
+            send_telegram_message(chat_id, f"أهلا بك يا {first_name} 👋\n{GREETING_RESPONSE}")
+            return jsonify({"status": "ok"}), 200
+
+        is_mentioned = BOT_USERNAME.lower() in clean_msg
+        reply_to = msg_obj.get("reply_to_message", {})
+        is_reply_to_bot = reply_to.get("from", {}).get("username","").lower() == BOT_USERNAME.replace("@","").lower()
+
+        if is_mentioned or is_reply_to_bot:
+            query_text = user_message.replace(BOT_USERNAME, "").strip() or user_message
+            reply = get_hermes_response(query_text, user_name=first_name)
+            if not reply: reply = get_gemini_response(query_text, user_name=first_name)
+            send_telegram_message(chat_id, reply, reply_to_message_id=message_id)
 
     return jsonify({"status": "ok"}), 200
 

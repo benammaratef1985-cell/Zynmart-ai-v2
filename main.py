@@ -43,7 +43,8 @@ def load_users_from_file():
 
 load_users_from_file()
 
-ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: عربي مبسط 5-12 سطر ممنوع لا املك معلومة [الاخبار] {DYNAMIC_NEWS}"
+# Prompt محدد للغة العربية والإنجليزية فقط
+ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد بالعربية والإنجليزية فقط (Arabic & English ONLY). يمنع استخدام أي لغة أخرى نهائياً. اختصر في 5-12 سطر. ممنوع لا املك معلومة. [الاخبار] {DYNAMIC_NEWS}"
 GREETING_RESPONSE="http://zynmart3401.pinet.com\nhttps://t.me/zynpibot\nhttps://zynmartpi.github.io/"
 DEFAULT_FALLBACK_TEXT="ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
@@ -74,26 +75,24 @@ def fetch_real_evidence(user_message):
         except: pass
     return "\n".join(evidences) if evidences else "خبرة ZYNMART"
 
-# 1. دالة تصحيح وهلوسة الأسعار
+# دالة تصحيح الأسعار محسنة لشمل عدة صيغ
 def fix_price_hallucination(text):
     if not text:
         return text
     low = text.lower()
-    if "pi" in low and ("$32" in text or "32.27" in text or "32.35" in text):
+    targets = ["$32", "32.27", "32.35", "32.14", "31.98", "324.16"]
+    if "pi" in low and any(t in text for t in targets):
         try:
             cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd", timeout=5).json()
             real = cg.get("pi-network",{}).get("usd",0.34)
-            text = text.replace("$32.27","$"+str(real))
-            text = text.replace("$32.35","$"+str(real))
-            text = text.replace("$32","$"+str(real))
-            text = text.replace("32.27",""+str(real))
-            text = text.replace("32.35",""+str(real))
+            for t in targets:
+                text = text.replace("$"+t, "$"+str(real))
+                text = text.replace(t, str(real))
             text = text + "\n\nتصحيح Live: السعر الحقيقي $"+str(real)+" من Coingecko"
         except:
             pass
     return text
 
-# 2. دالة Hermes مع التعديل
 def get_hermes_response(user_message,user_name=""):
     if not HERMES_API_KEY: return None
     try:
@@ -108,7 +107,6 @@ def get_hermes_response(user_message,user_name=""):
     except: pass
     return None
 
-# 3. دالة Gemini مع التعديل
 def get_gemini_response(user_message,user_name=""):
     if not GEMINI_API_KEYS: return DEFAULT_FALLBACK_TEXT
     system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())

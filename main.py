@@ -97,7 +97,7 @@ def get_hermes_response(user_message,user_name=""):
     if not HERMES_API_KEY: return None
     try:
         evidence=fetch_real_evidence(user_message)
-        system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار انسخ الرقم حرفيا ابدا ب ⏳ واختم ب ✅ تمت المهمة"
+        system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار. اكتب الشرح والرد المفصل كاملاً أولاً، ثم اختم في نهاية النص بـ ✅ تمت المهمة"
         payload={"model":"nousresearch/hermes-3-llama-3.1-405b","messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_name+": "+user_message}],"temperature":0.1,"max_tokens":900}
         res=requests.post("https://openrouter.ai/api/v1/chat/completions",json=payload,headers={"Authorization":"Bearer "+HERMES_API_KEY,"Content-Type":"application/json"},timeout=15)
         if res.status_code==200:

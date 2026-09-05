@@ -43,8 +43,8 @@ def load_users_from_file():
 
 load_users_from_file()
 
-# Prompt نقي يلتزم بتعليمات الأدمن حرفياً
-ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). التزم بما يطلبه المستخدم والأدمن حرفياً وبدقة دون إضافة أي تفاصيل لم يطلبها. [الاخبار] {DYNAMIC_NEWS}"
+# Prompt نقي ومحدد بدون أي تكرار للروابط
+ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المنصة http://zynmart3401.pinet.com - منصة اكس https://x.com/ZYNMART - مجموعة فيسبوك https://facebook.com/groups/1338100594512304 - البريد zyntrawalletp@gmail.com - بوت التعدين والتفاعل https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). التزم بما يطلبه المستخدم والأدمن حرفياً وبدقة دون إضافة أي تفاصيل لم يطلبها. [الاخبار] {DYNAMIC_NEWS}"
 GREETING_RESPONSE="http://zynmart3401.pinet.com\nhttps://t.me/zynpibot\nhttps://zynmartpi.github.io/"
 DEFAULT_FALLBACK_TEXT="ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
@@ -163,7 +163,6 @@ def webhook():
                     if not task_prompt:
                         task_prompt = "اكتب قوانين وإرشادات المجموعة الرسمية بالتفصيل"
                     
-                    # تمرير أمر الأدمن كما هو تماماً
                     broadcast_reply = get_ai_response(task_prompt, user_name)
                     
                     requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": target_group, "text": broadcast_reply})

@@ -43,8 +43,8 @@ def load_users_from_file():
 
 load_users_from_file()
 
-# Prompt محدد للغة العربية فقط
-ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). يمنع استخدام أي لغة أخرى نهائياً. اختصر في 5-12 سطر. ممنوع لا املك معلومة. [الاخبار] {DYNAMIC_NEWS}"
+# Prompt محدد للغة العربية فقط مع السماح بتنفيذ كافة المهام المطلوب بثها من الأدمن دون اعتذار
+ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). يمنع استخدام أي لغة أخرى نهائياً. يجب إجابة ونشر كافة الطلبات والمهام التي يطلبها الأدمن فوراً دون اعتذار أو رفض. اختصر في 5-12 سطر. ممنوع لا املك معلومة. [الاخبار] {DYNAMIC_NEWS}"
 GREETING_RESPONSE="http://zynmart3401.pinet.com\nhttps://t.me/zynpibot\nhttps://zynmartpi.github.io/"
 DEFAULT_FALLBACK_TEXT="ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
@@ -97,7 +97,7 @@ def get_hermes_response(user_message,user_name=""):
     if not HERMES_API_KEY: return None
     try:
         evidence=fetch_real_evidence(user_message)
-        system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار. اكتب الشرح والرد المفصل كاملاً أولاً، ثم اختم في نهاية النص بـ ✅ تمت المهمة"
+        system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار. نفذ المطلب واكتب الشرح والرد المفصل كاملاً أولاً، ثم اختم في نهاية النص بـ ✅ تمت المهمة"
         payload={"model":"nousresearch/hermes-3-llama-3.1-405b","messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_name+": "+user_message}],"temperature":0.1,"max_tokens":900}
         res=requests.post("https://openrouter.ai/api/v1/chat/completions",json=payload,headers={"Authorization":"Bearer "+HERMES_API_KEY,"Content-Type":"application/json"},timeout=15)
         if res.status_code==200:
@@ -167,7 +167,10 @@ def webhook():
                     if not task_prompt:
                         task_prompt = "اكتب قوانين وإرشادات المجموعة الرسمية بالتفصيل"
                     
-                    broadcast_reply = get_ai_response(task_prompt, user_name)
+                    # تغليف الطلب بتأكيد صريح يمنع النموذج من الرفض
+                    formatted_broadcast_prompt = f"مهمة بث رسمية من الأدمن: {task_prompt}. قم بصياغة شرح ونشر مفصل وكامل حول هذا الموضوع باللغة العربية."
+                    broadcast_reply = get_ai_response(formatted_broadcast_prompt, user_name)
+                    
                     requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": target_group, "text": broadcast_reply})
                     requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": chat_id, "text": "✅ تم تنفيذ المهمة ونشرها في المجموعة بنجاح!"})
                 else:

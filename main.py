@@ -43,8 +43,8 @@ def load_users_from_file():
 
 load_users_from_file()
 
-# Prompt محدد للغة العربية والإنجليزية فقط
-ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد بالعربية والإنجليزية فقط (Arabic & English ONLY). يمنع استخدام أي لغة أخرى نهائياً. اختصر في 5-12 سطر. ممنوع لا املك معلومة. [الاخبار] {DYNAMIC_NEWS}"
+# Prompt محدد للغة العربية فقط
+ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). يمنع استخدام أي لغة أخرى نهائياً. اختصر في 5-12 سطر. ممنوع لا املك معلومة. [الاخبار] {DYNAMIC_NEWS}"
 GREETING_RESPONSE="http://zynmart3401.pinet.com\nhttps://t.me/zynpibot\nhttps://zynmartpi.github.io/"
 DEFAULT_FALLBACK_TEXT="ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
@@ -135,6 +135,7 @@ def index():
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    global active_group_chat_id
     data = request.get_json(force=True, silent=True)
     if not data or "message" not in data:
         return jsonify({"status": "ok"}), 200
@@ -143,13 +144,34 @@ def webhook():
     chat_id = msg.get("chat", {}).get("id")
     chat_type = msg.get("chat", {}).get("type", "private")
     user_id = msg.get("from", {}).get("id")
-    text = msg.get("text", "")
+    text = msg.get("text", "").strip()
     user_name = msg.get("from", {}).get("first_name", "")
 
     if text and chat_id and BOT_TOKEN:
+        # حفظ تلقائي لمعرف المجموعة عند وصول أي رسالة منها
+        if chat_type in ["group", "supergroup"]:
+            if active_group_chat_id != chat_id:
+                active_group_chat_id = chat_id
+                save_users_to_file()
+
         # فحص الخاص: السماح للأدمن فقط
         if chat_type == "private":
             if user_id not in ADMIN_IDS:
+                return jsonify({"status": "ok"}), 200
+
+            # تنفيذ ميزة "ابدأ البث" ونشر الرسالة في المجموعة
+            if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
+                target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+                if target_group:
+                    task_prompt = text.replace("ابدا البث", "").replace("ابدأ البث", "").strip()
+                    if not task_prompt:
+                        task_prompt = "اكتب قوانين وإرشادات المجموعة الرسمية بالتفصيل"
+                    
+                    broadcast_reply = get_ai_response(task_prompt, user_name)
+                    requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": target_group, "text": broadcast_reply})
+                    requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": chat_id, "text": "✅ تم تنفيذ المهمة ونشرها في المجموعة بنجاح!"})
+                else:
+                    requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لم يتم التعرف على المجموعة بعد. أرسل أي رسالة داخل المجموعة أولاً ليتذكرها البوت تلقائياً."})
                 return jsonify({"status": "ok"}), 200
 
         # فحص المجموعات: الرد فقط عند وجود المنشن

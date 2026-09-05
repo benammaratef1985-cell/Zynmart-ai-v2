@@ -141,10 +141,24 @@ def webhook():
     
     msg = data["message"]
     chat_id = msg.get("chat", {}).get("id")
+    chat_type = msg.get("chat", {}).get("type", "private")
+    user_id = msg.get("from", {}).get("id")
     text = msg.get("text", "")
     user_name = msg.get("from", {}).get("first_name", "")
 
     if text and chat_id and BOT_TOKEN:
+        # فحص الخاص: السماح للأدمن فقط
+        if chat_type == "private":
+            if user_id not in ADMIN_IDS:
+                return jsonify({"status": "ok"}), 200
+
+        # فحص المجموعات: الرد فقط عند وجود المنشن
+        if chat_type in ["group", "supergroup"]:
+            bot_handle = BOT_USERNAME.lower()
+            clean_handle = bot_handle.replace("@", "")
+            if bot_handle not in text.lower() and clean_handle not in text.lower():
+                return jsonify({"status": "ok"}), 200
+
         reply = get_ai_response(text, user_name)
         requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": chat_id, "text": reply})
 

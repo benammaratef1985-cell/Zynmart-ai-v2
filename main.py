@@ -71,7 +71,7 @@ def fetch_real_evidence(user_message):
             r=requests.get("https://api.dexscreener.com/latest/dex/search/?q=zyn",timeout=8).json()
             if r.get("pairs"):
                 p=r["pairs"][0]
-                evidences.append("دليل DEX: ZYN سعر $"+str(p.get("priceUsd","N/A"))+" سيولة $"+str(p.get("liquidity",{}).get("usd",0))+" رابط "+str(p.get("url","")))
+                evidences.append("دليل DEX: ZYN سعر $"+str(p.get("priceUsd","N/A"))+" سيولة $"+str(p.get("liquidity",{}).get("usd",0)))
         except: pass
     return "\n".join(evidences) if evidences else "خبرة ZYNMART"
 

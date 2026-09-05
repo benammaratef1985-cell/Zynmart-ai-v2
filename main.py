@@ -43,8 +43,8 @@ def load_users_from_file():
 
 load_users_from_file()
 
-# Prompt محدد للغة العربية فقط مع السماح بتنفيذ كافة المهام المطلوب بثها من الأدمن دون اعتذار
-ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). يمنع استخدام أي لغة أخرى نهائياً. يجب إجابة ونشر كافة الطلبات والمهام التي يطلبها الأدمن فوراً دون اعتذار أو رفض. اختصر في 5-12 سطر. ممنوع لا املك معلومة. [الاخبار] {DYNAMIC_NEWS}"
+# Prompt نقي يلتزم بتعليمات الأدمن حرفياً
+ZYNMART_PROMPT="انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المتجر http://zynmart3401.pinet.com - التعدين https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط (Arabic ONLY). التزم بما يطلبه المستخدم والأدمن حرفياً وبدقة دون إضافة أي تفاصيل لم يطلبها. [الاخبار] {DYNAMIC_NEWS}"
 GREETING_RESPONSE="http://zynmart3401.pinet.com\nhttps://t.me/zynpibot\nhttps://zynmartpi.github.io/"
 DEFAULT_FALLBACK_TEXT="ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
@@ -75,7 +75,6 @@ def fetch_real_evidence(user_message):
         except: pass
     return "\n".join(evidences) if evidences else "خبرة ZYNMART"
 
-# دالة تصحيح الأسعار محسنة لشمل عدة صيغ
 def fix_price_hallucination(text):
     if not text:
         return text
@@ -97,7 +96,7 @@ def get_hermes_response(user_message,user_name=""):
     if not HERMES_API_KEY: return None
     try:
         evidence=fetch_real_evidence(user_message)
-        system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار. نفذ المطلب واكتب الشرح والرد المفصل كاملاً أولاً، ثم اختم في نهاية النص بـ ✅ تمت المهمة"
+        system_prompt=ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}",get_latest_news())+" قانون LIVE: الادلة "+evidence+" ممنوع اختراع اسعار. نفذ ما طلبه المستخدم بالضبط واختم بـ ✅ تمت المهمة"
         payload={"model":"nousresearch/hermes-3-llama-3.1-405b","messages":[{"role":"system","content":system_prompt},{"role":"user","content":user_name+": "+user_message}],"temperature":0.1,"max_tokens":900}
         res=requests.post("https://openrouter.ai/api/v1/chat/completions",json=payload,headers={"Authorization":"Bearer "+HERMES_API_KEY,"Content-Type":"application/json"},timeout=15)
         if res.status_code==200:
@@ -148,18 +147,15 @@ def webhook():
     user_name = msg.get("from", {}).get("first_name", "")
 
     if text and chat_id and BOT_TOKEN:
-        # حفظ تلقائي لمعرف المجموعة عند وصول أي رسالة منها
         if chat_type in ["group", "supergroup"]:
             if active_group_chat_id != chat_id:
                 active_group_chat_id = chat_id
                 save_users_to_file()
 
-        # فحص الخاص: السماح للأدمن فقط
         if chat_type == "private":
             if user_id not in ADMIN_IDS:
                 return jsonify({"status": "ok"}), 200
 
-            # تنفيذ ميزة "ابدأ البث" ونشر الرسالة في المجموعة
             if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
                 target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
                 if target_group:
@@ -167,9 +163,8 @@ def webhook():
                     if not task_prompt:
                         task_prompt = "اكتب قوانين وإرشادات المجموعة الرسمية بالتفصيل"
                     
-                    # تغليف الطلب بتأكيد صريح يمنع النموذج من الرفض
-                    formatted_broadcast_prompt = f"مهمة بث رسمية من الأدمن: {task_prompt}. قم بصياغة شرح ونشر مفصل وكامل حول هذا الموضوع باللغة العربية."
-                    broadcast_reply = get_ai_response(formatted_broadcast_prompt, user_name)
+                    # تمرير أمر الأدمن كما هو تماماً
+                    broadcast_reply = get_ai_response(task_prompt, user_name)
                     
                     requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": target_group, "text": broadcast_reply})
                     requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": chat_id, "text": "✅ تم تنفيذ المهمة ونشرها في المجموعة بنجاح!"})
@@ -177,7 +172,6 @@ def webhook():
                     requests.post("https://api.telegram.org/bot"+BOT_TOKEN+"/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لم يتم التعرف على المجموعة بعد. أرسل أي رسالة داخل المجموعة أولاً ليتذكرها البوت تلقائياً."})
                 return jsonify({"status": "ok"}), 200
 
-        # فحص المجموعات: الرد فقط عند وجود المنشن
         if chat_type in ["group", "supergroup"]:
             bot_handle = BOT_USERNAME.lower()
             clean_handle = bot_handle.replace("@", "")

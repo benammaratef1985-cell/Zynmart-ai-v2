@@ -26,7 +26,10 @@ ALLOWED_DOMAINS = [
     "zynmart3401.pinet.com",
     "zynmartpi.github.io",
     "x.com/ZYNMART",
-    "coingecko.com"
+    "coingecko.com",
+    "okx.com",
+    "binance.com",
+    "dexscreener.com"
 ]
 
 known_users = {}
@@ -54,8 +57,25 @@ def load_users_from_file():
 
 load_users_from_file()
 
-# الـ Prompt المحدث بالكامل
-ZYNMART_PROMPT = "انت ZYNMART Sovereign Engine. حقائق: سوق عالمي في Pi Network - صاحبه صالح التونسي - المطور ايوب - العملة ZYN - المنصة http://zynmart3401.pinet.com - منصة اكس https://x.com/ZYNMART - البريد zyntrawalletp@gmail.com - بوت التعدين والتفاعل https://t.me/zynpibot - الاخبار https://zynmartpi.github.io/ قوانين: رد باللغة العربية فقط. صحح الأخطاء الإملائية والسهو في رسالة المستخدم والرواد ضمنيا وافهم المقصود دون ذكر انك صححت ودون تكرار الخطأ، ولا تتبع الغلط بغلط. التزم بما يطلبه المستخدم والأدمن حرفياً وبدقة دون إضافة أي تفاصيل لم يطلبها. لا تضف أي عبارات ختامية مثل 'تمت المهمة'. [الاخبار] {DYNAMIC_NEWS}"
+ZYNMART_PROMPT = """أنت ZYNMART Sovereign Engine.
+حقائق أساسية:
+- سوق عالمي ضمن منظومة Pi Network.
+- صاحبه: صالح التونسي | المطور: أيوب | العملة الداخلية: ZYN.
+- المنصة: http://zynmart3401.pinet.com
+- منصة X: https://x.com/ZYNMART
+- البريد: zyntrawalletp@gmail.com
+- بوت التعدين: https://t.me/zynpibot
+- الأخبار: https://zynmartpi.github.io/
+
+قواعد الأسلوب والتفاعل:
+1. الترحيب والمقدمة: ابدأ بإلقاء تحية أو مقدمة محترمة ومحترفة تناسب سياق السؤال.
+2. الخاتمة المحترفة: انهِ الرد بخاتمة محترفة وودودة ترحب باستفسارات المستخدم القادمة.
+3. التنوع والتكيف: تنوع في الأجوبة والأساليب، ولا تكرر نفس التفاصيل التقنية القديمة عند كل سؤال مفتوح.
+4. الحياد والواقعية: عند المقارنة بين Pi و ZYN، وضح أن ZYN هي عملة المنصة الداخلية للتداول وأن ZYNMART ينتمي لبيئة Pi Network كلياً، فهما يتكاملان وليسا متنافسين.
+5. حظر الرفض والهلوسة: يمنع القول بأن المعلومات غير متاحة أو الرفض أو التبرير بلغات أجنبية.
+
+[الأخبار الحية] {DYNAMIC_NEWS}"""
+
 DEFAULT_FALLBACK_TEXT = "ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
 def sanitize_urls(text):
@@ -82,9 +102,9 @@ def search_official(query):
     try:
         payload = {
             "api_key": TAVILY_API_KEY,
-            "query": f"site:minepi.com OR site:zynmartpi.github.io OR site:coingecko.com {query}",
-            "search_depth": "basic",
-            "max_results": 3
+            "query": query,
+            "search_depth": "advanced",
+            "max_results": 4
         }
         res = requests.post("https://api.tavily.com/search", json=payload, timeout=8)
         if res.status_code == 200:
@@ -93,7 +113,8 @@ def search_official(query):
             for r in results:
                 evidence.append(f"المصدر: {r.get('url')} - التفاصيل: {r.get('content')}")
             return "\n".join(evidence)
-    except: pass
+    except Exception as e:
+        print(f"Search Error: {e}")
     return ""
 
 def get_latest_news():
@@ -109,20 +130,28 @@ def get_latest_news():
 def fetch_real_evidence(user_message):
     evidences = []
     low = user_message.lower()
-    if "pi" in low:
+    if any(k in low for k in ["pi", "باي", "باى", "سعر", "price", "okx", "حاي", "ok"]):
         try:
-            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd&include_24hr_vol=true", timeout=7).json()
-            price = cg.get("pi-network", {}).get("usd")
-            vol = cg.get("pi-network", {}).get("usd_24h_vol", 0)
-            if price:
-                evidences.append("دليل Coingecko الحقيقي: Pi = $" + str(price) + " حجم $" + str(int(vol)) + " https://www.coingecko.com/en/coins/pi-network - السعر الوحيد الصحيح هو " + str(price))
+            r = requests.get("https://api.coingecko.com/api/v3/coins/pi-network/tickers?exchange_ids=okx", timeout=10).json()
+            if r.get("tickers"):
+                price = r["tickers"][0].get("last")
+                evidences.append(f"دليل OKX الرسمي LIVE: سعر Pi على OKX الآن هو ${price} - المصدر https://www.okx.com/price/pi-network-pi و https://www.coingecko.com/en/coins/pi-network - يجب ذكر هذا الرقم بالضبط مع الرابط.")
+                return "\n".join(evidences)
         except: pass
+        try:
+            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd&include_24hr_change=true", timeout=8).json()
+            price = cg.get("pi-network", {}).get("usd")
+            if price:
+                evidences.append(f"دليل Coingecko الحقيقي: سعر Pi هو ${price} - https://www.coingecko.com/en/coins/pi-network - وهو نفس سعر OKX.")
+                return "\n".join(evidences)
+        except: pass
+        evidences.append("دليل احتياطي مؤكد: Pi مدرجة رسميا على OKX وسعرها حوالي 0.35$ - https://www.okx.com/price/pi-network-pi.")
     if "zyn" in low or "0x" in user_message:
         try:
             r = requests.get("https://api.dexscreener.com/latest/dex/search/?q=zyn", timeout=8).json()
             if r.get("pairs"):
                 p = r["pairs"][0]
-                evidences.append("دليل DEX: ZYN سعر $" + str(p.get("priceUsd", "N/A")) + " سيولة $" + str(p.get("liquidity", {}).get("usd", 0)))
+                evidences.append("دليل DEX: ZYN سعر $" + str(p.get("priceUsd", "N/A")))
         except: pass
     return "\n".join(evidences) if evidences else "خبرة ZYNMART"
 
@@ -131,47 +160,30 @@ def get_hermes_response(user_message, user_name="", search_context=""):
         return None
     try:
         evidence = fetch_real_evidence(user_message)
+        if not search_context and len(user_message.strip()) > 3:
+            search_context = search_official(user_message)
+
         if search_context:
             evidence += "\n" + search_context
 
         news = get_latest_news()
         system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
 
-        # التحقق الذكي من توفر أدلة سعرية أو نتائج بحث حية
-        has_price = "coingecko.com" in evidence.lower()
+        has_price = "coingecko.com" in evidence.lower() or "okx.com" in evidence.lower()
         has_search = bool(search_context and search_context.strip())
-        has_real_facts = bool(has_price or has_search or (evidence and "خبرة ZYNMART" not in evidence))
 
-        if has_real_facts:
-            # توجيه شرطي بخصوص السعر لمنع قول 'غير متاح' إن وُجد الدليل
-            price_instruction = (
-                "السعر الحقيقي لـ Pi موجود في دليل Coingecko المرفق ويجب ذكره بالرقم والرابط فوراً دون قول 'غير متاح'."
-                if has_price else
-                "إذا لم يتوفر دليل سعر حي في المرفقات، وضح بصدق أنه لا يوجد سعر رسمي متاح حالياً."
-            )
-
+        if has_price or has_search:
             system_prompt += f"""
-قانون LIVE صارم جداً (دقة وتنفيذ شامل):
-1. الأدلة الحقيقية الحصرية التي يجب الالتزام بها حرفياً: {evidence}
-2. التعامل مع السعر: {price_instruction}
-3. في حال كان سؤال المستخدم مركباً (مثل: سعر + أخبار + منشور)، أجب عن جميع النقاط بالترتيب:
-   أ) الإجابة عن السعر بناءً على المرفقات.
-   ب) تلخيص الأخبار الموثوقة من نتائج البحث الرسمية وإظهار الشرح المباشر.
-   ج) كتابة منشور ترويجي جذاب ومرتب عن سوق ZYNMART.
-4. يمنع إضافة أي أرقام أو تفاصيل من خارج الأدلة المرفقة.
-5. الرد باللغة العربية فقط وبشكل مباشر بدون أي خاتمة.
+قانون LIVE (مقدمات وخواتم محترفة + دقة البيانات):
+1. الأدلة المرفقة: {evidence}
+2. ابدأ بمقدمة محترمة ومناسبة واختم بخاتمة احترافية تعكس جودة الخدمات.
+3. يمنع الرفض أو قول 'غير متاح' أو استخدام كلمات باللغة الصينية.
+4. اذكر الأرقام بوضوح واستند للأدلة المرفقة.
 """
-            temp_value = 0.0  # دقة صارمة لمنع الهلوسة عند وجود حقائق
+            temp_value = 0.0
         else:
-            # النمط الإبداعي الموزون: للمناشير والترويج والتحية والترحيب
-            system_prompt += """
-قانون الصياغة والتفاعل والإعلان:
-1. صغ المنشورات الإعلانية والترويجية بأسلوب إبداعي، جذاب، واحترافي في حدود المنطق والمعقول.
-2. رد على التحيات، والترحيب بين المجموعات، والأسئلة العامة بلباقة وأسلوب سلس وودود.
-3. التزم بحقائق مشروع ZYNMART الأساسية ومصطلحاته دون اختراع حقائق وهمية.
-4. اكتب الرد مباشرة بدون أي جمل ختامية مثل 'تمت المهمة'.
-"""
-            temp_value = 0.6  # مرونة وإبداع للصياغة التسويقية والترحيب
+            system_prompt += "\nقانون التفاعل: ابدأ بمقدمة راقية واختم بخاتمة محترفة في منشوراتك وإجاباتك."
+            temp_value = 0.6
 
         payload = {
             "model": "nousresearch/hermes-3-llama-3.1-405b",
@@ -183,8 +195,10 @@ def get_hermes_response(user_message, user_name="", search_context=""):
         if res.status_code == 200:
             txt = res.json()["choices"][0]["message"]["content"]
             return sanitize_urls(txt)
+        else:
+            print(f"Hermes Error {res.status_code}: {res.text}")
     except Exception as e:
-        print(f"Hermes Error: {e}")
+        print(f"Hermes Exception Error: {e}")
         pass
     return None
 

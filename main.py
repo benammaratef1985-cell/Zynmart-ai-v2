@@ -137,19 +137,31 @@ def get_hermes_response(user_message, user_name="", search_context=""):
         news = get_latest_news()
         system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
 
-        # التحقق الآمن من وجود نتائج بحث حقيقية أو بيانات حية
-        has_real_facts = bool((search_context and search_context.strip()) or (evidence and "خبرة ZYNMART" not in evidence))
+        # التحقق الذكي من توفر أدلة سعرية أو نتائج بحث حية
+        has_price = "coingecko.com" in evidence.lower()
+        has_search = bool(search_context and search_context.strip())
+        has_real_facts = bool(has_price or has_search or (evidence and "خبرة ZYNMART" not in evidence))
 
         if has_real_facts:
-            # النمط الصارم عند وجود بحث: نقل وشرح الحقائق المجلوبة فقط بدون اختراع
+            # توجيه شرطي بخصوص السعر لمنع قول 'غير متاح' إن وُجد الدليل
+            price_instruction = (
+                "السعر الحقيقي لـ Pi موجود في دليل Coingecko المرفق ويجب ذكره بالرقم والرابط فوراً دون قول 'غير متاح'."
+                if has_price else
+                "إذا لم يتوفر دليل سعر حي في المرفقات، وضح بصدق أنه لا يوجد سعر رسمي متاح حالياً."
+            )
+
             system_prompt += f"""
-قانون LIVE صارم جداً (عرض نتائج وشرح مباشر):
-1. اعتمد حصراً على الأدلة الحقيقية المرفقة: {evidence}
-2. اعرض نتائج البحث وقم بشرحها وتبسيطها مباشرة وبوضوح للمستخدم فوراً، دون انتظار طلب الشرح.
-3. يمنع منعاً باتاً إضافة أي معلومات، أرقام، أو اجتهادات شخصية من خارج نتائج البحث المرفقة.
-4. رد باللغة العربية فقط وبشكل مباشر دون أي خاتمة مثل 'تمت المهمة'.
+قانون LIVE صارم جداً (دقة وتنفيذ شامل):
+1. الأدلة الحقيقية الحصرية التي يجب الالتزام بها حرفياً: {evidence}
+2. التعامل مع السعر: {price_instruction}
+3. في حال كان سؤال المستخدم مركباً (مثل: سعر + أخبار + منشور)، أجب عن جميع النقاط بالترتيب:
+   أ) الإجابة عن السعر بناءً على المرفقات.
+   ب) تلخيص الأخبار الموثوقة من نتائج البحث الرسمية وإظهار الشرح المباشر.
+   ج) كتابة منشور ترويجي جذاب ومرتب عن سوق ZYNMART.
+4. يمنع إضافة أي أرقام أو تفاصيل من خارج الأدلة المرفقة.
+5. الرد باللغة العربية فقط وبشكل مباشر بدون أي خاتمة.
 """
-            temp_value = 0.0  # دقة صارمة لمنع الهلوسة في نتائج البحث
+            temp_value = 0.0  # دقة صارمة لمنع الهلوسة عند وجود حقائق
         else:
             # النمط الإبداعي الموزون: للمناشير والترويج والتحية والترحيب
             system_prompt += """
@@ -171,7 +183,9 @@ def get_hermes_response(user_message, user_name="", search_context=""):
         if res.status_code == 200:
             txt = res.json()["choices"][0]["message"]["content"]
             return sanitize_urls(txt)
-    except: pass
+    except Exception as e:
+        print(f"Hermes Error: {e}")
+        pass
     return None
 
 def get_gemini_response(user_message, user_name="", search_context=""):

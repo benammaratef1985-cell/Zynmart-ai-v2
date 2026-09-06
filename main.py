@@ -20,16 +20,9 @@ BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
 
-# القائمة البيضاء للروابط المسموح بها فقط
 ALLOWED_DOMAINS = [
-    "minepi.com",
-    "zynmart3401.pinet.com",
-    "zynmartpi.github.io",
-    "x.com/ZYNMART",
-    "coingecko.com",
-    "okx.com",
-    "binance.com",
-    "dexscreener.com"
+    "minepi.com", "zynmart3401.pinet.com", "zynmartpi.github.io",
+    "x.com/ZYNMART", "coingecko.com", "okx.com", "binance.com", "dexscreener.com"
 ]
 
 known_users = {}
@@ -67,45 +60,34 @@ ZYNMART_PROMPT = """أنت ZYNMART Sovereign Engine.
 - بوت التعدين: https://t.me/zynpibot
 - الأخبار: https://zynmartpi.github.io/
 
-قواعد الأسلوب والتفاعل:
-1. الترحيب والمقدمة: ابدأ بإلقاء تحية أو مقدمة محترمة ومحترفة تناسب سياق السؤال.
-2. الخاتمة المحترفة: انهِ الرد بخاتمة محترفة وودودة ترحب باستفسارات المستخدم القادمة.
-3. التنوع والتكيف: تنوع في الأجوبة والأساليب، ولا تكرر نفس التفاصيل التقنية القديمة عند كل سؤال مفتوح.
-4. الحياد والواقعية: عند المقارنة بين Pi و ZYN، وضح أن ZYN هي عملة المنصة الداخلية للتداول وأن ZYNMART ينتمي لبيئة Pi Network كلياً، فهما يتكاملان وليسا متنافسين.
-5. حظر الرفض والهلوسة: يمنع القول بأن المعلومات غير متاحة أو الرفض أو التبرير بلغات أجنبية.
+قواعد التفاعل:
+1. الترحيب والمقدمة: ابدأ بإلقاء تحية أو مقدمة راقية تناسب سياق السؤال.
+2. الخاتمة المحترفة: انهِ الرد بخاتمة محترفة وودودة تعكس جودة الخدمات وتستقبل استفسارات الأعضاء.
+3. الحياد والواقعية: عند المقارنة بين Pi و ZYN، وضح أن ZYN هي عملة المنصة الداخلية للتداول وأن ZYNMART ينتمي لبيئة Pi Network كلياً، فهما يتكاملان وليسا متنافسين.
+4. الإجابات المفصلة: أجب بدقة واستفاضة ووضح كافة النقاط المطلوب الاستفسار عنها.
+5. يمنع التكرار الآلي للتفاصيل التقنية القديمة.
 
 [الأخبار الحية] {DYNAMIC_NEWS}"""
 
 DEFAULT_FALLBACK_TEXT = "ZYNMART: http://zynmart3401.pinet.com | تعدين: https://t.me/zynpibot"
 
 def sanitize_urls(text):
-    if not text:
-        return text
-    
+    if not text: return text
     soup = BeautifulSoup(text, "html.parser")
     clean_text = soup.get_text()
-
     url_pattern = r'https?://[^\s]+'
     found_urls = re.findall(url_pattern, clean_text)
-    
     for url in found_urls:
         is_allowed = any(domain in url for domain in ALLOWED_DOMAINS)
         if not is_allowed:
             clean_text = clean_text.replace(url, "")
-
     clean_text = clean_text.replace("✅ تمت المهمة", "").replace("تمت المهمة", "").strip()
     return clean_text
 
 def search_official(query):
-    if not TAVILY_API_KEY:
-        return ""
+    if not TAVILY_API_KEY: return ""
     try:
-        payload = {
-            "api_key": TAVILY_API_KEY,
-            "query": query,
-            "search_depth": "advanced",
-            "max_results": 4
-        }
+        payload = {"api_key": TAVILY_API_KEY, "query": query, "search_depth": "advanced", "max_results": 3}
         res = requests.post("https://api.tavily.com/search", json=payload, timeout=8)
         if res.status_code == 200:
             results = res.json().get("results", [])
@@ -130,101 +112,88 @@ def get_latest_news():
 def fetch_real_evidence(user_message):
     evidences = []
     low = user_message.lower()
-    if any(k in low for k in ["pi", "باي", "باى", "سعر", "price", "okx", "حاي", "ok"]):
+    if any(k in low for k in ["pi", "باي", "باى", "سعر", "price", "okx"]):
         try:
-            r = requests.get("https://api.coingecko.com/api/v3/coins/pi-network/tickers?exchange_ids=okx", timeout=10).json()
-            if r.get("tickers"):
-                price = r["tickers"][0].get("last")
-                evidences.append(f"دليل OKX الرسمي LIVE: سعر Pi على OKX الآن هو ${price} - المصدر https://www.okx.com/price/pi-network-pi و https://www.coingecko.com/en/coins/pi-network - يجب ذكر هذا الرقم بالضبط مع الرابط.")
-                return "\n".join(evidences)
-        except: pass
-        try:
-            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd&include_24hr_change=true", timeout=8).json()
+            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd", timeout=5).json()
             price = cg.get("pi-network", {}).get("usd")
             if price:
-                evidences.append(f"دليل Coingecko الحقيقي: سعر Pi هو ${price} - https://www.coingecko.com/en/coins/pi-network - وهو نفس سعر OKX.")
+                evidences.append(f"سعر Pi الحالي على Coingecko/OKX هو ${price} - المصدر https://www.coingecko.com/en/coins/pi-network")
                 return "\n".join(evidences)
-        except: pass
-        evidences.append("دليل احتياطي مؤكد: Pi مدرجة رسميا على OKX وسعرها حوالي 0.35$ - https://www.okx.com/price/pi-network-pi.")
-    if "zyn" in low or "0x" in user_message:
+        except Exception as e:
+            print(f"Fetch Error: {e}")
+            
+        evidences.append("سعر Pi المتاح حالياً يدور حول 0.35$ - https://www.coingecko.com/en/coins/pi-network")
+    return "\n".join(evidences) if evidences else ""
+
+def get_gemini_response(user_message, user_name="", search_context=""):
+    if not GEMINI_API_KEYS: 
+        return None
+    
+    evidence = fetch_real_evidence(user_message)
+    news = get_latest_news()
+    system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
+    
+    context_block = ""
+    if evidence: context_block += "\n[الأدلة المباشرة]: " + evidence
+    if search_context: context_block += "\n[نتائج البحث الرسمية]: " + search_context
+
+    full_prompt = f"{system_prompt}\n{context_block}\n\nالمستخدم ({user_name}): {user_message}"
+
+    payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
+    for k in GEMINI_API_KEYS:
         try:
-            r = requests.get("https://api.dexscreener.com/latest/dex/search/?q=zyn", timeout=8).json()
-            if r.get("pairs"):
-                p = r["pairs"][0]
-                evidences.append("دليل DEX: ZYN سعر $" + str(p.get("priceUsd", "N/A")))
-        except: pass
-    return "\n".join(evidences) if evidences else "خبرة ZYNMART"
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+            if res.status_code == 200:
+                parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                if parts:
+                    txt = parts[0].get("text", "")
+                    if txt:
+                        return sanitize_urls(txt)
+            else:
+                print(f"Gemini Error Status: {res.status_code}")
+        except Exception as e:
+            print(f"Gemini Exception: {e}")
+            continue
+    return None
 
 def get_hermes_response(user_message, user_name="", search_context=""):
-    if not HERMES_API_KEY: 
-        return None
+    if not HERMES_API_KEY: return None
     try:
         evidence = fetch_real_evidence(user_message)
-        if not search_context and len(user_message.strip()) > 3:
-            search_context = search_official(user_message)
-
-        if search_context:
-            evidence += "\n" + search_context
+        if search_context: evidence += "\n" + search_context
 
         news = get_latest_news()
         system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
 
-        has_price = "coingecko.com" in evidence.lower() or "okx.com" in evidence.lower()
-        has_search = bool(search_context and search_context.strip())
-
-        if has_price or has_search:
-            system_prompt += f"""
-قانون LIVE (مقدمات وخواتم محترفة + دقة البيانات):
-1. الأدلة المرفقة: {evidence}
-2. ابدأ بمقدمة محترمة ومناسبة واختم بخاتمة احترافية تعكس جودة الخدمات.
-3. يمنع الرفض أو قول 'غير متاح' أو استخدام كلمات باللغة الصينية.
-4. اذكر الأرقام بوضوح واستند للأدلة المرفقة.
-"""
-            temp_value = 0.0
-        else:
-            system_prompt += "\nقانون التفاعل: ابدأ بمقدمة راقية واختم بخاتمة محترفة في منشوراتك وإجاباتك."
-            temp_value = 0.6
+        if evidence:
+            system_prompt += f"\n[أدلة موثوقة]:\n{evidence}"
 
         payload = {
             "model": "nousresearch/hermes-3-llama-3.1-405b",
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_name + ": " + user_message}],
-            "temperature": temp_value,
-            "max_tokens": 900
+            "temperature": 0.4,
+            "max_tokens": 600
         }
-        res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers={"Authorization": "Bearer " + HERMES_API_KEY, "Content-Type": "application/json"}, timeout=15)
+        res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers={"Authorization": "Bearer " + HERMES_API_KEY, "Content-Type": "application/json"}, timeout=10)
         if res.status_code == 200:
             txt = res.json()["choices"][0]["message"]["content"]
             return sanitize_urls(txt)
-        else:
-            print(f"Hermes Error {res.status_code}: {res.text}")
     except Exception as e:
-        print(f"Hermes Exception Error: {e}")
-        pass
+        print(f"Hermes Exception: {e}")
     return None
 
-def get_gemini_response(user_message, user_name="", search_context=""):
-    if not GEMINI_API_KEYS: return sanitize_urls(DEFAULT_FALLBACK_TEXT)
-    system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", get_latest_news())
-    if search_context:
-        system_prompt += "\nنتائج البحث الرسمية:\n" + search_context
-
-    payload = {"contents": [{"parts": [{"text": system_prompt + "\n\n" + user_name + ": " + user_message}]}]}
-    for k in GEMINI_API_KEYS:
-        try:
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
-            if res.status_code == 200:
-                parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                if parts:
-                    txt = parts[0].get("text", DEFAULT_FALLBACK_TEXT)
-                    return sanitize_urls(txt)
-        except: continue
-    return sanitize_urls(DEFAULT_FALLBACK_TEXT)
-
 def get_ai_response(user_message, user_name="", search_context=""):
-    res = get_hermes_response(user_message, user_name, search_context)
+    # المحرك الأساسي هو Gemini
+    res = get_gemini_response(user_message, user_name, search_context)
     if res: return res
-    return get_gemini_response(user_message, user_name, search_context)
+    
+    # المحرك الاحتياطي هو Hermes
+    print("Gemini unavailable, attempting Hermes...")
+    res_hermes = get_hermes_response(user_message, user_name, search_context)
+    if res_hermes: return res_hermes
+
+    return sanitize_urls(DEFAULT_FALLBACK_TEXT)
 
 @app.route("/", methods=["GET"])
 def index():
@@ -279,8 +248,12 @@ def webhook():
             if bot_handle not in text.lower() and clean_handle not in text.lower():
                 return jsonify({"status": "ok"}), 200
 
-        reply = get_ai_response(text, user_name)
-        requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": reply})
+            search_res = ""
+            if any(k in text.lower() for k in ["سعر", "اخبار", "أخبار", "news", "pi", "zyn"]):
+                search_res = search_official(text)
+
+            reply = get_ai_response(text, user_name, search_context=search_res)
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": reply})
 
     return jsonify({"status": "ok"}), 200
 

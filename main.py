@@ -61,11 +61,10 @@ ZYNMART_PROMPT = """أنت ZYNMART Sovereign Engine.
 - الأخبار: https://zynmartpi.github.io/
 
 قواعد التفاعل:
-1. الترحيب والمقدمة: ابدأ بإلقاء تحية أو مقدمة راقية تناسب سياق السؤال.
-2. الخاتمة المحترفة: انهِ الرد بخاتمة محترفة وودودة تعكس جودة الخدمات وتستقبل استفسارات الأعضاء.
-3. الحياد والواقعية: عند المقارنة بين Pi و ZYN، وضح أن ZYN هي عملة المنصة الداخلية للتداول وأن ZYNMART ينتمي لبيئة Pi Network كلياً، فهما يتكاملان وليسا متنافسين.
-4. الإجابات المفصلة: أجب بدقة واستفاضة ووضح كافة النقاط المطلوب الاستفسار عنها.
-5. يمنع التكرار الآلي للتفاصيل التقنية القديمة.
+1. الترحيب والمقدمة: ابدأ بإلقاء تحية أو مقدمة راقية تناسب السؤال.
+2. الخاتمة: انهِ الرد بخاتمة محترفة تعكس جودة الخدمات وتستقبل استفسارات الأعضاء.
+3. الحياد والواقعية: وضح أن ZYN هي عملة المنصة الداخلية للتداول وأن ZYNMART ينتمي لبيئة Pi Network كلياً، فهما يتكاملان وليسا متنافسين.
+4. يمنع التكرار الآلي للتفاصيل التقنية القديمة.
 
 [الأخبار الحية] {DYNAMIC_NEWS}"""
 
@@ -87,13 +86,14 @@ def sanitize_urls(text):
 def search_official(query):
     if not TAVILY_API_KEY: return ""
     try:
-        payload = {"api_key": TAVILY_API_KEY, "query": query, "search_depth": "advanced", "max_results": 3}
-        res = requests.post("https://api.tavily.com/search", json=payload, timeout=8)
+        payload = {"api_key": TAVILY_API_KEY, "query": query, "search_depth": "basic", "max_results": 2}
+        res = requests.post("https://api.tavily.com/search", json=payload, timeout=5)
         if res.status_code == 200:
             results = res.json().get("results", [])
             evidence = []
             for r in results:
-                evidence.append(f"المصدر: {r.get('url')} - التفاصيل: {r.get('content')}")
+                content_snippet = r.get('content', '')[:200]
+                evidence.append(f"المصدر: {r.get('url')} - {content_snippet}")
             return "\n".join(evidence)
     except Exception as e:
         print(f"Search Error: {e}")
@@ -101,11 +101,11 @@ def search_official(query):
 
 def get_latest_news():
     try:
-        r = requests.get(NEWS_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        r = requests.get(NEWS_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=4)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
             clean = soup.get_text(separator=" ", strip=True)
-            return "اخبار: " + clean[:800]
+            return "اخبار: " + clean[:300]
     except: pass
     return "https://zynmartpi.github.io/"
 
@@ -114,10 +114,10 @@ def fetch_real_evidence(user_message):
     low = user_message.lower()
     if any(k in low for k in ["pi", "باي", "باى", "سعر", "price", "okx"]):
         try:
-            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd", timeout=5).json()
+            cg = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=pi-network&vs_currencies=usd", timeout=4).json()
             price = cg.get("pi-network", {}).get("usd")
             if price:
-                evidences.append(f"سعر Pi الحالي على Coingecko/OKX هو ${price} - المصدر https://www.coingecko.com/en/coins/pi-network")
+                evidences.append(f"سعر Pi الحالي على Coingecko/OKX هو ${price} - https://www.coingecko.com/en/coins/pi-network")
                 return "\n".join(evidences)
         except Exception as e:
             print(f"Fetch Error: {e}")
@@ -134,8 +134,8 @@ def get_gemini_response(user_message, user_name="", search_context=""):
     system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
     
     context_block = ""
-    if evidence: context_block += "\n[الأدلة المباشرة]: " + evidence
-    if search_context: context_block += "\n[نتائج البحث الرسمية]: " + search_context
+    if evidence: context_block += "\n[الأدلة]: " + evidence
+    if search_context: context_block += "\n[نتائج البحث]: " + search_context[:500]
 
     full_prompt = f"{system_prompt}\n{context_block}\n\nالمستخدم ({user_name}): {user_message}"
 
@@ -143,15 +143,13 @@ def get_gemini_response(user_message, user_name="", search_context=""):
     for k in GEMINI_API_KEYS:
         try:
             url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=10)
             if res.status_code == 200:
                 parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
                 if parts:
                     txt = parts[0].get("text", "")
                     if txt:
                         return sanitize_urls(txt)
-            else:
-                print(f"Gemini Error Status: {res.status_code}")
         except Exception as e:
             print(f"Gemini Exception: {e}")
             continue
@@ -161,13 +159,14 @@ def get_hermes_response(user_message, user_name="", search_context=""):
     if not HERMES_API_KEY: return None
     try:
         evidence = fetch_real_evidence(user_message)
-        if search_context: evidence += "\n" + search_context
+        if search_context:
+            evidence += "\n" + search_context[:400]
 
         news = get_latest_news()
         system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
 
         if evidence:
-            system_prompt += f"\n[أدلة موثوقة]:\n{evidence}"
+            system_prompt += f"\n[أدلة موثوقة]:\n{evidence}\nأجب بناءً عليها بمقدمة وخاتمة مناسبة."
 
         payload = {
             "model": "nousresearch/hermes-3-llama-3.1-405b",
@@ -184,12 +183,9 @@ def get_hermes_response(user_message, user_name="", search_context=""):
     return None
 
 def get_ai_response(user_message, user_name="", search_context=""):
-    # المحرك الأساسي هو Gemini
     res = get_gemini_response(user_message, user_name, search_context)
     if res: return res
     
-    # المحرك الاحتياطي هو Hermes
-    print("Gemini unavailable, attempting Hermes...")
     res_hermes = get_hermes_response(user_message, user_name, search_context)
     if res_hermes: return res_hermes
 
@@ -219,6 +215,7 @@ def webhook():
                 active_group_chat_id = chat_id
                 save_users_to_file()
 
+        # التعامل مع الخاص (للأدمن فقط وشرط البث المزدوج)
         if chat_type == "private":
             if user_id not in ADMIN_IDS:
                 return jsonify({"status": "ok"}), 200
@@ -228,13 +225,16 @@ def webhook():
                 if target_group:
                     raw_cmd = text.replace("ابدا البث", "").replace("ابدأ البث", "").strip()
                     
+                    # 1. إذا وجد النقطتين (نشر حرفي)
                     if raw_cmd.startswith(":"):
                         broadcast_reply = raw_cmd[1:].strip()
                         broadcast_reply = sanitize_urls(broadcast_reply)
+                    # 2. بدون نقطتين (نشر إبداعي عبر AI)
                     else:
                         search_query = raw_cmd if raw_cmd else "اخبار Pi Network و ZYNMART"
+                        creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}"
                         search_results = search_official(search_query)
-                        broadcast_reply = get_ai_response(search_query, user_name, search_context=search_results)
+                        broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
 
                     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": target_group, "text": broadcast_reply})
                     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "✅ تم النشر في المجموعة بنجاح!"})
@@ -242,6 +242,7 @@ def webhook():
                     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لم يتم التعرف على المجموعة بعد."})
                 return jsonify({"status": "ok"}), 200
 
+        # التعامل مع المجموعات (عند الإشارة فقط)
         if chat_type in ["group", "supergroup"]:
             bot_handle = BOT_USERNAME.lower()
             clean_handle = bot_handle.replace("@", "")

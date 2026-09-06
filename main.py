@@ -127,17 +127,44 @@ def fetch_real_evidence(user_message):
     return "\n".join(evidences) if evidences else "خبرة ZYNMART"
 
 def get_hermes_response(user_message, user_name="", search_context=""):
-    if not HERMES_API_KEY: return None
+    if not HERMES_API_KEY: 
+        return None
     try:
         evidence = fetch_real_evidence(user_message)
         if search_context:
             evidence += "\n" + search_context
 
-        system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", get_latest_news()) + " قانون LIVE: الادلة " + evidence + " ممنوع اختراع اسعار. اكتب المنشور مباشرة بدون أي خاتمة مثل تمت المهمة."
+        news = get_latest_news()
+        system_prompt = ZYNMART_PROMPT.replace("{DYNAMIC_NEWS}", news)
+
+        # التحقق الآمن من وجود نتائج بحث حقيقية أو بيانات حية
+        has_real_facts = bool((search_context and search_context.strip()) or (evidence and "خبرة ZYNMART" not in evidence))
+
+        if has_real_facts:
+            # النمط الصارم عند وجود بحث: نقل وشرح الحقائق المجلوبة فقط بدون اختراع
+            system_prompt += f"""
+قانون LIVE صارم جداً (عرض نتائج وشرح مباشر):
+1. اعتمد حصراً على الأدلة الحقيقية المرفقة: {evidence}
+2. اعرض نتائج البحث وقم بشرحها وتبسيطها مباشرة وبوضوح للمستخدم فوراً، دون انتظار طلب الشرح.
+3. يمنع منعاً باتاً إضافة أي معلومات، أرقام، أو اجتهادات شخصية من خارج نتائج البحث المرفقة.
+4. رد باللغة العربية فقط وبشكل مباشر دون أي خاتمة مثل 'تمت المهمة'.
+"""
+            temp_value = 0.0  # دقة صارمة لمنع الهلوسة في نتائج البحث
+        else:
+            # النمط الإبداعي الموزون: للمناشير والترويج والتحية والترحيب
+            system_prompt += """
+قانون الصياغة والتفاعل والإعلان:
+1. صغ المنشورات الإعلانية والترويجية بأسلوب إبداعي، جذاب، واحترافي في حدود المنطق والمعقول.
+2. رد على التحيات، والترحيب بين المجموعات، والأسئلة العامة بلباقة وأسلوب سلس وودود.
+3. التزم بحقائق مشروع ZYNMART الأساسية ومصطلحاته دون اختراع حقائق وهمية.
+4. اكتب الرد مباشرة بدون أي جمل ختامية مثل 'تمت المهمة'.
+"""
+            temp_value = 0.6  # مرونة وإبداع للصياغة التسويقية والترحيب
+
         payload = {
             "model": "nousresearch/hermes-3-llama-3.1-405b",
             "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_name + ": " + user_message}],
-            "temperature": 0.1,
+            "temperature": temp_value,
             "max_tokens": 900
         }
         res = requests.post("https://openrouter.ai/api/v1/chat/completions", json=payload, headers={"Authorization": "Bearer " + HERMES_API_KEY, "Content-Type": "application/json"}, timeout=15)

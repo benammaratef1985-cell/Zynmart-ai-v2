@@ -22,7 +22,8 @@ DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
 
 ALLOWED_DOMAINS = [
     "minepi.com", "zynmart3401.pinet.com", "zynmartpi.github.io",
-    "x.com/ZYNMART", "coingecko.com", "okx.com", "binance.com", "dexscreener.com"
+    "x.com/ZYNMART", "coingecko.com", "okx.com", "binance.com", "dexscreener.com",
+    "facebook.com", "www.facebook.com", "fb.com", "m.facebook.com"
 ]
 
 known_users = {}

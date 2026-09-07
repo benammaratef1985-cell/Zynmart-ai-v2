@@ -215,21 +215,23 @@ def webhook():
                 active_group_chat_id = chat_id
                 save_users_to_file()
 
-        # التعامل مع الخاص (للأدمن فقط وشرط البث المزدوج)
+        # التعامل مع الخاص
         if chat_type == "private":
+            # 1. حماية الخاص: تجاهل أي شخص ليس أدمن
             if user_id not in ADMIN_IDS:
                 return jsonify({"status": "ok"}), 200
 
+            # 2. إذا كتب الأدمن أمر البث (بنسختيه)
             if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
                 target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
                 if target_group:
                     raw_cmd = text.replace("ابدا البث", "").replace("ابدأ البث", "").strip()
                     
-                    # 1. إذا وجد النقطتين (نشر حرفي)
+                    # نشر حرفي مع النقطتين :
                     if raw_cmd.startswith(":"):
                         broadcast_reply = raw_cmd[1:].strip()
                         broadcast_reply = sanitize_urls(broadcast_reply)
-                    # 2. بدون نقطتين (نشر إبداعي عبر AI)
+                    # نشر إبداعي بدون نقطتين
                     else:
                         search_query = raw_cmd if raw_cmd else "اخبار Pi Network و ZYNMART"
                         creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}"
@@ -241,6 +243,15 @@ def webhook():
                 else:
                     requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": "⚠️ لم يتم التعرف على المجموعة بعد."})
                 return jsonify({"status": "ok"}), 200
+
+            # 3. إذا كتب الأدمن رسالة عادية في الخاص (بدون كلمة ابدأ البث)، يجيبه البوت مباشرة
+            search_res = ""
+            if any(k in text.lower() for k in ["سعر", "اخبار", "أخبار", "news", "pi", "zyn"]):
+                search_res = search_official(text)
+
+            direct_reply = get_ai_response(text, user_name, search_context=search_res)
+            requests.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", json={"chat_id": chat_id, "text": direct_reply})
+            return jsonify({"status": "ok"}), 200
 
         # التعامل مع المجموعات (عند الإشارة فقط)
         if chat_type in ["group", "supergroup"]:

@@ -456,7 +456,7 @@ def get_gemini_response(user_message, user_name="", search_context=""):
     gemini_key_index = (gemini_key_index + 1) % len(GEMINI_API_KEYS)
 
     try:
-        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={selected_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={selected_key}"
         res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
         
         if res.status_code == 200:

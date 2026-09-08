@@ -426,7 +426,10 @@ def fetch_real_evidence(user_message):
         return format_pi_price()
     return ""
 
+gemini_key_index = 0
+
 def get_gemini_response(user_message, user_name="", search_context=""):
+    global gemini_key_index
     if not GEMINI_API_KEYS:
         return None
 
@@ -448,18 +451,23 @@ def get_gemini_response(user_message, user_name="", search_context=""):
     )
 
     payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
-    for k in GEMINI_API_KEYS:
-        try:
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
-            if res.status_code == 200:
-                parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-                if parts:
-                    txt = parts[0].get("text", "")
-                    if txt:
-                        return sanitize_urls(txt)
-        except Exception as e:
-            print(f"Gemini Exception: {e}")
+    
+    selected_key = GEMINI_API_KEYS[gemini_key_index]
+    gemini_key_index = (gemini_key_index + 1) % len(GEMINI_API_KEYS)
+
+    try:
+        url = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key={selected_key}"
+        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+        
+        if res.status_code == 200:
+            parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            if parts and parts[0].get("text"):
+                return sanitize_urls(parts[0]["text"])
+        else:
+            print(f"Gemini API Error (Key Index {gemini_key_index}): Status {res.status_code} - {res.text[:150]}")
+    except Exception as e:
+        print(f"Gemini Exception: {e}")
+
     return None
 
 def get_hermes_response(user_message, user_name="", search_context=""):

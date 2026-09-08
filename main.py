@@ -42,6 +42,8 @@ known_users = {}
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
 file_lock = threading.RLock()
 state_lock = threading.RLock()
+background_services_started = False
+background_services_lock = threading.Lock()
 
 admin_modes = {}
 pending_questions = {}
@@ -154,6 +156,8 @@ ZYNMART_PROMPT = """أنت مساعد AI موثوق داخل ZYNMART وبيئة 
 8. ZYNMART وPi Network موضوعان مهمان، لكن يمكنك الإجابة عن الأسئلة العامة أيضًا.
 9. لا تكرر التفاصيل التقنية القديمة بلا حاجة.
 10. ابدأ بإجابة واضحة ومباشرة، ويمكن أن تضيف تحية أو خاتمة قصيرة عند ملاءمتها.
+11. عند استخدام نتائج البحث، اعتبرها أدلة مرتبطة بنطاق البحث فقط، ولا تساوِ بين مصدر سوق أو تجميع أسعار وبين مصدر رسمي يثبت حالة KYB أو أي صفة رسمية.
+12. إذا كانت الأدلة غير كافية أو متعارضة، اذكر ذلك صراحة ولا تستنتج معلومة غير مثبتة.
 """
 
 def is_allowed_url(url):
@@ -234,8 +238,32 @@ def remember_user(msg):
     save_users_to_file()
 
 def search_official(query):
+    """Search with source scoping for sensitive/current Pi and ZYNMART facts.
+    General questions can still use normal web search.
+    """
     if not TAVILY_API_KEY:
         return ""
+
+    low = (query or "").lower()
+    include_domains = []
+
+    # For Pi/ZYNMART current facts, prefer known project/market domains.
+    # This does not claim that a market API proves KYB status.
+    is_pi = any(x in low for x in ["pi network", "pi network", "باي نتورك", "شبكة باي", "باي"] )
+    is_zyn = any(x in low for x in ["zynmart", "zyn", "زين مارت"])
+
+    if is_pi:
+        include_domains = [
+            "minepi.com", "coingecko.com", "okx.com", "bitget.com",
+            "gate.io", "mexc.com", "pionex.com", "onramp.money",
+            "onramper.com", "zypto.com", "lbank.com", "transfi.com",
+            "banxa.com"
+        ]
+    elif is_zyn:
+        include_domains = [
+            "zynmartpi.github.io", "zynmart3401.pinet.com", "x.com"
+        ]
+
     try:
         payload = {
             "api_key": TAVILY_API_KEY,
@@ -243,6 +271,9 @@ def search_official(query):
             "search_depth": "basic",
             "max_results": 4
         }
+        if include_domains:
+            payload["include_domains"] = include_domains
+
         res = requests.post("https://api.tavily.com/search", json=payload, timeout=6)
         if res.status_code == 200:
             results = res.json().get("results", [])
@@ -251,8 +282,11 @@ def search_official(query):
                 url = r.get("url", "")
                 title = r.get("title", "")
                 content = r.get("content", "")
-                evidence.append(f"المصدر: {url}\nالعنوان: {title}\nالمقتطف: {content[:350]}")
+                evidence.append(
+                    f"المصدر: {url}\nالعنوان: {title}\nالمقتطف: {content[:350]}"
+                )
             return "\n\n".join(evidence)
+        print(f"Search HTTP {res.status_code}: {res.text[:300]}")
     except Exception as e:
         print(f"Search Error: {e}")
     return ""
@@ -1050,6 +1084,21 @@ def confirm_moderation(key, approved):
         return "✅ تم الكتم 24 ساعة." if ok else "⚠️ تعذر تنفيذ الكتم."
     return "⚠️ إجراء غير معروف."
 
+def ensure_background_services():
+    """Start one scheduler thread per application process.
+    Called from the first HTTP request so it also works under Gunicorn/Render.
+    """
+    global background_services_started
+    if background_services_started:
+        return
+    with background_services_lock:
+        if background_services_started:
+            return
+        threading.Thread(target=daily_scheduler, daemon=True, name="zynmart-daily-scheduler").start()
+        background_services_started = True
+        print("Background scheduler started.")
+
+
 def daily_scheduler():
     tz = ZoneInfo("Africa/Tunis")
     while True:
@@ -1205,11 +1254,13 @@ def handle_callback(data):
 
 @app.route("/", methods=["GET"])
 def index():
+    ensure_background_services()
     return "Zynmart Bot Status: Online", 200
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     global active_group_chat_id
+    ensure_background_services()
     data = request.get_json(force=True, silent=True)
 
     if not data:
@@ -1315,5 +1366,5 @@ def webhook():
     return jsonify({"status": "ok"}), 200
 
 if __name__ == "__main__":
-    threading.Thread(target=daily_scheduler, daemon=True).start()
+    ensure_background_services()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))

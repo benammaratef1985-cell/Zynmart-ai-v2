@@ -442,7 +442,7 @@ def get_gemini_response(user_message, user_name="", search_context=""):
         try:
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
-                model='gemini-1.5-flash',
+                model='gemini-2.5-flash',
                 contents=full_prompt,
             )
             if response and response.text:

@@ -53,7 +53,7 @@ last_message_cache = {}
 manual_exceptions = set()
 
 DEFAULT_SETTINGS = {
-    "question_delay": 60,
+    "question_delay": 30,
     "moderation_enabled": True,
     "moderation_level": "medium",
     "daily_enabled": True,
@@ -788,22 +788,44 @@ def handle_auto_moderation(msg):
     return True
 
 def schedule_question(chat_id, msg):
+    """Group question flow: wait 30s, analyze at ~20s, send at ~30s.
+    No AI/search is used before the analysis point.
+    """
     message_id = msg.get("message_id")
     key = (str(chat_id), int(message_id))
-    delay = int(settings.get("question_delay", 60))
+    total_delay = max(30, int(settings.get("question_delay", 30)))
+    analysis_at = max(20, total_delay - 10)
 
     def worker():
-        time.sleep(delay)
-        item = pending_questions.pop(key, None)
-        if not item:
+        # 0 -> 20s: pure waiting. No API calls.
+        time.sleep(analysis_at)
+        item = pending_questions.get(key)
+        if not item or item.get("answered"):
             return
-        # If a moderator answered directly, webhook marks answered=True.
-        if item.get("answered"):
-            return
+
         text = item["text"]
-        username = item["user_name"]
-        search_context = search_official(text) if needs_fresh_search(text) else ""
-        reply = get_ai_response(text, username, search_context)
+        # Local/deterministic analysis only: zero Gemini/Tavily cost.
+        if not is_clear_question(text):
+            pending_questions.pop(key, None)
+            return
+        item["question_ready"] = True
+
+        # 20 -> 30s: only now prepare evidence/AI for a question worth answering.
+        remaining = max(0, total_delay - analysis_at)
+        if remaining:
+            prep_start = time.time()
+            search_context = search_official(text) if needs_fresh_search(text) else ""
+            reply = get_ai_response(text, item["user_name"], search_context)
+            elapsed = time.time() - prep_start
+            time.sleep(max(0, remaining - elapsed))
+        else:
+            search_context = search_official(text) if needs_fresh_search(text) else ""
+            reply = get_ai_response(text, item["user_name"], search_context)
+
+        # Exactly at/after the configured send point, re-check cancellation.
+        item = pending_questions.pop(key, None)
+        if not item or item.get("answered"):
+            return
         send_message(chat_id, reply, reply_to=message_id)
 
     pending_questions[key] = {
@@ -812,6 +834,7 @@ def schedule_question(chat_id, msg):
         "text": text_without_bot_mention(msg.get("text", "")),
         "user_name": msg.get("from", {}).get("first_name", ""),
         "answered": False,
+        "question_ready": False,
         "created": time.time()
     }
     threading.Thread(target=worker, daemon=True).start()
@@ -1316,9 +1339,10 @@ def webhook():
             active_group_chat_id = chat_id
             save_users_to_file()
 
-        # Moderator response to a pending question: direct reply only.
+        # Any direct reply to a pending question cancels the bot response.
+        # This check is intentionally independent of moderator status.
         reply_to = msg.get("reply_to_message", {})
-        if reply_to and user_id and is_moderator(chat_id, user_id):
+        if reply_to:
             mark_pending_answered(chat_id, reply_to.get("message_id"))
 
         # Auto moderation first, but never for moderators/admins.
@@ -1343,8 +1367,9 @@ def webhook():
             send_message(chat_id, reply, reply_to=msg.get("message_id"))
             return jsonify({"status": "ok"}), 200
 
-        # Clear questions without mention => wait configured delay.
-        if text and is_clear_question(text):
+        # Every normal group message gets the waiting window first.
+        # Question detection happens only at the analysis point (~20s).
+        if text:
             schedule_question(chat_id, msg)
 
         return jsonify({"status": "ok"}), 200

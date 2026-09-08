@@ -12,15 +12,13 @@ HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 GEMINI_API_KEYS = []
+current_key_index = 0
 for k, v in os.environ.items():
     if k.startswith("GEMINI_API_KEY") and v:
         for x in v.split(","):
             x = x.strip()
             if x and x not in GEMINI_API_KEYS:
                 GEMINI_API_KEYS.append(x)
-
-# متغير تتبع المفتاح الحالي للتدوير المجاني المعتمد
-current_key_index = 0
 
 ADMIN_IDS = [7560871853, 6283667477]
 BOT_USERNAME = "@zynmart_ai_bot"
@@ -305,7 +303,7 @@ def get_latest_news():
         pass
     return ""
 
-def get_json(url, params=None, timeout=3):
+def get_json(url, params=None, timeout=5):
     try:
         r = requests.get(url, params=params, timeout=timeout)
         if r.status_code == 200:
@@ -430,7 +428,6 @@ def fetch_real_evidence(user_message):
     return ""
 
 def get_gemini_response(user_message, user_name="", search_context=""):
-    global current_key_index
     if not GEMINI_API_KEYS:
         return None
 
@@ -452,28 +449,42 @@ def get_gemini_response(user_message, user_name="", search_context=""):
     )
 
     payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
+
+    # Gemini 3.5 Flash: model current and supported for GenerateContent.
+    # Rotate only among the configured keys; never print keys themselves.
+    global current_key_index
     total_keys = len(GEMINI_API_KEYS)
+    if total_keys == 0:
+        return None
 
-    # تدوير المفاتيح بالترتيب لمنع حرق المفتاح الأول واستنزافه
-    for _ in range(total_keys):
-        k = GEMINI_API_KEYS[current_key_index]
-        current_key_index = (current_key_index + 1) % total_keys
-
+    start_index = current_key_index % total_keys
+    for offset in range(total_keys):
+        idx = (start_index + offset) % total_keys
+        k = GEMINI_API_KEYS[idx]
         try:
-            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + k
+            url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + k
             res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+
             if res.status_code == 200:
                 parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
                 if parts:
                     txt = parts[0].get("text", "")
                     if txt:
+                        current_key_index = (idx + 1) % total_keys
                         return sanitize_urls(txt)
+
             elif res.status_code == 429:
-                # عند امتلاء حصة المفتاح الحالي، الانتقال فوراً للمفتاح التالي
+                print(f"Gemini HTTP 429 - key index {idx}")
+                # If this key/project is rate-limited, try the next configured key.
+                current_key_index = (idx + 1) % total_keys
                 continue
+            else:
+                print(f"Gemini HTTP {res.status_code} - key index {idx}")
+                current_key_index = (idx + 1) % total_keys
+
         except Exception as e:
             print(f"Gemini Exception: {e}")
-            continue
+            current_key_index = (idx + 1) % total_keys
 
     return None
 

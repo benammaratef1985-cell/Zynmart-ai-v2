@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
+from google import genai
 
 app = Flask(__name__)
 
@@ -243,7 +244,7 @@ def search_official(query):
     low = (query or "").lower()
     include_domains = []
 
-    is_pi = any(x in low for x in ["pi network", "pi network", "باي نتورك", "شبكة باي", "باي"] )
+    is_pi = any(x in low for x in ["pi network", "باي نتورك", "شبكة باي", "باي"])
     is_zyn = any(x in low for x in ["zynmart", "zyn", "زين مارت"])
 
     if is_pi:
@@ -415,10 +416,7 @@ def fetch_real_evidence(user_message):
         return format_pi_price()
     return ""
 
-gemini_key_index = 0
-
 def get_gemini_response(user_message, user_name="", search_context=""):
-    global gemini_key_index
     if not GEMINI_API_KEYS:
         return None
 
@@ -439,23 +437,19 @@ def get_gemini_response(user_message, user_name="", search_context=""):
         + f"\n\nالمستخدم ({user_name}): {user_message}"
     )
 
-    payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
-    
-    selected_key = GEMINI_API_KEYS[gemini_key_index]
-    gemini_key_index = (gemini_key_index + 1) % len(GEMINI_API_KEYS)
-
-    try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={selected_key}"
-        res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
-        
-        if res.status_code == 200:
-            parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
-            if parts and parts[0].get("text"):
-                return sanitize_urls(parts[0]["text"])
-        else:
-            print(f"Gemini API Error (Key Index {gemini_key_index}): Status {res.status_code} - {res.text[:150]}")
-    except Exception as e:
-        print(f"Gemini Exception: {e}")
+    # التكرار على مفاتيح Gemini لحين عمل أحدها بنجاح مع المكتبة الرسمية
+    for key in GEMINI_API_KEYS:
+        try:
+            client = genai.Client(api_key=key)
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=full_prompt,
+            )
+            if response and response.text:
+                return sanitize_urls(response.text)
+        except Exception as e:
+            print(f"Gemini API Error with key {key[:6]}...: {e}")
+            continue
 
     return None
 
@@ -839,7 +833,6 @@ def moderation_keyboard():
     }
 
 def daily_keyboard():
-    d = settings.get("daily", {})
     return {
         "inline_keyboard": [
             [{"text": "🟢 تشغيل", "callback_data": "daily_on"},
@@ -1043,7 +1036,6 @@ def confirm_moderation(key, approved):
     admin_id = item["admin_id"]
     target_id = item["target_id"]
     action = item["action"]
-    username = item["username"]
 
     if target_is_protected(chat_id, target_id):
         return "⚠️ المستخدم أصبح أدمن/مشرفًا؛ تم رفض الإجراء."

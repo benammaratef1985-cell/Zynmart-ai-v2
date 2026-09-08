@@ -234,21 +234,15 @@ def remember_user(msg):
         "last_chat_id": msg.get("chat", {}).get("id", old.get("last_chat_id")),
         "last_seen": datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
     }
-    # Keep users.json current, but only for actual messages.
     save_users_to_file()
 
 def search_official(query):
-    """Search with source scoping for sensitive/current Pi and ZYNMART facts.
-    General questions can still use normal web search.
-    """
     if not TAVILY_API_KEY:
         return ""
 
     low = (query or "").lower()
     include_domains = []
 
-    # For Pi/ZYNMART current facts, prefer known project/market domains.
-    # This does not claim that a market API proves KYB status.
     is_pi = any(x in low for x in ["pi network", "pi network", "باي نتورك", "شبكة باي", "باي"] )
     is_zyn = any(x in low for x in ["zynmart", "zyn", "زين مارت"])
 
@@ -314,7 +308,6 @@ def get_json(url, params=None, timeout=5):
 def fetch_pi_prices():
     sources = []
 
-    # CoinGecko aggregator
     data = get_json(
         "https://api.coingecko.com/api/v3/simple/price",
         {"ids": "pi-network", "vs_currencies": "usd"}
@@ -326,7 +319,6 @@ def fetch_pi_prices():
     except Exception:
         pass
 
-    # OKX
     data = get_json("https://www.okx.com/api/v5/market/ticker", {"instId": "PI-USDT"})
     try:
         p = float(data["data"][0]["last"])
@@ -335,7 +327,6 @@ def fetch_pi_prices():
     except Exception:
         pass
 
-    # Bitget
     data = get_json(
         "https://api.bitget.com/api/v2/spot/market/tickers",
         {"symbol": "PIUSDT"}
@@ -347,7 +338,6 @@ def fetch_pi_prices():
     except Exception:
         pass
 
-    # Gate
     data = get_json(
         "https://api.gateio.ws/api/v4/spot/tickers",
         {"currency_pair": "PI_USDT"}
@@ -359,7 +349,6 @@ def fetch_pi_prices():
     except Exception:
         pass
 
-    # MEXC
     data = get_json(
         "https://api.mexc.com/api/v3/ticker/price",
         {"symbol": "PIUSDT"}
@@ -456,7 +445,7 @@ def get_gemini_response(user_message, user_name="", search_context=""):
     gemini_key_index = (gemini_key_index + 1) % len(GEMINI_API_KEYS)
 
     try:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={selected_key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={selected_key}"
         res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
         
         if res.status_code == 200:
@@ -658,7 +647,6 @@ def add_warning(chat_id, user_id, reason=""):
                 item["manual_unmute"] = False
                 action = "auto_mute_7d"
         else:
-            # Stage 2 remains until the 7-day period is over.
             item["count"] = 0
 
     warnings_db[key] = item
@@ -689,7 +677,6 @@ def auto_unmute_due():
     changed = False
 
     for key, item in list(warnings_db.items()):
-        # key format: chat_id:user_id
         try:
             chat_id, user_id = key.split(":", 1)
             user_id = int(user_id)
@@ -705,7 +692,6 @@ def auto_unmute_due():
             except Exception:
                 pass
 
-        # After the 7-day escalation period, the warning cycle starts from zero.
         stage_until = item.get("stage_until")
         if int(item.get("stage", 0)) == 2 and stage_until:
             try:
@@ -748,7 +734,6 @@ def handle_auto_moderation(msg):
 
     reason = auto_moderation_reason(text)
 
-    # Repeated identical messages
     key = (chat_id, user_id)
     previous = last_message_cache.get(key)
     now = time.time()
@@ -763,7 +748,6 @@ def handle_auto_moderation(msg):
         log_action(chat_id, 0, "silent_detection", user_id, reason)
         return False
 
-    # Deterministic rules only; AI has no punishment authority.
     delete_message(chat_id, msg.get("message_id"))
     action, _ = add_warning(chat_id, user_id, reason)
     log_action(chat_id, 0, action, user_id, reason)
@@ -779,7 +763,6 @@ def schedule_question(chat_id, msg):
         item = pending_questions.pop(key, None)
         if not item:
             return
-        # If a moderator answered directly, webhook marks answered=True.
         if item.get("answered"):
             return
         text = item["text"]
@@ -914,8 +897,7 @@ def process_admin_text(chat_id, user_id, text):
             save_settings()
             save_daily_data()
             admin_modes.pop(user_id, None)
-            send_message(chat_id, "✅ تم تحديث النص.\n\n" + daily_item_text(name),
-                         )
+            send_message(chat_id, "✅ تم تحديث النص.\n\n" + daily_item_text(name))
         return True
 
     if isinstance(mode, str) and mode.startswith("daily_time:"):
@@ -1093,9 +1075,6 @@ def confirm_moderation(key, approved):
     return "⚠️ إجراء غير معروف."
 
 def ensure_background_services():
-    """Start one scheduler thread per application process.
-    Called from the first HTTP request so it also works under Gunicorn/Render.
-    """
     global background_services_started
     if background_services_started:
         return
@@ -1105,7 +1084,6 @@ def ensure_background_services():
         threading.Thread(target=daily_scheduler, daemon=True, name="zynmart-daily-scheduler").start()
         background_services_started = True
         print("Background scheduler started.")
-
 
 def daily_scheduler():
     tz = ZoneInfo("Africa/Tunis")
@@ -1298,21 +1276,17 @@ def webhook():
             active_group_chat_id = chat_id
             save_users_to_file()
 
-        # Moderator response to a pending question: direct reply only.
         reply_to = msg.get("reply_to_message", {})
         if reply_to and user_id and is_moderator(chat_id, user_id):
             mark_pending_answered(chat_id, reply_to.get("message_id"))
 
-        # Auto moderation first, but never for moderators/admins.
         if handle_auto_moderation(msg):
             return jsonify({"status": "ok"}), 200
 
-        # Explicit moderation commands from admins/moderators.
         if text and (user_id in ADMIN_IDS or is_moderator(chat_id, user_id)):
             if execute_moderation_command(chat_id, user_id, text):
                 return jsonify({"status": "ok"}), 200
 
-        # Mention => answer immediately.
         low = text.lower()
         bot_handle = BOT_USERNAME.lower()
         clean_handle = bot_handle.replace("@", "")
@@ -1325,18 +1299,15 @@ def webhook():
             send_message(chat_id, reply, reply_to=msg.get("message_id"))
             return jsonify({"status": "ok"}), 200
 
-        # Clear questions without mention => wait configured delay.
         if text and is_clear_question(text):
             schedule_question(chat_id, msg)
 
         return jsonify({"status": "ok"}), 200
 
     if chat_type == "private":
-        # Preserve original private protection.
         if user_id not in ADMIN_IDS:
             return jsonify({"status": "ok"}), 200
 
-        # Original broadcast command behavior is preserved exactly.
         if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
             target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
             if target_group:
@@ -1356,16 +1327,12 @@ def webhook():
                 send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
             return jsonify({"status": "ok"}), 200
 
-        # Admin commands/menu modes.
         if process_admin_text(chat_id, user_id, text):
             return jsonify({"status": "ok"}), 200
 
-        # Admin moderation commands may also be issued in private by sending them
-        # only when a target group is known.
         if execute_moderation_command(active_group_chat_id or DEFAULT_GROUP_CHAT_ID, user_id, text):
             return jsonify({"status": "ok"}), 200
 
-        # Preserve original ordinary private AI reply.
         search_res = search_official(text) if needs_fresh_search(text) else ""
         direct_reply = get_ai_response(text, user_name, search_context=search_res)
         send_message(chat_id, direct_reply)

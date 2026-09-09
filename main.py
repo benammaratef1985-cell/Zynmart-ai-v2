@@ -1,4 +1,5 @@
 import os, json, requests, threading, re, time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -182,7 +183,7 @@ def sanitize_urls(text):
     clean_text = clean_text.replace("✅ تمت المهمة", "").replace("تمت المهمة", "").strip()
     return clean_text
 
-def telegram(method, payload=None, timeout=8):
+def telegram(method, payload=None, timeout=6):
     if not BOT_TOKEN:
         return None
     try:
@@ -277,7 +278,7 @@ def search_official(query):
         if include_domains:
             payload["include_domains"] = include_domains
 
-        res = requests.post("https://api.tavily.com/search", json=payload, timeout=6)
+        res = requests.post("https://api.tavily.com/search", json=payload, timeout=4)
         if res.status_code == 200:
             results = res.json().get("results", [])
             evidence = []
@@ -296,7 +297,7 @@ def search_official(query):
 
 def get_latest_news():
     try:
-        r = requests.get(NEWS_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=5)
+        r = requests.get(NEWS_URL, headers={"User-Agent": "Mozilla/5.0"}, timeout=3.5)
         if r.status_code == 200:
             soup = BeautifulSoup(r.text, "html.parser")
             clean = soup.get_text(separator=" ", strip=True)
@@ -305,7 +306,7 @@ def get_latest_news():
         pass
     return ""
 
-def get_json(url, params=None, timeout=5):
+def get_json(url, params=None, timeout=2.5):
     try:
         r = requests.get(url, params=params, timeout=timeout)
         if r.status_code == 200:
@@ -315,66 +316,44 @@ def get_json(url, params=None, timeout=5):
     return None
 
 def fetch_pi_prices():
-    sources = []
+    # Fetch all public market sources in parallel: much faster than five sequential timeouts.
+    def fetch_one(name, url, params=None):
+        data = get_json(url, params)
+        try:
+            if name == "CoinGecko":
+                p = float(data["pi-network"]["usd"])
+            elif name == "OKX":
+                p = float(data["data"][0]["last"])
+            elif name == "Bitget":
+                p = float(data["data"][0]["lastPr"])
+            elif name == "Gate":
+                p = float(data[0]["last"])
+            elif name == "MEXC":
+                p = float(data["price"])
+            else:
+                return None
+            return (name, p) if p > 0 else None
+        except Exception:
+            return None
 
-    # CoinGecko aggregator
-    data = get_json(
-        "https://api.coingecko.com/api/v3/simple/price",
-        {"ids": "pi-network", "vs_currencies": "usd"}
-    )
-    try:
-        p = float(data["pi-network"]["usd"])
-        if p > 0:
-            sources.append(("CoinGecko", p))
-    except Exception:
-        pass
-
-    # OKX
-    data = get_json("https://www.okx.com/api/v5/market/ticker", {"instId": "PI-USDT"})
-    try:
-        p = float(data["data"][0]["last"])
-        if p > 0:
-            sources.append(("OKX", p))
-    except Exception:
-        pass
-
-    # Bitget
-    data = get_json(
-        "https://api.bitget.com/api/v2/spot/market/tickers",
-        {"symbol": "PIUSDT"}
-    )
-    try:
-        p = float(data["data"][0]["lastPr"])
-        if p > 0:
-            sources.append(("Bitget", p))
-    except Exception:
-        pass
-
-    # Gate
-    data = get_json(
-        "https://api.gateio.ws/api/v4/spot/tickers",
-        {"currency_pair": "PI_USDT"}
-    )
-    try:
-        p = float(data[0]["last"])
-        if p > 0:
-            sources.append(("Gate", p))
-    except Exception:
-        pass
-
-    # MEXC
-    data = get_json(
-        "https://api.mexc.com/api/v3/ticker/price",
-        {"symbol": "PIUSDT"}
-    )
-    try:
-        p = float(data["price"])
-        if p > 0:
-            sources.append(("MEXC", p))
-    except Exception:
-        pass
-
-    return sources
+    jobs = [
+        ("CoinGecko", "https://api.coingecko.com/api/v3/simple/price", {"ids": "pi-network", "vs_currencies": "usd"}),
+        ("OKX", "https://www.okx.com/api/v5/market/ticker", {"instId": "PI-USDT"}),
+        ("Bitget", "https://api.bitget.com/api/v2/spot/market/tickers", {"symbol": "PIUSDT"}),
+        ("Gate", "https://api.gateio.ws/api/v4/spot/tickers", {"currency_pair": "PI_USDT"}),
+        ("MEXC", "https://api.mexc.com/api/v3/ticker/price", {"symbol": "PIUSDT"}),
+    ]
+    results = []
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        futures = [ex.submit(fetch_one, *job) for job in jobs]
+        for future in futures:
+            try:
+                item = future.result(timeout=3)
+                if item:
+                    results.append(item)
+            except Exception:
+                pass
+    return results
 
 def median(values):
     vals = sorted(values)
@@ -465,37 +444,35 @@ def _pick_gemini_key(exclude=None):
             return idx, GEMINI_API_KEYS[idx]
     return None, None
 
-def get_gemini_response(user_message, user_name="", search_context=""):
-    if not GEMINI_API_KEYS:
-        return None
-
+def _build_ai_context(user_message, search_context=""):
     evidence = fetch_real_evidence(user_message)
     news = get_latest_news() if ("zynmart" in user_message.lower() or "zyn" in user_message.lower()) else ""
     context = []
     if evidence:
-        context.append("[بيانات سوق حية/أدلة]\n" + evidence)
+        context.append("[بيانات/أدلة]\n" + evidence)
     if search_context:
-        context.append("[نتائج بحث حديثة]\n" + search_context[:1800])
+        context.append("[نتائج حديثة]\n" + search_context[:1000])
     if news:
-        context.append("[صفحة ZYNMART]\n" + news)
+        context.append("[ZYNMART]\n" + news[:450])
+    return "\n\n".join(context) if context else "[لا توجد أدلة خارجية إضافية]"
 
+def get_gemini_response(user_message, user_name="", search_context="", context_override=None):
+    if not GEMINI_API_KEYS:
+        return None
+    context_text = context_override if context_override is not None else _build_ai_context(user_message, search_context)
     full_prompt = (
         ZYNMART_PROMPT
-        + "\nإذا لم يوجد دليل كافٍ، صرّح بعدم القدرة على التحقق.\n"
-        + ("\n\n".join(context) if context else "[لا توجد أدلة خارجية إضافية]")
+        + "\nإذا لم يوجد دليل كافٍ، صرّح بعدم القدرة على التحقق ولا تخمّن.\n"
+        + context_text
         + f"\n\nالمستخدم ({user_name}): {user_message}"
     )
-
     payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
-
-    # Quota protection:
-    # - Normal request: ONE Gemini key only, round-robin.
-    # - 503/timeout/network errors: do NOT burn the other keys; go to Hermes.
-    # - 429/403/401: mark this key temporarily unavailable and try at most ONE
-    #   other configured key. Never sweep through every key for one question.
+    global current_key_index
+    total_keys = len(GEMINI_API_KEYS)
+    if total_keys == 0:
+        return None
     attempted = set()
-    max_attempts = 2 if len(GEMINI_API_KEYS) > 1 else 1
-
+    max_attempts = 2 if total_keys > 1 else 1
     for _ in range(max_attempts):
         idx, k = _pick_gemini_key(exclude=attempted)
         if k is None:
@@ -503,46 +480,32 @@ def get_gemini_response(user_message, user_name="", search_context=""):
         attempted.add(idx)
         try:
             url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + k
-            res = requests.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=12
-            )
-
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=7)
             if res.status_code == 200:
                 parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
                 if parts:
                     txt = parts[0].get("text", "")
                     if txt:
+                        current_key_index = (idx + 1) % total_keys
                         return sanitize_urls(txt)
-                print(f"Gemini HTTP 200 but empty response - key index {idx}")
                 return None
-
             if res.status_code == 429:
                 retry_for = _gemini_retry_after_seconds(res)
                 with gemini_key_lock:
                     gemini_key_cooldowns[idx] = time.time() + retry_for
                 print(f"Gemini HTTP 429 - key index {idx}; cooldown {retry_for}s")
-                # One fallback key at most, then Hermes.
                 continue
-
             if res.status_code in (401, 403):
                 with gemini_key_lock:
                     gemini_key_cooldowns[idx] = time.time() + 300
                 print(f"Gemini HTTP {res.status_code} - key index {idx}; cooldown 300s")
-                # One fallback key at most, then Hermes.
                 continue
-
-            # 5xx and other errors do not justify consuming another Gemini key.
             print(f"Gemini HTTP {res.status_code} - key index {idx}")
             return None
-
         except Exception as e:
-            # Timeout/network failure: keep the remaining keys untouched.
+            # Timeout/network failure does not consume another key.
             print(f"Gemini Exception: {e} - key index {idx}")
             return None
-
     return None
 
 AI_PRIVATE_FAILURE_MESSAGE = (
@@ -551,24 +514,19 @@ AI_PRIVATE_FAILURE_MESSAGE = (
     "لن أخمّن الإجابة حتى تعود الخدمة للعمل."
 )
 
-def get_hermes_response(user_message, user_name="", search_context=""):
+MENTION_AI_FAILURE_MESSAGE = (
+    "⚠️ فهمت سؤالك، لكن تعذّر عليّ الحصول على إجابة موثوقة الآن.\n"
+    "لن أخمّن أو أعطيك معلومة غير مؤكدة. حاول مرة أخرى بعد قليل. 🤝"
+)
+
+def get_hermes_response(user_message, user_name="", search_context="", context_override=None):
     if not HERMES_API_KEY:
         return None
     try:
-        evidence = fetch_real_evidence(user_message)
-        news = get_latest_news() if ("zynmart" in user_message.lower() or "zyn" in user_message.lower()) else ""
-        context = []
-        if evidence:
-            context.append("[بيانات/أدلة]\n" + evidence)
-        if search_context:
-            context.append("[نتائج البحث]\n" + search_context[:1500])
-        if news:
-            context.append("[صفحة ZYNMART]\n" + news)
-
+        context_text = context_override if context_override is not None else _build_ai_context(user_message, search_context)
         system_prompt = (
             ZYNMART_PROMPT
-            + "\n"
-            + "\n\n".join(context)
+            + "\n" + context_text
             + "\nلا تختلق أي معلومة غير مدعومة."
         )
         payload = {
@@ -578,32 +536,31 @@ def get_hermes_response(user_message, user_name="", search_context=""):
                 {"role": "user", "content": f"{user_name}: {user_message}"}
             ],
             "temperature": 0.3,
-            "max_tokens": 700
+            "max_tokens": 600
         }
         res = requests.post(
             "https://openrouter.ai/api/v1/chat/completions",
             json=payload,
-            headers={
-                "Authorization": "Bearer " + HERMES_API_KEY,
-                "Content-Type": "application/json"
-            },
-            timeout=12
+            headers={"Authorization": "Bearer " + HERMES_API_KEY, "Content-Type": "application/json"},
+            timeout=7
         )
         if res.status_code == 200:
             txt = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
             if txt:
                 return sanitize_urls(txt)
         else:
-            print(f"Hermes HTTP {res.status_code}: {res.text[:500]}")
+            print(f"Hermes HTTP {res.status_code}: {res.text[:300]}")
     except Exception as e:
         print(f"Hermes Exception: {e}")
     return None
 
 def get_ai_response(user_message, user_name="", search_context=""):
-    res = get_gemini_response(user_message, user_name, search_context)
+    # Build external evidence once, then reuse it for Gemini -> Hermes fallback.
+    context_text = _build_ai_context(user_message, search_context)
+    res = get_gemini_response(user_message, user_name, search_context, context_override=context_text)
     if res:
         return res
-    res_hermes = get_hermes_response(user_message, user_name, search_context)
+    res_hermes = get_hermes_response(user_message, user_name, search_context, context_override=context_text)
     if res_hermes:
         return res_hermes
     return None
@@ -850,6 +807,15 @@ def handle_auto_moderation(msg):
     log_action(chat_id, 0, action, user_id, reason)
     return True
 
+ai_executor = ThreadPoolExecutor(max_workers=4)
+
+def run_ai_job(fn):
+    try:
+        return ai_executor.submit(fn)
+    except Exception as e:
+        print(f"AI worker submit error: {e}")
+        return None
+
 def schedule_question(chat_id, msg):
     message_id = msg.get("message_id")
     key = (str(chat_id), int(message_id))
@@ -902,7 +868,7 @@ def schedule_question(chat_id, msg):
             return
         send_message(chat_id, reply, reply_to=message_id)
 
-    threading.Thread(target=worker, daemon=True).start()
+    run_ai_job(worker)
 
 def text_without_bot_mention(text):
     clean = re.sub(r'@?[A-Za-z0-9_]*zynmart_ai_bot[A-Za-z0-9_]*', '', text, flags=re.I)
@@ -996,23 +962,26 @@ def process_admin_text(chat_id, user_id, text):
         return True
 
     if mode == "chat":
-        search_context = search_official(text) if needs_fresh_search(text) else ""
-        reply = get_ai_response(text, "", search_context)
-        send_message(chat_id, reply if reply else AI_PRIVATE_FAILURE_MESSAGE)
+        def job():
+            search_context = search_official(text) if needs_fresh_search(text) else ""
+            reply = get_ai_response(text, "", search_context)
+            send_message(chat_id, reply if reply else AI_PRIVATE_FAILURE_MESSAGE)
+        run_ai_job(job)
         return True
 
     if mode == "broadcast_topic":
         target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
         if target_group:
-            search_results = search_official(text)
             creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {text}"
-            broadcast_reply = get_ai_response(creative_order, "", search_context=search_results)
-            if not broadcast_reply:
-                send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
-                admin_modes.pop(user_id, None)
-                return True
-            send_message(target_group, broadcast_reply)
-            send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
+            def job():
+                search_results = search_official(text)
+                broadcast_reply = get_ai_response(creative_order, "", search_context=search_results)
+                if not broadcast_reply:
+                    send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                    return
+                send_message(target_group, broadcast_reply)
+                send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
+            run_ai_job(job)
         else:
             send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
         admin_modes.pop(user_id, None)
@@ -1430,10 +1399,15 @@ def webhook():
 
         if mentioned:
             question = text_without_bot_mention(text)
-            search_res = search_official(question) if needs_fresh_search(question) else ""
-            reply = get_ai_response(question, user_name, search_context=search_res)
-            if reply:
-                send_message(chat_id, reply, reply_to=msg.get("message_id"))
+            if not question:
+                send_message(chat_id, "👋 أنا هنا. اكتب سؤالك وسأحاول مساعدتك.", reply_to=msg.get("message_id"))
+                return jsonify({"status": "ok"}), 200
+            message_id = msg.get("message_id")
+            def job():
+                search_res = search_official(question) if needs_fresh_search(question) else ""
+                reply = get_ai_response(question, user_name, search_context=search_res)
+                send_message(chat_id, reply if reply else MENTION_AI_FAILURE_MESSAGE, reply_to=message_id)
+            run_ai_job(job)
             return jsonify({"status": "ok"}), 200
 
         # All ordinary group text enters the waiting window.
@@ -1456,17 +1430,20 @@ def webhook():
 
                 if raw_cmd.startswith(":"):
                     broadcast_reply = sanitize_urls(raw_cmd[1:].strip())
+                    send_message(target_group, broadcast_reply)
+                    send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
                 else:
                     search_query = raw_cmd if raw_cmd else "اخبار Pi Network و ZYNMART"
                     creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}"
-                    search_results = search_official(search_query)
-                    broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
-
-                if not broadcast_reply:
-                    send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
-                    return jsonify({"status": "ok"}), 200
-                send_message(target_group, broadcast_reply)
-                send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
+                    def job():
+                        search_results = search_official(search_query)
+                        broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
+                        if not broadcast_reply:
+                            send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                            return
+                        send_message(target_group, broadcast_reply)
+                        send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
+                    run_ai_job(job)
             else:
                 send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
             return jsonify({"status": "ok"}), 200
@@ -1480,10 +1457,13 @@ def webhook():
         if execute_moderation_command(active_group_chat_id or DEFAULT_GROUP_CHAT_ID, user_id, text):
             return jsonify({"status": "ok"}), 200
 
-        # Preserve original ordinary private AI reply.
-        search_res = search_official(text) if needs_fresh_search(text) else ""
-        direct_reply = get_ai_response(text, user_name, search_context=search_res)
-        send_message(chat_id, direct_reply if direct_reply else AI_PRIVATE_FAILURE_MESSAGE)
+        # Preserve ordinary private AI reply, but process it outside /webhook so
+        # slow AI/search calls can never make Telegram/Render wait for the result.
+        def job():
+            search_res = search_official(text) if needs_fresh_search(text) else ""
+            direct_reply = get_ai_response(text, user_name, search_context=search_res)
+            send_message(chat_id, direct_reply if direct_reply else AI_PRIVATE_FAILURE_MESSAGE)
+        run_ai_job(job)
         return jsonify({"status": "ok"}), 200
 
     return jsonify({"status": "ok"}), 200

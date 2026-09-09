@@ -10,6 +10,16 @@ app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
+GROQ_API_KEYS = []
+for k, v in os.environ.items():
+    if k.startswith("GROQ_API_KEY") and v:
+        for x in v.split(","):
+            x = x.strip()
+            if x and x not in GROQ_API_KEYS:
+                GROQ_API_KEYS.append(x)
+groq_key_index = 0
+groq_key_lock = threading.Lock()
+groq_key_cooldowns = {}
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 GEMINI_API_KEYS = []
@@ -519,6 +529,154 @@ MENTION_AI_FAILURE_MESSAGE = (
     "لن أخمّن أو أعطيك معلومة غير مؤكدة. حاول مرة أخرى بعد قليل. 🤝"
 )
 
+def _pick_groq_key(exclude=None):
+    global groq_key_index
+    exclude = exclude or set()
+    total = len(GROQ_API_KEYS)
+    if total == 0:
+        return None, None
+    now = time.time()
+    with groq_key_lock:
+        start = groq_key_index % total
+        for offset in range(total):
+            idx = (start + offset) % total
+            if idx in exclude:
+                continue
+            if groq_key_cooldowns.get(idx, 0) > now:
+                continue
+            groq_key_index = (idx + 1) % total
+            return idx, GROQ_API_KEYS[idx]
+    return None, None
+
+def get_groq_response(user_message, user_name="", search_context="", context_override=None):
+    """Second AI provider. Free-tier aware: one request per key attempt; 429 cooldown follows server headers.
+    Multiple keys are supported for resilience, but Groq rate limits are organization-level, so keys are NOT treated as quota multipliers.
+    """
+    if not GROQ_API_KEYS:
+        return None
+    context_text = context_override if context_override is not None else _build_ai_context(user_message, search_context)
+    system_prompt = (
+        ZYNMART_PROMPT
+        + "\nإذا لم يوجد دليل كافٍ، صرّح بعدم القدرة على التحقق ولا تخمّن."
+        + "\nأجب بالعربية المناسبة للسؤال، وكن دقيقًا ومختصرًا."
+        + "\n" + context_text[:1800]
+    )
+    payload = {
+        "model": os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b"),
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"{user_name}: {user_message}"}
+        ],
+        "temperature": 0.2,
+        "max_completion_tokens": 700
+    }
+    attempted = set()
+    max_attempts = min(len(GROQ_API_KEYS), 2)
+    for _ in range(max_attempts):
+        idx, key = _pick_groq_key(exclude=attempted)
+        if key is None:
+            break
+        attempted.add(idx)
+        try:
+            res = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                json=payload,
+                headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"},
+                timeout=5
+            )
+            if res.status_code == 200:
+                txt = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
+                if txt:
+                    return sanitize_urls(txt)
+                return None
+            if res.status_code == 429:
+                retry_after = 30
+                try:
+                    retry_after = int(float(res.headers.get("retry-after", "30")))
+                except Exception:
+                    pass
+                with groq_key_lock:
+                    groq_key_cooldowns[idx] = time.time() + max(10, min(retry_after, 3600))
+                print(f"Groq HTTP 429 - key index {idx}; cooldown {retry_after}s")
+                continue
+            if res.status_code in (401, 403):
+                with groq_key_lock:
+                    groq_key_cooldowns[idx] = time.time() + 300
+                print(f"Groq HTTP {res.status_code} - key index {idx}; cooldown 300s")
+                continue
+            print(f"Groq HTTP {res.status_code}: {res.text[:300]}")
+            return None
+        except Exception as e:
+            print(f"Groq Exception: {e} - key index {idx}")
+            return None
+    return None
+
+def get_groq_admin_agent_response(admin_id, chat_id, task):
+    """Admin-only autonomous task runner using Groq local tool calling.
+    The model can request only the explicitly whitelisted tools below. The caller must already be an ADMIN_ID.
+    """
+    if admin_id not in ADMIN_IDS or not GROQ_API_KEYS:
+        return None
+    tools = [
+        {"type":"function","function":{"name":"search_web","description":"Search current public web information using the bot's existing verified search pipeline.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
+        {"type":"function","function":{"name":"get_pi_status","description":"Get the bot's current Pi market/source summary.","parameters":{"type":"object","properties":{}}}},
+        {"type":"function","function":{"name":"send_group_message","description":"Send a text message to the known active Telegram group. Use only when the administrator explicitly asks to send/publish something.","parameters":{"type":"object","properties":{"text":{"type":"string","maxLength":4000}},"required":["text"]}}}
+    ]
+    messages = [
+        {"role":"system","content":(
+            "أنت وكيل تنفيذ خاص بالإدارة فقط. صاحب الطلب تم التحقق منه مسبقًا كـ ADMIN_ID. "
+            "نفّذ فقط الأدوات المسموح بها. لا تنفذ أي حذف أو حظر أو تغيير صلاحيات. "
+            "لا تخمّن. عند نقص الدليل استخدم search_web. "
+            "لا ترسل للمجموعة إلا إذا طلب المدير ذلك صراحة."
+        )},
+        {"role":"user","content":task}
+    ]
+    attempted=set()
+    idx,key=_pick_groq_key(exclude=attempted)
+    if key is None:
+        return None
+    try:
+        res=requests.post("https://api.groq.com/openai/v1/chat/completions",json={
+            "model":os.environ.get("GROQ_AGENT_MODEL", os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")),
+            "messages":messages,"tools":tools,"tool_choice":"auto","temperature":0.1,"max_completion_tokens":700
+        },headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},timeout=7)
+        if res.status_code!=200:
+            print(f"Groq Agent HTTP {res.status_code}: {res.text[:300]}")
+            return None
+        data=res.json(); msg=data.get("choices",[{}])[0].get("message",{})
+        tool_calls=msg.get("tool_calls") or []
+        if not tool_calls:
+            return sanitize_urls(msg.get("content","") or "") or None
+        messages.append(msg)
+        for tc in tool_calls[:3]:
+            fn=tc.get("function",{}).get("name","")
+            try: args=json.loads(tc.get("function",{}).get("arguments","{}"))
+            except Exception: args={}
+            if fn=="search_web":
+                result=search_official(str(args.get("query","")[:500]))
+            elif fn=="get_pi_status":
+                result=format_pi_price()
+            elif fn=="send_group_message":
+                if not (active_group_chat_id or DEFAULT_GROUP_CHAT_ID):
+                    result="ERROR: no active group known"
+                else:
+                    target=active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+                    r=send_message(target,str(args.get("text","")[:4000]))
+                    result="SENT" if r and r.get("ok") else "ERROR: Telegram send failed"
+            else:
+                result="ERROR: tool not allowed"
+            messages.append({"role":"tool","tool_call_id":tc.get("id",""),"name":fn,"content":str(result)[:6000]})
+        final=requests.post("https://api.groq.com/openai/v1/chat/completions",json={
+            "model":os.environ.get("GROQ_AGENT_MODEL", os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")),
+            "messages":messages,"temperature":0.1,"max_completion_tokens":500
+        },headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},timeout=7)
+        if final.status_code==200:
+            return sanitize_urls(final.json().get("choices",[{}])[0].get("message",{}).get("content","") or "") or "✅ تم تنفيذ المهمة."
+        print(f"Groq Agent final HTTP {final.status_code}: {final.text[:300]}")
+    except Exception as e:
+        print(f"Groq Agent Exception: {e}")
+    return None
+
 def get_hermes_response(user_message, user_name="", search_context="", context_override=None):
     if not HERMES_API_KEY:
         return None
@@ -560,6 +718,10 @@ def get_ai_response(user_message, user_name="", search_context=""):
     res = get_gemini_response(user_message, user_name, search_context, context_override=context_text)
     if res:
         return res
+    # Second provider: Groq free tier. It is deliberately after Gemini and before Hermes.
+    res_groq = get_groq_response(user_message, user_name, search_context, context_override=context_text)
+    if res_groq:
+        return res_groq
     res_hermes = get_hermes_response(user_message, user_name, search_context, context_override=context_text)
     if res_hermes:
         return res_hermes
@@ -882,7 +1044,8 @@ def mark_pending_answered(chat_id, reply_to_message_id):
 def admin_keyboard():
     return {
         "inline_keyboard": [
-            [{"text": "💬 دردشة خاصة", "callback_data": "admin_chat"}],
+            [{"text": "💬 دردشة خاصة", "callback_data": "admin_chat"},
+             {"text": "🤖 تنفيذ مهمة", "callback_data": "admin_agent"}],
             [{"text": "📢 البث", "callback_data": "admin_broadcast"},
              {"text": "⚙️ الإعدادات", "callback_data": "admin_settings"}],
             [{"text": "🛡️ الإشراف", "callback_data": "admin_moderation"},
@@ -959,6 +1122,13 @@ def process_admin_text(chat_id, user_id, text):
     if text == "رجوع":
         admin_modes.pop(user_id, None)
         show_admin_panel(chat_id)
+        return True
+
+    if mode == "agent":
+        def job():
+            reply = get_groq_admin_agent_response(user_id, chat_id, text)
+            send_message(chat_id, reply if reply else "⚠️ تعذّر تنفيذ المهمة حاليًا عبر وكيل المهام.")
+        run_ai_job(job)
         return True
 
     if mode == "chat":
@@ -1242,6 +1412,9 @@ def handle_callback(data):
     if action == "admin_chat":
         admin_modes[user_id] = "chat"
         send_message(chat_id, "💬 دخلت وضع الدردشة الخاصة.\nاكتب سؤالك مباشرة.\nاكتب «رجوع» للعودة إلى لوحة التحكم.")
+    elif action == "admin_agent":
+        admin_modes[user_id] = "agent"
+        send_message(chat_id, "🤖 وضع تنفيذ المهام — للإدارة فقط.\nاكتب المهمة المطلوبة وسأنفذ فقط الأدوات المسموح بها.\n«رجوع» للعودة إلى لوحة التحكم.")
     elif action == "admin_broadcast":
         admin_modes[user_id] = "broadcast_topic"
         send_message(chat_id, "📢 أرسل موضوع المنشور الإبداعي.\nللعودة اكتب «رجوع».")

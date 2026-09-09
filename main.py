@@ -13,6 +13,8 @@ TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 
 GEMINI_API_KEYS = []
 current_key_index = 0
+gemini_key_lock = threading.Lock()
+gemini_key_cooldowns = {}
 for k, v in os.environ.items():
     if k.startswith("GEMINI_API_KEY") and v:
         for x in v.split(","):
@@ -427,6 +429,42 @@ def fetch_real_evidence(user_message):
         return format_pi_price()
     return ""
 
+def _gemini_retry_after_seconds(res):
+    """Read a useful retry delay from Gemini without exposing key data."""
+    try:
+        data = res.json()
+        details = data.get("error", {}).get("details", [])
+        for item in details:
+            retry_delay = item.get("retryDelay")
+            if retry_delay:
+                m = re.search(r"(\d+(?:\.\d+)?)", str(retry_delay))
+                if m:
+                    return max(30, min(300, int(float(m.group(1))) + 5))
+    except Exception:
+        pass
+    return 60
+
+def _pick_gemini_key(exclude=None):
+    """Pick one non-cooled key in round-robin order; never expose the key itself."""
+    global current_key_index
+    exclude = set(exclude or [])
+    total = len(GEMINI_API_KEYS)
+    if total == 0:
+        return None, None
+
+    now = time.time()
+    with gemini_key_lock:
+        start = current_key_index % total
+        for offset in range(total):
+            idx = (start + offset) % total
+            if idx in exclude:
+                continue
+            if gemini_key_cooldowns.get(idx, 0) > now:
+                continue
+            current_key_index = (idx + 1) % total
+            return idx, GEMINI_API_KEYS[idx]
+    return None, None
+
 def get_gemini_response(user_message, user_name="", search_context=""):
     if not GEMINI_API_KEYS:
         return None
@@ -450,41 +488,60 @@ def get_gemini_response(user_message, user_name="", search_context=""):
 
     payload = {"contents": [{"parts": [{"text": full_prompt}]}]}
 
-    # Gemini 3.5 Flash: model current and supported for GenerateContent.
-    # Rotate only among the configured keys; never print keys themselves.
-    global current_key_index
-    total_keys = len(GEMINI_API_KEYS)
-    if total_keys == 0:
-        return None
+    # Quota protection:
+    # - Normal request: ONE Gemini key only, round-robin.
+    # - 503/timeout/network errors: do NOT burn the other keys; go to Hermes.
+    # - 429/403/401: mark this key temporarily unavailable and try at most ONE
+    #   other configured key. Never sweep through every key for one question.
+    attempted = set()
+    max_attempts = 2 if len(GEMINI_API_KEYS) > 1 else 1
 
-    start_index = current_key_index % total_keys
-    for offset in range(total_keys):
-        idx = (start_index + offset) % total_keys
-        k = GEMINI_API_KEYS[idx]
+    for _ in range(max_attempts):
+        idx, k = _pick_gemini_key(exclude=attempted)
+        if k is None:
+            break
+        attempted.add(idx)
         try:
             url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash:generateContent?key=" + k
-            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=12)
+            res = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=12
+            )
 
             if res.status_code == 200:
                 parts = res.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
                 if parts:
                     txt = parts[0].get("text", "")
                     if txt:
-                        current_key_index = (idx + 1) % total_keys
                         return sanitize_urls(txt)
+                print(f"Gemini HTTP 200 but empty response - key index {idx}")
+                return None
 
-            elif res.status_code == 429:
-                print(f"Gemini HTTP 429 - key index {idx}")
-                # If this key/project is rate-limited, try the next configured key.
-                current_key_index = (idx + 1) % total_keys
+            if res.status_code == 429:
+                retry_for = _gemini_retry_after_seconds(res)
+                with gemini_key_lock:
+                    gemini_key_cooldowns[idx] = time.time() + retry_for
+                print(f"Gemini HTTP 429 - key index {idx}; cooldown {retry_for}s")
+                # One fallback key at most, then Hermes.
                 continue
-            else:
-                print(f"Gemini HTTP {res.status_code} - key index {idx}")
-                current_key_index = (idx + 1) % total_keys
+
+            if res.status_code in (401, 403):
+                with gemini_key_lock:
+                    gemini_key_cooldowns[idx] = time.time() + 300
+                print(f"Gemini HTTP {res.status_code} - key index {idx}; cooldown 300s")
+                # One fallback key at most, then Hermes.
+                continue
+
+            # 5xx and other errors do not justify consuming another Gemini key.
+            print(f"Gemini HTTP {res.status_code} - key index {idx}")
+            return None
 
         except Exception as e:
-            print(f"Gemini Exception: {e}")
-            current_key_index = (idx + 1) % total_keys
+            # Timeout/network failure: keep the remaining keys untouched.
+            print(f"Gemini Exception: {e} - key index {idx}")
+            return None
 
     return None
 

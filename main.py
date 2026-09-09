@@ -53,7 +53,7 @@ last_message_cache = {}
 manual_exceptions = set()
 
 DEFAULT_SETTINGS = {
-    "question_delay": 60,
+    "question_delay": 30,
     "moderation_enabled": True,
     "moderation_level": "medium",
     "daily_enabled": True,
@@ -488,6 +488,12 @@ def get_gemini_response(user_message, user_name="", search_context=""):
 
     return None
 
+AI_PRIVATE_FAILURE_MESSAGE = (
+    "⚠️ يوجد حاليًا خلل تقني في خدمة الذكاء الاصطناعي.\n"
+    "Telegram وRender يعملان بشكل طبيعي، والمشكلة تقنية في خدمة الذكاء الاصطناعي.\n"
+    "لن أخمّن الإجابة حتى تعود الخدمة للعمل."
+)
+
 def get_hermes_response(user_message, user_name="", search_context=""):
     if not HERMES_API_KEY:
         return None
@@ -530,6 +536,8 @@ def get_hermes_response(user_message, user_name="", search_context=""):
             txt = res.json().get("choices", [{}])[0].get("message", {}).get("content", "")
             if txt:
                 return sanitize_urls(txt)
+        else:
+            print(f"Hermes HTTP {res.status_code}: {res.text[:500]}")
     except Exception as e:
         print(f"Hermes Exception: {e}")
     return None
@@ -541,9 +549,7 @@ def get_ai_response(user_message, user_name="", search_context=""):
     res_hermes = get_hermes_response(user_message, user_name, search_context)
     if res_hermes:
         return res_hermes
-    return sanitize_urls(
-        "⚠️ لم أتمكن من الوصول إلى نموذج الذكاء الاصطناعي أو مصدر تحقق مناسب حاليًا، لذلك لن أخمّن الإجابة."
-    )
+    return None
 
 def is_clear_question(text):
     t = text.strip()
@@ -790,21 +796,7 @@ def handle_auto_moderation(msg):
 def schedule_question(chat_id, msg):
     message_id = msg.get("message_id")
     key = (str(chat_id), int(message_id))
-    delay = int(settings.get("question_delay", 60))
-
-    def worker():
-        time.sleep(delay)
-        item = pending_questions.pop(key, None)
-        if not item:
-            return
-        # If a moderator answered directly, webhook marks answered=True.
-        if item.get("answered"):
-            return
-        text = item["text"]
-        username = item["user_name"]
-        search_context = search_official(text) if needs_fresh_search(text) else ""
-        reply = get_ai_response(text, username, search_context)
-        send_message(chat_id, reply, reply_to=message_id)
+    delay = max(30, int(settings.get("question_delay", 30)))
 
     pending_questions[key] = {
         "chat_id": chat_id,
@@ -812,8 +804,47 @@ def schedule_question(chat_id, msg):
         "text": text_without_bot_mention(msg.get("text", "")),
         "user_name": msg.get("from", {}).get("first_name", ""),
         "answered": False,
-        "created": time.time()
+        "created": time.time(),
+        "prepared_reply": None
     }
+
+    def worker():
+        # No question classification and no AI/search call at message arrival.
+        # Around second 20, perform only the local deterministic analysis.
+        prep_wait = min(20, delay)
+        time.sleep(prep_wait)
+
+        item = pending_questions.get(key)
+        if not item or item.get("answered"):
+            return
+
+        text = item["text"]
+        if not is_clear_question(text):
+            pending_questions.pop(key, None)
+            return
+
+        # Start search/AI preparation around second 20 to reduce wasted quota.
+        search_context = search_official(text) if needs_fresh_search(text) else ""
+        reply = get_ai_response(text, item["user_name"], search_context)
+        item["prepared_reply"] = reply
+
+        # Send at the configured delay when possible. If AI/search took longer,
+        # send immediately after preparation, but only if nobody replied.
+        elapsed = time.time() - item.get("created", time.time())
+        remaining = delay - elapsed
+        if remaining > 0:
+            time.sleep(remaining)
+
+        item = pending_questions.pop(key, None)
+        if not item or item.get("answered"):
+            return
+
+        reply = item.get("prepared_reply")
+        # Group remains completely silent when all AI services fail.
+        if not reply:
+            return
+        send_message(chat_id, reply, reply_to=message_id)
+
     threading.Thread(target=worker, daemon=True).start()
 
 def text_without_bot_mention(text):
@@ -848,7 +879,7 @@ def show_admin_panel(chat_id):
     })
 
 def settings_keyboard():
-    delay = settings.get("question_delay", 60)
+    delay = settings.get("question_delay", 30)
     mod = "🟢" if settings.get("moderation_enabled", True) else "🔴"
     daily = "🟢" if settings.get("daily_enabled", True) else "🔴"
     return {
@@ -909,7 +940,8 @@ def process_admin_text(chat_id, user_id, text):
 
     if mode == "chat":
         search_context = search_official(text) if needs_fresh_search(text) else ""
-        send_message(chat_id, get_ai_response(text, "", search_context))
+        reply = get_ai_response(text, "", search_context)
+        send_message(chat_id, reply if reply else AI_PRIVATE_FAILURE_MESSAGE)
         return True
 
     if mode == "broadcast_topic":
@@ -918,6 +950,10 @@ def process_admin_text(chat_id, user_id, text):
             search_results = search_official(text)
             creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {text}"
             broadcast_reply = get_ai_response(creative_order, "", search_context=search_results)
+            if not broadcast_reply:
+                send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                admin_modes.pop(user_id, None)
+                return True
             send_message(target_group, broadcast_reply)
             send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
         else:
@@ -1309,16 +1345,15 @@ def webhook():
     if not chat_id or not BOT_TOKEN:
         return jsonify({"status": "ok"}), 200
 
-    remember_user(msg)
-
     if chat_type in ["group", "supergroup"]:
+        remember_user(msg)
         if active_group_chat_id != chat_id:
             active_group_chat_id = chat_id
             save_users_to_file()
 
-        # Moderator response to a pending question: direct reply only.
+        # Any group member's direct reply cancels the pending AI answer.
         reply_to = msg.get("reply_to_message", {})
-        if reply_to and user_id and is_moderator(chat_id, user_id):
+        if reply_to:
             mark_pending_answered(chat_id, reply_to.get("message_id"))
 
         # Auto moderation first, but never for moderators/admins.
@@ -1340,11 +1375,13 @@ def webhook():
             question = text_without_bot_mention(text)
             search_res = search_official(question) if needs_fresh_search(question) else ""
             reply = get_ai_response(question, user_name, search_context=search_res)
-            send_message(chat_id, reply, reply_to=msg.get("message_id"))
+            if reply:
+                send_message(chat_id, reply, reply_to=msg.get("message_id"))
             return jsonify({"status": "ok"}), 200
 
-        # Clear questions without mention => wait configured delay.
-        if text and is_clear_question(text):
+        # All ordinary group text enters the waiting window.
+        # The deterministic question check happens around second 20.
+        if text:
             schedule_question(chat_id, msg)
 
         return jsonify({"status": "ok"}), 200
@@ -1368,6 +1405,9 @@ def webhook():
                     search_results = search_official(search_query)
                     broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
 
+                if not broadcast_reply:
+                    send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                    return jsonify({"status": "ok"}), 200
                 send_message(target_group, broadcast_reply)
                 send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
             else:
@@ -1386,7 +1426,7 @@ def webhook():
         # Preserve original ordinary private AI reply.
         search_res = search_official(text) if needs_fresh_search(text) else ""
         direct_reply = get_ai_response(text, user_name, search_context=search_res)
-        send_message(chat_id, direct_reply)
+        send_message(chat_id, direct_reply if direct_reply else AI_PRIVATE_FAILURE_MESSAGE)
         return jsonify({"status": "ok"}), 200
 
     return jsonify({"status": "ok"}), 200

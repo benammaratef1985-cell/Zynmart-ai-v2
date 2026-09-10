@@ -33,7 +33,8 @@ for k, v in os.environ.items():
             if x and x not in GEMINI_API_KEYS:
                 GEMINI_API_KEYS.append(x)
 
-ADMIN_IDS = [7560871853, 6283667477]
+OWNER_ID = 7560871853  # Secret owner of the AI for ZYNMART bot only; not ZynMart ownership.
+ADMIN_IDS = [OWNER_ID, 6283667477]
 BOT_USERNAME = "@zynmart_ai_bot"
 NEWS_URL = "https://zynmartpi.github.io/"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
@@ -127,6 +128,8 @@ def load_settings():
     return settings
 
 settings = load_settings()
+settings.setdefault("emergency_mode", False)
+settings.setdefault("emergency_reason", "")
 manual_exceptions = set(int(x) for x in settings.get("manual_exceptions", []) if str(x).lstrip("-").isdigit())
 daily_data = load_json(DAILY_FILE, {})
 if isinstance(daily_data, dict) and daily_data.get("daily"):
@@ -615,7 +618,7 @@ def get_groq_admin_agent_response(admin_id, chat_id, task):
     """Admin-only autonomous task runner using Groq local tool calling.
     The model can request only the explicitly whitelisted tools below. The caller must already be an ADMIN_ID.
     """
-    if admin_id not in ADMIN_IDS or not GROQ_API_KEYS:
+    if admin_id not in ADMIN_IDS or not GROQ_API_KEYS or emergency_active():
         return None
     tools = [
         {"type":"function","function":{"name":"search_web","description":"Search current public web information using the bot's existing verified search pipeline.","parameters":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}}},
@@ -668,7 +671,7 @@ def get_groq_admin_agent_response(admin_id, chat_id, task):
             messages.append({"role":"tool","tool_call_id":tc.get("id",""),"name":fn,"content":str(result)[:6000]})
         final=requests.post("https://api.groq.com/openai/v1/chat/completions",json={
             "model":os.environ.get("GROQ_AGENT_MODEL", os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")),
-            "messages":messages,"temperature":0.1,"max_completion_tokens":500
+            "messages":messages,"tools":tools,"tool_choice":"none","temperature":0.1,"max_completion_tokens":500
         },headers={"Authorization":"Bearer "+key,"Content-Type":"application/json"},timeout=7)
         if final.status_code==200:
             return sanitize_urls(final.json().get("choices",[{}])[0].get("message",{}).get("content","") or "") or "✅ تم تنفيذ المهمة."
@@ -713,7 +716,15 @@ def get_hermes_response(user_message, user_name="", search_context="", context_o
     return None
 
 def get_ai_response(user_message, user_name="", search_context=""):
-    # Build external evidence once, then reuse it for Gemini -> Hermes fallback.
+    if emergency_active():
+        return None
+    # Current/time-sensitive questions require external evidence; never guess when evidence is unavailable.
+    if needs_fresh_search(user_message) and not search_context:
+        search_context = search_official(user_message)
+        if not search_context and not fetch_real_evidence(user_message):
+            print("Fresh-evidence gate: no verifiable evidence available")
+            return None
+    # Build external evidence once, then reuse it for Gemini -> Groq -> Hermes fallback.
     context_text = _build_ai_context(user_message, search_context)
     res = get_gemini_response(user_message, user_name, search_context, context_override=context_text)
     if res:
@@ -1041,27 +1052,109 @@ def mark_pending_answered(chat_id, reply_to_message_id):
         if item.get("chat_id") == chat_id and item.get("message_id") == reply_to_message_id:
             item["answered"] = True
 
-def admin_keyboard():
+def is_owner(user_id):
+    try:
+        return int(user_id) == OWNER_ID
+    except Exception:
+        return False
+
+def emergency_active():
+    return bool(settings.get("emergency_mode", False))
+
+def set_emergency_mode(enabled, reason=""):
+    settings["emergency_mode"] = bool(enabled)
+    settings["emergency_reason"] = str(reason or "")[:500]
+    save_settings()
+
+def owner_security_keyboard():
+    active = emergency_active()
+    state = "🔴 طوارئ مفعلة" if active else "🟢 الوضع الطبيعي"
     return {
         "inline_keyboard": [
-            [{"text": "💬 دردشة خاصة", "callback_data": "admin_chat"},
-             {"text": "🤖 تنفيذ مهمة", "callback_data": "admin_agent"}],
-            [{"text": "📢 البث", "callback_data": "admin_broadcast"},
-             {"text": "⚙️ الإعدادات", "callback_data": "admin_settings"}],
-            [{"text": "🛡️ الإشراف", "callback_data": "admin_moderation"},
-             {"text": "🕒 الانتظار", "callback_data": "admin_delay"}],
-            [{"text": "📅 الرسائل اليومية", "callback_data": "admin_daily"}],
-            [{"text": "📊 سعر Pi", "callback_data": "admin_pi"},
-             {"text": "📋 السجل", "callback_data": "admin_log"}],
-            [{"text": "🔙 رجوع", "callback_data": "admin_back"}]
+            [{"text": "🛑 إيقاف طوارئ" if not active else "🔴 الطوارئ مفعلة", "callback_data": "owner_emergency_on" if not active else "owner_emergency_status"},
+             {"text": "▶️ فتح / استئناف", "callback_data": "owner_emergency_off"}],
+            [{"text": state, "callback_data": "owner_emergency_status"}],
+            [{"text": "🧾 سجل أمني", "callback_data": "admin_log"}],
+            [{"text": "🔙 لوحة التحكم", "callback_data": "admin_back"}]
         ]
     }
+
+def show_owner_security(chat_id):
+    state = "🔴 وضع الطوارئ مفعّل" if emergency_active() else "🟢 النظام في الوضع الطبيعي"
+    reason = settings.get("emergency_reason")
+    text = ("🔐 مركز التحكم السري\n\n"
+            "هذه المنطقة خاصة بصاحب التحكم في بوت AI for ZYNMART فقط.\n"
+            f"الحالة: {state}")
+    if reason:
+        text += f"\nالسبب: {reason}"
+    telegram("sendMessage", {"chat_id": chat_id, "text": text, "reply_markup": owner_security_keyboard()})
+
+def platform_keyboard(owner=False):
+    rows = [
+        [{"text":"🤖 مركز الذكاء الاصطناعي","callback_data":"platform_ai"},{"text":"🔎 ZYN Search","callback_data":"platform_search"}],
+        [{"text":"🛒 السوق ZynMart","callback_data":"platform_market"},{"text":"🏪 المتاجر","callback_data":"platform_stores"}],
+        [{"text":"👥 المجتمع","callback_data":"platform_community"},{"text":"💬 الرسائل","callback_data":"platform_messages"}],
+        [{"text":"📰 الأخبار","callback_data":"platform_news"},{"text":"🟣 Pi & Markets","callback_data":"platform_pi"}],
+        [{"text":"🎨 Content Studio","callback_data":"platform_content"},{"text":"📊 التحليلات والبيانات","callback_data":"platform_analytics"}],
+        [{"text":"🧰 الأدوات","callback_data":"platform_tools"},{"text":"🎮 الترفيه","callback_data":"platform_fun"}],
+        [{"text":"⭐ ZYNMART+","callback_data":"platform_plus"},{"text":"📣 الإعلانات","callback_data":"platform_ads"}],
+        [{"text":"🎁 المكافآت","callback_data":"platform_rewards"},{"text":"👤 الحساب","callback_data":"platform_account"}],
+        [{"text":"🛡️ الأمان والثقة","callback_data":"platform_security"},{"text":"📚 مركز المعرفة","callback_data":"platform_knowledge"}],
+        [{"text":"🆘 الدعم","callback_data":"platform_support"},{"text":"🧪 ZYN LAB","callback_data":"platform_lab"}],
+    ]
+    if owner:
+        rows.append([{"text":"👑 إدارة البوت","callback_data":"admin_bot"}])
+    rows.append([{ "text":"🔙 لوحة التحكم", "callback_data":"admin_back"}])
+    return {"inline_keyboard": rows}
+
+def show_platform_center(chat_id, owner=False):
+    telegram("sendMessage", {"chat_id": chat_id, "text": "🌐 مركز منصة AI for ZYNMART\n\nتم تفعيل الوظائف المتاحة حاليًا. الوظائف التي تحتاج بنية خارجية تظهر 🚧 قريبًا بدل أن يتم الادعاء بأنها تعمل.", "reply_markup": platform_keyboard(owner)})
+
+def platform_section(chat_id, key):
+    sections = {
+        "ai": ("🤖 مركز الذكاء الاصطناعي", ["💬 دردشة خاصة — 🟢", "🔎 بحث موثوق — 🟢", "🧠 تحليل/كتابة/تلخيص/ترجمة — 🟢 عبر محرك AI", "💻 برمجة وأفكار ومشاريع — 🟢", "🖼️ الصور — 🚧 قريبًا", "🎬 الفيديو — 🚧 قريبًا"]),
+        "search": ("🔎 ZYN Search", ["🌐 بحث الويب — 🟢", "📰 الأخبار — 🟢 عند توفر المصدر", "🟣 بحث Pi — 🟢", "🛒 المنتجات/المتاجر — 🚧 قريبًا"]),
+        "market": ("🛒 سوق ZynMart", ["🔎 البحث عن المنتجات — 🚧 قريبًا", "🏪 المتاجر والعروض — 🚧 قريبًا", "🛍️ السلة — 🚧 قريبًا", "➕ إضافة منتج — 🚧 قريبًا", "🏬 إنشاء متجر — 🚧 قريبًا"]),
+        "stores": ("🏪 المتاجر", ["🔎 بحث المتاجر — 🚧 قريبًا", "⭐ المميزة — 🚧 قريبًا", "✅ الموثقة — 🚧 قريبًا", "➕ إنشاء متجر — 🚧 قريبًا"]),
+        "community": ("👥 المجتمع", ["🏠 الرئيسية — 🚧 قريبًا", "👥 المجموعات والقنوات والمنشورات — 🚧 قريبًا", "🔔 الإشعارات والمتابعة — 🚧 قريبًا"]),
+        "messages": ("💬 الرسائل", ["💬 رسائل المستخدمين — 🚧 قريبًا", "🤝 محادثات العملاء — 🚧 قريبًا", "🏪 محادثات التجار — 🚧 قريبًا"]),
+        "news": ("📰 الأخبار", ["🌍 العالم / تقنية / AI / Crypto / Pi / تجارة — 🟢 عبر البحث عند الطلب", "🔥 الأكثر قراءة — 🚧 قريبًا", "🔎 بحث الأخبار — 🟢 عبر البحث"]),
+        "pi": ("🟣 Pi & Markets", ["🟣 Pi Network — 🟢", "💵 أسعار الأسواق العامة — 🟢", "📊 مقارنة المصادر — 🟢", "📰 أخبار Pi — 🟢 عبر البحث", "🧠 تحليل — 🟢 مع أدلة"]),
+        "content": ("🎨 Content Studio", ["✍️ كتابة — 🟢", "📣 منشورات وإعلانات — 🟢", "📄 مستندات — 🟢 حسب الإدخال", "🖼️ توليد صور — 🚧 قريبًا داخل البوت", "🎬 فيديو — 🚧 قريبًا", "🎙️ صوت — 🚧 قريبًا"]),
+        "analytics": ("📊 مركز التحليلات والبيانات", ["🧮 حسابات ومقارنات — 🟢", "📈 تحليل بيانات — 🟢 عندما تُقدّم البيانات", "📑 تقارير — 🟢 نصيًا", "📊 تحليل سوق متقدم — 🚧 قريبًا"]),
+        "tools": ("🧰 الأدوات", ["🧮 حاسبة — 🟢 عبر AI", "🌐 ترجمة — 🟢", "📅 تاريخ/وقت — 🟢", "💱 عملات — 🚧 بيانات مباشرة تحتاج مصدر", "📏 تحويل وحدات — 🟢", "🔗 أدوات الروابط — 🟢", "📁 أدوات الملفات — 🚧 قريبًا", "🔐 أدوات الأمان — 🟢 للمراقبة الحالية"]),
+        "fun": ("🎮 الترفيه", ["🎮 ألعاب — 🚧 قريبًا", "🏆 تحديات وترتيب — 🚧 قريبًا", "🎁 مكافآت — 🚧 قريبًا"]),
+        "plus": ("⭐ ZYNMART+", ["⭐ العضوية — 🚧 قريبًا", "🚀 مزايا AI متقدمة — 🚧 قريبًا", "🎁 عروض خاصة — 🚧 قريبًا"]),
+        "ads": ("📣 مركز الإعلانات", ["➕ إنشاء إعلان — 🚧 قريبًا", "📋 إعلاناتي — 🚧 قريبًا", "📣 حملات ونتائج — 🚧 قريبًا", "💰 الميزانية — 🚧 قريبًا"]),
+        "rewards": ("🎁 المكافآت", ["🎁 المكافآت والنشاط — 🚧 قريبًا", "🏆 الترتيب — 🚧 قريبًا", "📝 المهام والإحالات والنقاط — 🚧 قريبًا"]),
+        "account": ("👤 الحساب", ["👤 الملف والنشاط — 🚧 قريبًا", "❤️ المفضلة والمشتريات — 🚧 قريبًا", "🏪 المتجر والإعلانات — 🚧 قريبًا", "🔔 الإشعارات والإعدادات — 🟢 إعدادات البوت الحالية"]),
+        "security": ("🛡️ الأمان والثقة", ["🛡️ حماية الإدارة — 🟢", "🚫 مكافحة الاحتيال والمحتوى المشبوه — 🟢", "✅ التحقق من التجار — 🚧 قريبًا", "⭐ التقييمات والشروط والخصوصية — 🚧 قريبًا"]),
+        "knowledge": ("📚 مركز المعرفة", ["📚 موسوعة وبحث — 🟢 عبر AI/ويب", "🎓 التعلم والدورات — 🚧 قريبًا", "📖 الأدلة والأسئلة الشائعة — 🟢 نصيًا"]),
+        "support": ("🆘 الدعم", ["❓ المساعدة — 🟢", "🐞 الإبلاغ عن مشكلة — 🚧 قريبًا", "📞 التواصل — 🚧 قريبًا", "📊 حالة النظام — 🟢"]),
+        "lab": ("🧪 ZYN LAB", ["🟢 الوظائف الحالية — AI / Search / Pi / Moderation / Daily / Broadcast", "🚧 القادم — Marketplace / Stores / Community / Messaging / Media / Membership / Rewards", "كل ميزة غير متاحة لا تُقدَّم للمستخدم على أنها مفعلة."]),
+    }
+    title, items = sections.get(key, ("ZYN LAB", ["🚧 قريبًا"]))
+    text = title + "\n\n" + "\n".join("• " + x for x in items)
+    send_message(chat_id, text, reply_markup={"inline_keyboard":[[{"text":"🔙 المنصة","callback_data":"admin_platform"}]]})
+
+def admin_keyboard(owner=False):
+    rows = [
+        [{"text": "💬 دردشة خاصة", "callback_data": "admin_chat"}, {"text": "🤖 تنفيذ مهمة", "callback_data": "admin_agent"}],
+        [{"text": "🌐 مركز المنصة", "callback_data": "admin_platform"}, {"text": "📢 البث", "callback_data": "admin_broadcast"}],
+        [{"text": "⚙️ الإعدادات", "callback_data": "admin_settings"}, {"text": "🛡️ الإشراف", "callback_data": "admin_moderation"}],
+        [{"text": "🕒 الانتظار", "callback_data": "admin_delay"}, {"text": "📅 الرسائل اليومية", "callback_data": "admin_daily"}],
+        [{"text": "📊 سعر Pi", "callback_data": "admin_pi"}, {"text": "📋 السجل", "callback_data": "admin_log"}],
+    ]
+    if owner:
+        rows.append([{ "text": "🔐 مركز التحكم السري", "callback_data": "owner_security"}])
+    rows.append([{ "text": "🔙 رجوع", "callback_data": "admin_back"}])
+    return {"inline_keyboard": rows}
 
 def show_admin_panel(chat_id):
     return telegram("sendMessage", {
         "chat_id": chat_id,
         "text": "🛠️ لوحة تحكم ZYNMART\nاختر العملية المطلوبة:",
-        "reply_markup": admin_keyboard()
+        "reply_markup": admin_keyboard(is_owner(chat_id))
     })
 
 def settings_keyboard():
@@ -1362,7 +1455,7 @@ def daily_scheduler():
     while True:
         try:
             auto_unmute_due()
-            if settings.get("daily_enabled", True) and (active_group_chat_id or DEFAULT_GROUP_CHAT_ID):
+            if (not emergency_active()) and settings.get("daily_enabled", True) and (active_group_chat_id or DEFAULT_GROUP_CHAT_ID):
                 now = datetime.now(tz)
                 day_key = now.strftime("%Y-%m-%d")
                 for name, item in settings.get("daily", {}).items():
@@ -1409,7 +1502,35 @@ def handle_callback(data):
         send_message(chat_id, result)
         return
 
-    if action == "admin_chat":
+    if action == "owner_security":
+        if not is_owner(user_id):
+            return
+        show_owner_security(chat_id)
+    elif action == "owner_emergency_on":
+        if not is_owner(user_id):
+            return
+        set_emergency_mode(True, "تفعيل يدوي من مركز التحكم السري")
+        log_action(chat_id, user_id, "owner_emergency_on", details="Emergency mode enabled")
+        show_owner_security(chat_id)
+    elif action == "owner_emergency_off":
+        if not is_owner(user_id):
+            return
+        set_emergency_mode(False, "")
+        log_action(chat_id, user_id, "owner_emergency_off", details="Emergency mode disabled")
+        show_owner_security(chat_id)
+    elif action == "owner_emergency_status":
+        if not is_owner(user_id):
+            return
+        show_owner_security(chat_id)
+    elif action == "admin_platform":
+        show_platform_center(chat_id, is_owner(user_id))
+    elif action.startswith("platform_"):
+        platform_section(chat_id, action.split("_", 1)[1])
+    elif action == "admin_bot":
+        if not is_owner(user_id):
+            return
+        show_owner_security(chat_id)
+    elif action == "admin_chat":
         admin_modes[user_id] = "chat"
         send_message(chat_id, "💬 دخلت وضع الدردشة الخاصة.\nاكتب سؤالك مباشرة.\nاكتب «رجوع» للعودة إلى لوحة التحكم.")
     elif action == "admin_agent":
@@ -1583,11 +1704,8 @@ def webhook():
             run_ai_job(job)
             return jsonify({"status": "ok"}), 200
 
-        # All ordinary group text enters the waiting window.
-        # The deterministic question check happens around second 20.
-        if text:
-            schedule_question(chat_id, msg)
-
+        # Non-mention group messages are intentionally ignored by AI.
+        # This protects response speed and API quota; moderation/security monitoring above remains active.
         return jsonify({"status": "ok"}), 200
 
     if chat_type == "private":
@@ -1597,6 +1715,9 @@ def webhook():
 
         # Original broadcast command behavior is preserved exactly.
         if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
+            if emergency_active():
+                send_message(chat_id, "🛑 وضع الطوارئ مفعّل مؤقتًا؛ تم إيقاف البث والعمليات الآلية الحساسة.")
+                return jsonify({"status": "ok"}), 200
             target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
             if target_group:
                 raw_cmd = text.replace("ابدا البث", "", 1).replace("ابدأ البث", "", 1).strip()

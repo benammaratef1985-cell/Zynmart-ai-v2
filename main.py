@@ -1,4 +1,4 @@
-import os, json, requests, threading, re, time
+import os, json, requests, threading, re, time, hmac, hashlib, html
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -36,6 +36,11 @@ for k, v in os.environ.items():
 OWNER_ID = 7560871853  # Secret owner of the AI for ZYNMART bot only; not ZynMart ownership.
 ADMIN_IDS = [OWNER_ID, 6283667477]
 BOT_USERNAME = "@zynmart_ai_bot"
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ai-for-zynmart.onrender.com/app")
+WEBAPP_MENU_TEXT = os.environ.get("WEBAPP_MENU_TEXT", "📱 ZYNMART")
+WEBAPP_INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
+webapp_menu_configured = False
+webapp_menu_lock = threading.Lock()
 NEWS_URL = "https://zynmartpi.github.io/"
 DEFAULT_GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", "")
 
@@ -1435,6 +1440,180 @@ def confirm_moderation(key, approved):
         return "✅ تم الكتم 24 ساعة." if ok else "⚠️ تعذر تنفيذ الكتم."
     return "⚠️ إجراء غير معروف."
 
+
+# ---------------- Telegram Mini App / Web App ----------------
+PLATFORM_SECTION_META = {
+    "ai": ("🤖", "مركز الذكاء الاصطناعي", "AI / بحث موثوق / تحليل / كتابة / ترجمة / برمجة"),
+    "search": ("🔎", "ZYN Search", "بحث الويب والأخبار والمصادر الموثوقة"),
+    "market": ("🛒", "سوق ZynMart", "المنتجات والعروض والسوق"),
+    "stores": ("🏪", "المتاجر", "المتاجر والتجار والعروض"),
+    "community": ("👥", "المجتمع", "المجموعات والقنوات والمنشورات"),
+    "messages": ("💬", "الرسائل", "المحادثات والرسائل"),
+    "news": ("📰", "الأخبار", "العالم والتقنية والذكاء الاصطناعي وPi"),
+    "pi": ("🟣", "Pi & Markets", "Pi والأسعار ومقارنة المصادر"),
+    "content": ("🎨", "Content Studio", "الكتابة والمنشورات والإعلانات والمحتوى"),
+    "analytics": ("📊", "التحليلات والبيانات", "الحسابات والمقارنات والتقارير"),
+    "tools": ("🧰", "الأدوات", "الحاسبة والترجمة والتحويلات وأدوات الروابط"),
+    "fun": ("🎮", "الترفيه", "الألعاب والتحديات والترتيب"),
+    "plus": ("⭐", "ZYNMART+", "العضوية والمزايا المتقدمة"),
+    "ads": ("📣", "الإعلانات", "الإعلانات والحملات والنتائج"),
+    "rewards": ("🎁", "المكافآت", "النشاط والمهام والإحالات والنقاط"),
+    "account": ("👤", "الحساب", "الملف والنشاط والإعدادات"),
+    "security": ("🛡️", "الأمان والثقة", "الحماية ومكافحة الاحتيال"),
+    "knowledge": ("📚", "مركز المعرفة", "الموسوعة والتعلم والأدلة"),
+    "support": ("🆘", "الدعم", "المساعدة وحالة النظام"),
+    "lab": ("🧪", "ZYN LAB", "الوظائف الحالية والقادمة"),
+}
+PLATFORM_STATUS = {
+    "ai": {"active": ["دردشة AI", "بحث موثوق", "تحليل", "كتابة", "تلخيص", "ترجمة", "برمجة"], "soon": ["توليد الصور داخل التطبيق", "الفيديو", "الصوت"]},
+    "search": {"active": ["بحث الويب", "بحث المصادر", "الأخبار عند توفر المصدر", "بحث Pi"], "soon": ["بحث المنتجات والمتاجر المدمج"]},
+    "market": {"active": [], "soon": ["البحث عن المنتجات", "السلة", "العروض", "إضافة منتج", "إنشاء متجر", "المعاملات"]},
+    "stores": {"active": [], "soon": ["البحث", "المتاجر المميزة", "التجار الموثقون", "لوحة التاجر"]},
+    "community": {"active": [], "soon": ["المنشورات", "المجموعات", "القنوات", "المتابعة", "الإشعارات"]},
+    "messages": {"active": [], "soon": ["الرسائل", "محادثات العملاء", "محادثات التجار"]},
+    "news": {"active": ["بحث الأخبار عبر المصادر"], "soon": ["الأكثر قراءة", "خلاصة أخبار مخصصة"]},
+    "pi": {"active": ["Pi Network", "أسعار المصادر العامة", "مقارنة المصادر", "أخبار Pi", "تحليل بالأدلة"], "soon": ["بيانات سوق داخلية متقدمة"]},
+    "content": {"active": ["الكتابة", "المنشورات", "الإعلانات النصية", "المستندات حسب الإدخال"], "soon": ["توليد الصور", "الفيديو", "الصوت"]},
+    "analytics": {"active": ["الحسابات", "المقارنات", "تحليل البيانات المقدمة", "تقارير نصية"], "soon": ["لوحات بيانات متقدمة"]},
+    "tools": {"active": ["الحسابات", "الترجمة", "التاريخ والوقت", "تحويل الوحدات", "أدوات الروابط", "المراقبة الأمنية الحالية"], "soon": ["ملفات متقدمة", "بيانات عملات مباشرة مخصصة"]},
+    "fun": {"active": [], "soon": ["الألعاب", "التحديات", "الترتيب", "المكافآت"]},
+    "plus": {"active": [], "soon": ["العضوية", "مزايا AI متقدمة", "عروض خاصة"]},
+    "ads": {"active": [], "soon": ["إنشاء إعلان", "حملات", "النتائج", "الميزانية"]},
+    "rewards": {"active": [], "soon": ["المكافآت", "النشاط", "الترتيب", "المهام", "الإحالات", "النقاط"]},
+    "account": {"active": ["إعدادات البوت الحالية"], "soon": ["الملف داخل المنصة", "المفضلة", "المشتريات", "المتجر"]},
+    "security": {"active": ["حماية الإدارة", "مكافحة المحتوى المشبوه", "المراقبة الأمنية"], "soon": ["التحقق من التجار", "التقييمات", "مركز النزاعات"]},
+    "knowledge": {"active": ["الموسوعة والبحث عبر AI/ويب", "الأدلة والأسئلة الشائعة"], "soon": ["الدورات التعليمية"]},
+    "support": {"active": ["المساعدة", "حالة النظام"], "soon": ["بلاغات داخل التطبيق", "مركز تواصل متكامل"]},
+    "lab": {"active": ["AI", "Search", "Pi", "Moderation", "Daily", "Broadcast", "Mini App"], "soon": ["Marketplace", "Stores", "Community", "Messaging", "Media", "Membership", "Rewards"]},
+}
+
+def _webapp_data_check(init_data):
+    if not BOT_TOKEN or not isinstance(init_data, str) or not init_data:
+        return None
+    try:
+        from urllib.parse import parse_qsl
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        received_hash = pairs.pop("hash", "")
+        auth_date = int(pairs.get("auth_date", "0"))
+        if not received_hash or not auth_date or abs(time.time() - auth_date) > WEBAPP_INITDATA_MAX_AGE:
+            return None
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        calculated = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(calculated, received_hash):
+            return None
+        user = json.loads(pairs.get("user", "{}"))
+        return user if isinstance(user, dict) and user.get("id") else None
+    except Exception as e:
+        print(f"WebApp initData validation error: {e}")
+        return None
+
+def _webapp_auth():
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user = _webapp_data_check(init_data)
+    if not user:
+        return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
+    uid = int(user.get("id"))
+    if uid not in ADMIN_IDS:
+        return None, jsonify({"ok": False, "error": "admin_only"}), 403
+    return user, None, None
+
+def _webapp_set_menu_button():
+    global webapp_menu_configured
+    if webapp_menu_configured or not BOT_TOKEN:
+        return
+    with webapp_menu_lock:
+        if webapp_menu_configured:
+            return
+        result = telegram("setChatMenuButton", {"menu_button": {"type": "web_app", "text": WEBAPP_MENU_TEXT, "web_app": {"url": WEBAPP_URL}}})
+        if result and result.get("ok"):
+            webapp_menu_configured = True
+            print(f"Telegram Mini App menu configured: {WEBAPP_URL}")
+        else:
+            print("Telegram Mini App menu configuration failed.")
+
+def _webapp_platform_payload(user):
+    sections = []
+    for key, (icon, title, desc) in PLATFORM_SECTION_META.items():
+        st = PLATFORM_STATUS.get(key, {"active": [], "soon": ["قريبًا"]})
+        sections.append({"key": key, "icon": icon, "title": title, "description": desc,
+                         "active": st.get("active", []), "soon": st.get("soon", []),
+                         "state": "active" if st.get("active") else "soon"})
+    return {"ok": True, "user": {"id": int(user.get("id")), "first_name": user.get("first_name", ""), "username": user.get("username", "")},
+            "role": "owner" if is_owner(user.get("id")) else "admin", "sections": sections,
+            "emergency": emergency_active(), "system": {"bot": bool(BOT_TOKEN), "webapp": True, "version": "platform-1"}}
+
+WEBAPP_HTML = r'''<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"><meta name="theme-color" content="#101329"><title>AI for ZYNMART</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:#090b1b;--panel:#121631;--panel2:#171b3e;--text:#f7f8ff;--muted:#a6abc9;--gold:#ffd21a;--purple:#9d4edd;--green:#00e676;--line:#282d58}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#26235b 0,#11132d 36%,var(--bg) 75%);color:var(--text);font-family:Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:760px;margin:auto;padding-bottom:92px}.top{position:sticky;top:0;z-index:5;background:rgba(9,11,27,.94);backdrop-filter:blur(12px);padding:14px 16px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:20px;font-weight:800;flex:1}.sub{font-size:11px;color:var(--muted)}button{font:inherit;color:inherit;border:0}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:10px 13px}.hero{padding:20px 16px 10px}.hero h1{margin:0 0 7px;font-size:28px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:16px;border:1px solid #3a3f78;border-radius:20px;background:linear-gradient(135deg,#1d1746,#10152f);box-shadow:0 10px 30px #0005}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{background:linear-gradient(160deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:20px;padding:16px;min-height:135px;text-align:right;cursor:pointer;transition:.15s}.card:active{transform:scale(.98)}.card .ico{font-size:30px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#392c0a;color:#ffd84d}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:10;background:rgba(9,11,27,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:18%;color:#aab0d0;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:800;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0}.row{padding:10px 0;border-bottom:1px solid #25294b}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6f36c5,#9d4edd);padding:13px;border-radius:14px;margin-top:10px;font-weight:700}.small{font-size:11px;color:var(--muted);line-height:1.6}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:125px}.hero h1{font-size:24px}}
+</style></head>
+<body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for ZYNMART<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
+<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button></nav>
+<script>
+const tg=window.Telegram?.WebApp;let state=null;if(tg){tg.ready();tg.expand();}
+async function api(path,opts={}){opts.headers=Object.assign({'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||''},opts.headers||{});let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw new Error(d.error||'request_failed');return d}
+function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
+function goHome(){setNav('n-home');renderHome()}
+function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 منصة AI for ZYNMART</h1><p>واجهة منصة داخل Telegram. الوظائف المتاحة تعمل، وغير المتاحة موضحة بوضوح: 🚧 قريبًا.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الصلاحية: ${state.role==='owner'?'تحكم سري':'Admin'} · Mini App مفعل</div></div><div class="grid">${state.sections.map(card).join('')}</div>`}
+function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
+function openSection(key){setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');let s=state.sections.find(x=>x.key===key);if(!s)return;document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 اختبار مركز الذكاء</button>':''}</section>`}
+function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.map(card).join('')}</div>`}
+function admin(){setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div>${state.role==='owner'?'<div class="row">🔐 مركز التحكم السري: <span class="ok">متاح لك فقط</span></div>':''}</div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button>${state.role==='owner'?'<button class="action" onclick="emergency()">🔐 مركز التحكم السري</button>':''}</section>`}
+async function piStatus(){try{let d=await api('/api/app/pi');alert(d.text||'تعذر الحصول على بيانات Pi الموثوقة الآن.')}catch(e){alert('⚠️ لا توجد بيانات موثوقة متاحة الآن. لن نخمن.')}}
+function aiBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('ai')">← رجوع</button><section class="detail"><div class="sectionTitle">💬 دردشة AI</div><p class="small">الأسئلة التي تحتاج معلومات حديثة تمر عبر بوابة التحقق قبل الإجابة.</p><textarea id="q" style="width:100%;min-height:130px;background:#0e1230;color:white;border:1px solid #303665;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="askAI()">إرسال</button><div id="ans"></div></section>`}
+async function askAI(){let q=document.getElementById('q').value.trim(),a=document.getElementById('ans');if(!q)return;a.innerHTML='<div class="statusBox">⏳ جاري التحقق...</div>';try{let d=await api('/api/app/ai',{method:'POST',body:JSON.stringify({question:q})});a.innerHTML='<div class="statusBox">'+esc(d.text||'')+'</div>'}catch(e){a.innerHTML='<div class="statusBox">⚠️ تعذر الحصول على إجابة موثوقة الآن. لن أخمّن.</div>'}}
+function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
+async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
+function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+async function start(){try{state=await api('/api/app/bootstrap');document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>الوصول غير متاح</h2><p class="small">هذه المنصة مخصصة للإدارة في المرحلة الحالية.</p></div>'}}start();
+</script></body></html>'''
+
+@app.route("/app", methods=["GET"])
+def webapp():
+    ensure_background_services()
+    return WEBAPP_HTML, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+
+@app.route("/api/app/bootstrap", methods=["GET","POST"])
+def webapp_bootstrap():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    return jsonify(_webapp_platform_payload(user))
+
+@app.route("/api/app/pi", methods=["GET"])
+def webapp_pi():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    if emergency_active(): return jsonify({"ok": False, "text": "⚠️ وضع الطوارئ مفعّل حاليًا."}), 503
+    try:
+        text = format_pi_price()
+        return jsonify({"ok": True, "text": text or "⚠️ لا توجد بيانات Pi موثوقة متاحة الآن."})
+    except Exception:
+        return jsonify({"ok": False, "text": "⚠️ تعذر الحصول على بيانات Pi الموثوقة الآن."}), 503
+
+@app.route("/api/app/ai", methods=["POST"])
+def webapp_ai():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    if emergency_active(): return jsonify({"ok": False, "text": "⚠️ وضع الطوارئ مفعّل حاليًا."}), 503
+    body = request.get_json(silent=True) or {}
+    question = str(body.get("question", "")).strip()
+    if not question or len(question) > 4000: return jsonify({"ok": False, "error": "invalid_question"}), 400
+    try:
+        search_res = search_official(question) if needs_fresh_search(question) else ""
+        reply = get_ai_response(question, user.get("first_name", ""), search_context=search_res)
+        return jsonify({"ok": True, "text": reply or AI_PRIVATE_FAILURE_MESSAGE})
+    except Exception as e:
+        print(f"WebApp AI error: {e}")
+        return jsonify({"ok": False, "text": "⚠️ تعذر الحصول على إجابة موثوقة الآن. لن أخمّن."}), 503
+
+@app.route("/api/app/emergency", methods=["GET"])
+def webapp_emergency():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    if not is_owner(user.get("id")): return jsonify({"ok": False, "error": "owner_only"}), 403
+    return jsonify({"ok": True, "text": "🔴 وضع الطوارئ مفعّل." if emergency_active() else "🟢 النظام في الوضع الطبيعي."})
+
 def ensure_background_services():
     """Start one scheduler thread per application process.
     Called from the first HTTP request so it also works under Gunicorn/Render.
@@ -1446,6 +1625,7 @@ def ensure_background_services():
         if background_services_started:
             return
         threading.Thread(target=daily_scheduler, daemon=True, name="zynmart-daily-scheduler").start()
+        _webapp_set_menu_button()
         background_services_started = True
         print("Background scheduler started.")
 

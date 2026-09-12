@@ -6,6 +6,13 @@ from zoneinfo import ZoneInfo
 from flask import Flask, request, jsonify
 from bs4 import BeautifulSoup
 
+try:
+    import psycopg2
+    from psycopg2.extras import RealDictCursor
+except Exception:
+    psycopg2 = None
+    RealDictCursor = None
+
 app = Flask(__name__)
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -72,6 +79,14 @@ WARNINGS_FILE = os.path.join(BASE_DIR, "warnings.json")
 MOD_LOG_FILE = os.path.join(BASE_DIR, "moderation_log.json")
 DAILY_FILE = os.path.join(BASE_DIR, "daily_messages.json")
 
+# Persistent platform membership: Render's filesystem is ephemeral, so membership
+# must live in a managed datastore. Render Postgres is the authoritative store.
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+MEMBERSHIP_DB_REQUIRED = os.environ.get("AI_FOR_REQUIRE_PERSISTENT_MEMBERS", "true").lower() not in ("0", "false", "no", "off")
+membership_db_ready = False
+membership_db_error = ""
+membership_db_lock = threading.RLock()
+
 known_users = {}
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
 file_lock = threading.RLock()
@@ -122,6 +137,136 @@ def load_json(path, default):
     except Exception as e:
         print(f"Load Error {path}: {e}")
     return default
+
+def _membership_db_connect():
+    if not DATABASE_URL or psycopg2 is None:
+        return None
+    return psycopg2.connect(DATABASE_URL, connect_timeout=8, sslmode="require")
+
+def init_membership_db():
+    """Create the durable member table. Never silently replace or delete member data."""
+    global membership_db_ready, membership_db_error
+    if not DATABASE_URL:
+        membership_db_error = "DATABASE_URL is not configured"
+        return False
+    if psycopg2 is None:
+        membership_db_error = "psycopg2-binary is not installed"
+        return False
+    try:
+        with membership_db_lock:
+            conn = _membership_db_connect()
+            if not conn:
+                return False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS ai_for_members (
+                            user_id BIGINT PRIMARY KEY,
+                            username TEXT NOT NULL DEFAULT '',
+                            first_name TEXT NOT NULL DEFAULT '',
+                            last_name TEXT NOT NULL DEFAULT '',
+                            joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                            last_chat_id BIGINT,
+                            last_private_chat_id BIGINT,
+                            membership_status TEXT NOT NULL DEFAULT 'active',
+                            membership_source TEXT NOT NULL DEFAULT 'telegram'
+                        )
+                    """)
+                    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_username ON ai_for_members (lower(username))")
+            membership_db_ready = True
+            membership_db_error = ""
+            return True
+    except Exception as e:
+        membership_db_error = str(e)
+        membership_db_ready = False
+        print(f"Membership DB init error: {e}")
+        return False
+
+def register_platform_member(user, source="webapp", chat_id=None):
+    """Register/update a real AI for member by immutable Telegram User ID.
+
+    Returns (ok, is_new). If persistence is unavailable, returns (False, False)
+    rather than claiming the user joined.
+    """
+    uid = user.get("id") if isinstance(user, dict) else None
+    if not uid or not membership_db_ready:
+        return False, False
+    now = datetime.now(ZoneInfo("Africa/Tunis"))
+    try:
+        with membership_db_lock:
+            conn = _membership_db_connect()
+            if not conn:
+                return False, False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s", (int(uid),))
+                    existed = cur.fetchone() is not None
+                    cur.execute("""
+                        INSERT INTO ai_for_members
+                            (user_id, username, first_name, last_name, joined_at, last_seen,
+                             last_chat_id, last_private_chat_id, membership_status, membership_source)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            username=EXCLUDED.username,
+                            first_name=EXCLUDED.first_name,
+                            last_name=EXCLUDED.last_name,
+                            last_seen=EXCLUDED.last_seen,
+                            last_chat_id=COALESCE(EXCLUDED.last_chat_id, ai_for_members.last_chat_id),
+                            last_private_chat_id=COALESCE(EXCLUDED.last_private_chat_id, ai_for_members.last_private_chat_id),
+                            membership_status='active',
+                            membership_source=EXCLUDED.membership_source
+                    """, (
+                        int(uid), str(user.get("username") or ""), str(user.get("first_name") or ""),
+                        str(user.get("last_name") or ""), now, now,
+                        int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() else None,
+                        int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() and source == "telegram_bot" else None,
+                        str(source)[:40]
+                    ))
+            return True, not existed
+    except Exception as e:
+        print(f"Membership DB register error for {uid}: {e}")
+        return False, False
+
+def migrate_local_users_to_db():
+    """One-way safe import of any legacy users.json members into Postgres.
+    Existing joined_at values in Postgres are never overwritten.
+    """
+    if not membership_db_ready or not isinstance(known_users, dict):
+        return 0
+    migrated = 0
+    for item in known_users.values():
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        ok, _ = register_platform_member(item, source="legacy_import", chat_id=item.get("last_private_chat_id"))
+        if ok:
+            migrated += 1
+    if migrated:
+        print(f"Membership DB legacy migration: {migrated} users imported/verified.")
+    return migrated
+
+def platform_member_exists(user_id):
+    if not membership_db_ready or not user_id:
+        return False
+    try:
+        with membership_db_lock:
+            conn = _membership_db_connect()
+            if not conn:
+                return False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1 FROM ai_for_members WHERE user_id=%s LIMIT 1", (int(user_id),))
+                    return cur.fetchone() is not None
+    except Exception as e:
+        print(f"Membership DB lookup error: {e}")
+        return False
+
+def membership_service_status():
+    return {
+        "persistent": bool(membership_db_ready),
+        "required": bool(MEMBERSHIP_DB_REQUIRED),
+        "error": "" if membership_db_ready else membership_db_error
+    }
 
 def save_users_to_file():
     with file_lock:
@@ -186,6 +331,8 @@ USER_PHOTOS_DIR = os.path.join(os.path.dirname(USERS_FILE), "user_photos")
 os.makedirs(USER_PHOTOS_DIR, exist_ok=True)
 
 load_users_from_file()
+init_membership_db()
+migrate_local_users_to_db()
 
 ZYNMART_PROMPT = """أنت مساعد AI موثوق داخل ZYNMART وبيئة Pi Network.
 
@@ -294,7 +441,8 @@ def remember_user(msg):
         "last_private_chat_id": (msg.get("chat", {}).get("id") if msg.get("chat", {}).get("type") == "private" else old.get("last_private_chat_id")),
         "last_seen": datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
     }
-    # Keep users.json current, but only for actual messages.
+    # Keep users.json as a legacy/local cache only. It is NOT the authoritative
+    # membership store because Render's filesystem is ephemeral.
     save_users_to_file()
 
 def search_official(query):
@@ -1695,6 +1843,11 @@ def _webapp_auth():
         return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
     if not _webapp_has_access(user):
         return None, jsonify({"ok": False, "error": "access_denied"}), 403
+    ok, is_new = register_platform_member(user, source="webapp")
+    if MEMBERSHIP_DB_REQUIRED and not ok:
+        return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
+    user["platform_member"] = bool(ok)
+    user["platform_member_new"] = bool(is_new)
     return user, None, None
 
 def _webapp_set_menu_button():
@@ -1728,7 +1881,12 @@ def _webapp_platform_payload(user):
             "assets": {"zynmart_logo": ZYNMART_LOGO_DATA},
             "theme": AI_FOR_THEME,
             "access": {"public_open_sections": sorted(_webapp_public_open_set()), "owner_private": _webapp_is_owner(user)},
-            "emergency": emergency_active(), "system": {"bot": bool(BOT_TOKEN), "webapp": True, "version": "platform-3"}}
+            "membership": {
+                "joined": bool(user.get("platform_member")),
+                "new": bool(user.get("platform_member_new")),
+                "service": membership_service_status()
+            },
+            "emergency": emergency_active(), "system": {"bot": bool(BOT_TOKEN), "webapp": True, "version": "platform-4"}}
 
 webapp_conversations = {}
 webapp_conversations_lock = threading.RLock()
@@ -2382,6 +2540,21 @@ def webhook():
 
     if chat_type == "private":
         remember_user(msg)
+        # Explicit Telegram gateway: starting the bot registers the user as an AI for member.
+        # Persistence is mandatory; never claim membership when the durable store is unavailable.
+        start_payload = text.split(maxsplit=1)[1].strip() if text.startswith("/start") and len(text.split(maxsplit=1)) > 1 else ""
+        if text == "/start" or text.startswith("/start "):
+            member_ok, member_new = register_platform_member(
+                msg.get("from", {}), source="telegram_bot", chat_id=chat_id
+            )
+            if member_ok and member_new:
+                send_message(chat_id, "🎉 مرحبًا بك في AI for.\n\n✅ تم تسجيلك كعضو في المنصة بنجاح.\n🆔 هويتك مرتبطة بحساب Telegram الخاص بك، وتبقى عضويتك محفوظة حتى بعد تحديث المنصة.")
+            elif member_ok:
+                send_message(chat_id, "👋 أهلاً بعودتك إلى AI for.\n\n✅ عضويتك محفوظة بالفعل.")
+            else:
+                send_message(chat_id, "⚠️ تعذر تثبيت عضويتك بشكل دائم الآن. لم أسجلك كعضو حتى لا ندّعي تسجيلًا غير محفوظ. حاول بعد تفعيل مخزن العضوية الدائم.")
+            if user_id not in ADMIN_IDS:
+                return jsonify({"status": "ok"}), 200
         if user_id not in ADMIN_IDS:
             return jsonify({"status": "ok"}), 200
 

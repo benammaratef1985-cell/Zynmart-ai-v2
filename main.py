@@ -1,4 +1,4 @@
-import os, json, requests, threading, re, time, hmac, hashlib, html
+import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -96,7 +96,12 @@ DEFAULT_SETTINGS = {
         "evening": {"time": "20:00", "text": "سهرة سعيدة للجميع 🌙✨ نتمنى لكم وقتًا ممتعًا."}
     },
     "last_daily_sent": {},
-    "manual_exceptions": []
+    "manual_exceptions": [],
+    "public_open_sections": None,
+    "allowed_user_ids": {},
+    "allowed_usernames_runtime": [],
+    "notifications": {},
+    "user_photos": {}
 }
 
 def atomic_save(path, data):
@@ -176,6 +181,9 @@ def save_warnings():
 def save_moderation_log():
     with file_lock:
         atomic_save(MOD_LOG_FILE, moderation_log[-500:])
+
+USER_PHOTOS_DIR = os.path.join(os.path.dirname(USERS_FILE), "user_photos")
+os.makedirs(USER_PHOTOS_DIR, exist_ok=True)
 
 load_users_from_file()
 
@@ -1598,7 +1606,7 @@ webapp_search_cache_lock = threading.RLock()
 
 # External access / theme policy. Edit environment variables outside the code; no per-feature code edits.
 AI_FOR_PUBLIC_OPEN_SECTIONS = {x.strip() for x in os.environ.get("AI_FOR_PUBLIC_OPEN_SECTIONS", "").split(",") if x.strip()}
-AI_FOR_ALLOWED_USERNAMES = {x.strip().lstrip("@").lower() for x in os.environ.get("AI_FOR_ALLOWED_USERNAMES", "").split(",") if x.strip()}
+AI_FOR_ALLOWED_USERNAMES = ({x.strip().lstrip("@").lower() for x in os.environ.get("AI_FOR_ALLOWED_USERNAMES", "").split(",") if x.strip()} | {str(x).strip().lstrip("@").lower() for x in settings.get("allowed_usernames_runtime", []) if str(x).strip()})
 try:
     AI_FOR_THEME = json.loads(os.environ.get("AI_FOR_THEME_JSON", "{}"))
     if not isinstance(AI_FOR_THEME, dict): AI_FOR_THEME = {}
@@ -1638,12 +1646,19 @@ def _webapp_has_access(user):
     except Exception: pass
     return _webapp_is_admin(user) or _webapp_allowed_username(user)
 
+def _webapp_public_open_set():
+    stored = settings.get("public_open_sections")
+    if isinstance(stored, list):
+        return {str(x).strip() for x in stored if str(x).strip()}
+    return set(AI_FOR_PUBLIC_OPEN_SECTIONS)
+
+CORE_PUBLIC_SECTIONS = {"account"}
+
 def _webapp_section_open(user, key):
-    if _webapp_is_owner(user):
-        return True
-    if _webapp_is_admin(user):
-        return True
-    return key in AI_FOR_PUBLIC_OPEN_SECTIONS
+    if _webapp_is_owner(user): return True
+    if _webapp_is_admin(user): return True
+    if key in CORE_PUBLIC_SECTIONS: return True
+    return key in _webapp_public_open_set()
 
 def _webapp_require_section(user, key):
     if not _webapp_has_access(user):
@@ -1712,7 +1727,7 @@ def _webapp_platform_payload(user):
             "links": {"zynmart": ZYNMART_APP_URL, "auto_core": AUTO_CORE_URL},
             "assets": {"zynmart_logo": ZYNMART_LOGO_DATA},
             "theme": AI_FOR_THEME,
-            "access": {"public_open_sections": sorted(AI_FOR_PUBLIC_OPEN_SECTIONS), "owner_private": _webapp_is_owner(user)},
+            "access": {"public_open_sections": sorted(_webapp_public_open_set()), "owner_private": _webapp_is_owner(user)},
             "emergency": emergency_active(), "system": {"bot": bool(BOT_TOKEN), "webapp": True, "version": "platform-3"}}
 
 webapp_conversations = {}
@@ -1757,10 +1772,10 @@ def _webapp_ai_with_context(uid, conversation_id, question, user_name="", search
 WEBAPP_HTML = r'''<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"><meta name="theme-color" content="#080b12"><title>AI for</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:18%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
+:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
-<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button></nav>
+<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button></nav>
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){opts.headers=Object.assign({'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||''},opts.headers||{});let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw new Error(d.error||'request_failed');return d}
@@ -1798,13 +1813,17 @@ async function toolCall(body){return api('/api/app/tools',{method:'POST',body:JS
 async function calcRun(){let r=document.getElementById('calcResult');try{let d=await toolCall({op:'calculator',expression:document.getElementById('calc').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'تعذر الحساب')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحساب.</div>'}}
 async function timeRun(){let r=document.getElementById('timeResult');try{let d=await toolCall({op:'time'});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' · '+esc(d.timezone||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر قراءة الوقت.</div>'}}
 async function translateRun(){let r=document.getElementById('transResult');try{let d=await toolCall({op:'translate',text:document.getElementById('transText').value,target:document.getElementById('targetLang').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذرت الترجمة.</div>'}}
-function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'account\')">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حساب Telegram</div><div class="statusBox"><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">الدور: '+esc(state.role)+'</div><div class="row">الوصول: <span class="ok">مسموح</span></div></div></section>'}
+function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية. هذه مساحة مستقبلية فقط.</p></div></section>'}
+async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري الرفع...</div>';let fd=new FormData();fd.append('photo',f);try{let x=await fetch('/api/app/account/photo',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await x.json();r.innerHTML='<div class="statusBox">'+(d.ok?'✅ تم رفع الصورة.':'⚠️ تعذر رفع الصورة.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر رفع الصورة.</div>'}}
+async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<section class="hero"><h1>🔔 الإشعارات</h1><p>تحديثات النظام والميزات والإشعارات الخاصة بك.</p></section><div id="notes" class="detail"><div class="statusBox">⏳ جاري التحميل...</div></div>';try{let d=await api('/api/app/notifications');document.getElementById('notes').innerHTML=(d.notifications||[]).slice().reverse().map(n=>'<div class="statusBox"><b>'+esc(n.title||'إشعار')+'</b><div class="row">'+esc(n.text||'')+'</div><div class="small">'+esc(n.time||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد إشعارات.</div>';document.getElementById('notifyBadge').textContent=d.unread?'🔔 '+d.unread:'الإشعارات';if(d.unread)await api('/api/app/notifications',{method:'POST',body:JSON.stringify({action:'read_all'})})}catch(e){document.getElementById('notes').innerHTML='<div class="statusBox">⚠️ تعذر تحميل الإشعارات.</div>'}}
 function securityBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">Telegram initData: <span class="ok">تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
 function supportBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'support\')">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم وحالة النظام</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">Telegram WebApp: <span class="ok">متصل</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?'<span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div></section>'}
 function searchBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">🔎 بحث موثوق</div><textarea id="sq" placeholder="اكتب ما تريد البحث عنه..." style="width:100%;min-height:95px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="doSearch()">بحث</button><div id="sr"></div></section>`}
 async function doSearch(){let q=document.getElementById('sq').value.trim(),r=document.getElementById('sr');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري التحقق من المصادر...</div>';try{let d=await api('/api/app/search',{method:'POST',body:JSON.stringify({query:q})});r.innerHTML='<div class="statusBox">'+esc(d.text||'⚠️ لا توجد نتائج موثوقة متاحة الآن.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر التحقق من المصادر الآن.</div>'}}
 function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
-function ownerArea(){setNav('n-admin');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 Owner Private Area</div><p class="small">هذه المساحة خاصة بالمالك فقط ولا تظهر لأي دور آخر.</p><div class="statusBox"><div class="row">🧩 Feature Firewall — إعداد خارجي</div><div class="row">👤 Allowlist — إعداد خارجي</div><div class="row">🎨 Theme System — إعداد خارجي</div><div class="row">🛡️ Emergency — محمي</div></div><button class="action" onclick="emergency()">🔐 حالة الطوارئ</button></section>'}
+async function ownerArea(){setNav('n-admin');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 Owner Private Area</div><p class="small">هذه المساحة خاصة بالمالك فقط ولا تظهر لأي دور آخر.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل التحكم...</div></div></section>';try{let d=await api('/api/app/owner');let all=state.sections.map(s=>'<div class="row"><button class="mini" onclick="togglePublic(\''+s.key+'\','+(!s.public_open)+')">'+(s.public_open?'🔓 إغلاق':'🔒 فتح')+'</button> '+esc(s.icon+' '+s.title)+'</div>').join('');document.getElementById('ownerPanel').innerHTML='<div class="statusBox"><b>🔓 فتح وإغلاق الميزات للعامة</b>'+all+'</div><div class="statusBox"><b>👤 إضافة مستخدم</b><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">إضافة</button><div class="small">المستخدم يظل User ولا يحصل على الإدارة.</div></div><div class="statusBox"><b>🛡️ الطوارئ</b><button class="action dark" onclick="emergency()">حالة الطوارئ</button></div>'}catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
+async function togglePublic(key,open){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'section',key,open})});state=await api('/api/app/bootstrap');applyTheme();ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة الميزة.')}}
+async function allowUser(){let x=document.getElementById('allowUser')?.value.trim();if(!x)return;try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'allow_user',username:x})});ownerArea()}catch(e){alert('⚠️ تعذر إضافة المستخدم.')}}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
@@ -1933,12 +1952,75 @@ def webapp_tools():
         return jsonify({"ok":bool(reply),"result":reply or AI_PRIVATE_FAILURE_MESSAGE})
     return jsonify({"ok":False,"error":"unknown_operation"}),400
 
-@app.route("/api/app/owner", methods=["GET"])
+@app.route("/api/app/notifications", methods=["GET", "POST"])
+def webapp_notifications():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    uid=str(int(user.get("id"))); notes=settings.setdefault("notifications",{}).setdefault(uid,[])
+    if not notes:
+        notes.append({"id":"welcome","title":"مرحبًا بك في AI for","text":"تم تسجيل حسابك تلقائيًا. ستظهر هنا تحديثات النظام والميزات الجديدة.","read":False,"time":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}); save_settings()
+    if request.method=="POST":
+        body=request.get_json(silent=True) or {}
+        if body.get("action")=="read_all":
+            for n in notes: n["read"]=True
+            save_settings()
+        elif body.get("action")=="read":
+            for n in notes:
+                if str(n.get("id"))==str(body.get("id","")): n["read"]=True
+            save_settings()
+    return jsonify({"ok":True,"notifications":notes[-50:],"unread":sum(1 for n in notes if not n.get("read"))})
+
+@app.route("/api/app/account/photo", methods=["POST"])
+def webapp_account_photo():
+    user, err, code=_webapp_auth()
+    if err: return err, code
+    denied=_webapp_require_section(user,"account")
+    if denied[0]: return denied
+    uploaded=request.files.get("photo")
+    if not uploaded: return jsonify({"ok":False,"error":"photo_required"}),400
+    raw=uploaded.read(2_000_000); mime=(uploaded.mimetype or "image/jpeg").lower()
+    if not raw: return jsonify({"ok":False,"error":"empty_photo"}),400
+    if mime not in ("image/jpeg","image/png","image/webp"): return jsonify({"ok":False,"error":"unsupported_image"}),400
+    uid=str(int(user.get("id"))); path=os.path.join(USER_PHOTOS_DIR,uid+".img")
+    with open(path,"wb") as f: f.write(raw)
+    settings.setdefault("user_photos",{})[uid]={"mime":mime,"path":path}; save_settings()
+    return jsonify({"ok":True})
+
+@app.route("/api/app/account/photo", methods=["GET"])
+def webapp_account_photo_get():
+    user, err, code=_webapp_auth()
+    if err: return err, code
+    item=settings.get("user_photos",{}).get(str(int(user.get("id"))),{}); path=item.get("path")
+    if not path or not os.path.exists(path): return jsonify({"ok":False,"error":"photo_not_found"}),404
+    from flask import send_file
+    return send_file(path,mimetype=item.get("mime","image/jpeg"),max_age=0)
+
+@app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
     user, err, code = _webapp_auth()
     if err: return err, code
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"owner_only"}),403
-    return jsonify({"ok":True,"area":"owner_private","features":["external feature firewall","allowlist","theme settings","system controls","audit","emergency"],"note":"Owner Private Area is never exposed to other roles."})
+    if request.method == "GET":
+        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency"]})
+    body=request.get_json(silent=True) or {}; action=str(body.get("action","")).strip().lower()
+    if action == "section":
+        key=str(body.get("key","")).strip()
+        if key not in PLATFORM_SECTION_META: return jsonify({"ok":False,"error":"unknown_section"}),400
+        current=_webapp_public_open_set(); opened=bool(body.get("open"))
+        (current.add(key) if opened else current.discard(key)); settings["public_open_sections"]=sorted(current); save_settings()
+        return jsonify({"ok":True,"key":key,"open":opened,"open_sections":sorted(current)})
+    if action in ("allow_user","remove_user"):
+        username=str(body.get("username","")).strip().lstrip("@").lower()
+        if not re.fullmatch(r"[A-Za-z0-9_]{3,32}",username): return jsonify({"ok":False,"error":"invalid_username"}),400
+        allowed=set(AI_FOR_ALLOWED_USERNAMES) | {str(x).lower() for x in settings.get("allowed_usernames_runtime",[])}
+        if action=="allow_user": allowed.add(username)
+        else:
+            allowed.discard(username); _webapp_allowed_ids.pop(username,None); settings.setdefault("allowed_user_ids",{}).pop(username,None)
+        settings["allowed_usernames_runtime"]=sorted(allowed)
+        AI_FOR_ALLOWED_USERNAMES.clear(); AI_FOR_ALLOWED_USERNAMES.update(allowed)
+        save_settings()
+        return jsonify({"ok":True,"username":username,"allowed_usernames":sorted(allowed)})
+    return jsonify({"ok":False,"error":"unknown_action"}),400
 
 @app.route("/api/app/emergency", methods=["GET"])
 def webapp_emergency():
@@ -2229,6 +2311,23 @@ def webhook():
         if text and (user_id in ADMIN_IDS or is_moderator(chat_id, user_id)):
             if execute_moderation_command(chat_id, user_id, text):
                 return jsonify({"status": "ok"}), 200
+
+        # Admin broadcast commands in a Telegram group remain group publication commands.
+        # They are separate from private bot-user broadcasts.
+        if text and user_id in ADMIN_IDS and (text.startswith("ابدا البث") or text.startswith("ابدأ البث")):
+            if emergency_active():
+                send_message(chat_id, "🛑 وضع الطوارئ مفعّل مؤقتًا؛ تم إيقاف البث.")
+                return jsonify({"status":"ok"}),200
+            raw_cmd=text.replace("ابدا البث","",1).replace("ابدأ البث","",1).strip()
+            if raw_cmd.startswith(":"):
+                send_message(chat_id,sanitize_urls(raw_cmd[1:].strip()))
+            else:
+                search_query=raw_cmd or "اخبار Pi Network و ZYNMART"
+                def group_job():
+                    sr=search_official(search_query); reply=get_ai_response(f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}",user_name,search_context=sr)
+                    if reply: send_message(chat_id,sanitize_urls(reply))
+                run_ai_job(group_job)
+            return jsonify({"status":"ok"}),200
 
         # Mention => answer immediately.
         low = text.lower()

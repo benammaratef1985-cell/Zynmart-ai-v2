@@ -239,6 +239,21 @@ def send_message(chat_id, text, reply_to=None, reply_markup=None):
         payload["reply_markup"] = reply_markup
     return telegram("sendMessage", payload)
 
+chat_admin_cache = {}
+
+def get_chat_administrators(chat_id):
+    now=time.time(); key=str(chat_id); cached=chat_admin_cache.get(key)
+    if cached and cached[0]>now: return cached[1]
+    result=telegram("getChatAdministrators", {"chat_id": chat_id})
+    admins=result.get("result", []) if result and result.get("ok") else []
+    ids={int(a.get("user",{}).get("id")) for a in admins if a.get("user",{}).get("id")}
+    chat_admin_cache[key]=(now+300, ids)
+    return ids
+
+def is_chat_admin(chat_id, user_id):
+    try: return int(user_id) in get_chat_administrators(chat_id)
+    except Exception: return False
+
 def get_chat_member(chat_id, user_id):
     result = telegram("getChatMember", {"chat_id": chat_id, "user_id": user_id})
     return result.get("result") if result and result.get("ok") else None
@@ -268,6 +283,7 @@ def remember_user(msg):
         "first_name": u.get("first_name", old.get("first_name", "")),
         "last_name": u.get("last_name", old.get("last_name", "")),
         "last_chat_id": msg.get("chat", {}).get("id", old.get("last_chat_id")),
+        "last_private_chat_id": (msg.get("chat", {}).get("id") if msg.get("chat", {}).get("type") == "private" else old.get("last_private_chat_id")),
         "last_seen": datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
     }
     # Keep users.json current, but only for actual messages.
@@ -973,7 +989,11 @@ def handle_auto_moderation(msg):
     text = msg.get("text", "").strip()
     if not chat_id or not user_id or not text:
         return False
-    if user_id in ADMIN_IDS or is_moderator(chat_id, user_id) or user_id in manual_exceptions:
+    # Never moderate messages sent on behalf of a channel/group.
+    if msg.get("sender_chat"):
+        return False
+    # Telegram is authoritative for admin immunity; users.json is only auxiliary memory.
+    if user_id in ADMIN_IDS or is_moderator(chat_id, user_id) or is_chat_admin(chat_id, user_id) or user_id in manual_exceptions:
         return False
 
     reason = auto_moderation_reason(text)
@@ -1232,6 +1252,41 @@ def daily_item_text(name):
     labels = {"morning": "🌅 الصباح", "midday": "🌞 الظهر", "evening": "🌙 المساء"}
     return f"{labels.get(name,name)}\nالوقت: {item.get('time','')}\nالنص: {item.get('text','')}"
 
+def _broadcast_recipients():
+    ids = set()
+    for item in known_users.values():
+        try:
+            cid = item.get("last_private_chat_id")
+            if cid: ids.add(int(cid))
+        except Exception: pass
+    with _webapp_access_lock:
+        ids.update(int(v) for v in _webapp_allowed_ids.values() if v)
+    return sorted(ids)
+
+def _send_broadcast_media(msg):
+    recipients = _broadcast_recipients(); sent = failed = 0
+    caption = str(msg.get("caption", ""))[:1024]
+    photo = msg.get("photo") or []; video = msg.get("video")
+    if photo:
+        fid = photo[-1].get("file_id")
+        for cid in recipients:
+            payload={"chat_id":cid,"photo":fid};
+            if caption: payload["caption"]=caption
+            res=telegram("sendPhoto",payload); sent += int(bool(res and res.get("ok"))); failed += int(not (res and res.get("ok")))
+    elif video:
+        fid=video.get("file_id")
+        for cid in recipients:
+            payload={"chat_id":cid,"video":fid};
+            if caption: payload["caption"]=caption
+            res=telegram("sendVideo",payload); sent += int(bool(res and res.get("ok"))); failed += int(not (res and res.get("ok")))
+    return sent, failed
+
+def _send_broadcast_text(text):
+    sent=failed=0
+    for cid in _broadcast_recipients():
+        res=send_message(cid,text); sent += int(bool(res and res.get("ok"))); failed += int(not (res and res.get("ok")))
+    return sent, failed
+
 def process_admin_text(chat_id, user_id, text):
     mode = admin_modes.get(user_id)
 
@@ -1261,20 +1316,15 @@ def process_admin_text(chat_id, user_id, text):
         return True
 
     if mode == "broadcast_topic":
-        target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
-        if target_group:
-            creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {text}"
-            def job():
-                search_results = search_official(text)
-                broadcast_reply = get_ai_response(creative_order, "", search_context=search_results)
-                if not broadcast_reply:
-                    send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
-                    return
-                send_message(target_group, broadcast_reply)
-                send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
-            run_ai_job(job)
-        else:
-            send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
+        creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {text}"
+        def job():
+            search_results = search_official(text)
+            broadcast_reply = get_ai_response(creative_order, "", search_context=search_results)
+            if not broadcast_reply:
+                send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE); return
+            sent, failed = _send_broadcast_text(sanitize_urls(broadcast_reply))
+            send_message(chat_id, f"✅ تم البث إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+        run_ai_job(job)
         admin_modes.pop(user_id, None)
         return True
 
@@ -1498,17 +1548,17 @@ PLATFORM_STATUS = {
     "messages": {"active": [], "soon": ["الرسائل", "محادثات العملاء", "محادثات التجار"]},
     "news": {"active": ["بحث الأخبار عبر المصادر"], "soon": ["الأكثر قراءة", "خلاصة أخبار مخصصة"]},
     "pi": {"active": ["Pi Network", "أسعار المصادر العامة", "مقارنة المصادر", "أخبار Pi", "تحليل بالأدلة"], "soon": ["بيانات سوق داخلية متقدمة"]},
-    "content": {"active": ["الكتابة", "المنشورات", "الإعلانات النصية", "المستندات حسب الإدخال"], "soon": ["توليد الصور", "الفيديو", "الصوت"]},
-    "analytics": {"active": ["الحسابات", "المقارنات", "تحليل البيانات المقدمة", "تقارير نصية"], "soon": ["لوحات بيانات متقدمة"]},
-    "tools": {"active": ["الحسابات", "الترجمة", "التاريخ والوقت", "تحويل الوحدات", "أدوات الروابط", "المراقبة الأمنية الحالية"], "soon": ["ملفات متقدمة", "بيانات عملات مباشرة مخصصة"]},
+    "content": {"active": ["إنشاء المحتوى النصي", "File Intelligence للنص وCSV وJSON", "تحليل المدخلات"], "soon": ["توليد الصور", "الفيديو", "الصوت"]},
+    "analytics": {"active": ["تحليل البيانات المقدمة", "الحسابات والمقارنات عبر AI", "تقارير نصية"], "soon": ["لوحات بيانات متقدمة"]},
+    "tools": {"active": ["حاسبة فعلية", "ترجمة فعلية", "التاريخ والوقت", "أدوات الروابط الأساسية"], "soon": ["ملفات متقدمة", "بيانات عملات مباشرة مخصصة"]},
     "fun": {"active": [], "soon": ["الألعاب", "التحديات", "الترتيب", "المكافآت"]},
     "plus": {"active": [], "soon": ["العضوية", "مزايا AI متقدمة", "عروض خاصة"]},
     "ads": {"active": [], "soon": ["إنشاء إعلان", "حملات", "النتائج", "الميزانية"]},
     "rewards": {"active": [], "soon": ["المكافآت", "النشاط", "الترتيب", "المهام", "الإحالات", "النقاط"]},
-    "account": {"active": ["إعدادات البوت الحالية"], "soon": ["الملف داخل المنصة", "المفضلة", "المشتريات", "المتجر"]},
-    "security": {"active": ["حماية الإدارة", "مكافحة المحتوى المشبوه", "المراقبة الأمنية"], "soon": ["التحقق من التجار", "التقييمات", "مركز النزاعات"]},
+    "account": {"active": ["هوية Telegram الحالية", "حالة الوصول"], "soon": ["الملف داخل المنصة", "المفضلة", "المشتريات", "المتجر"]},
+    "security": {"active": ["حالة الحماية", "مكافحة المحتوى المشبوه", "المراقبة الأمنية الحالية"], "soon": ["التحقق من التجار", "التقييمات", "مركز النزاعات"]},
     "knowledge": {"active": ["الموسوعة والبحث عبر AI/ويب", "الأدلة والأسئلة الشائعة"], "soon": ["الدورات التعليمية"]},
-    "support": {"active": ["المساعدة", "حالة النظام"], "soon": ["بلاغات داخل التطبيق", "مركز تواصل متكامل"]},
+    "support": {"active": ["المساعدة", "حالة النظام", "فحص الاتصال الأساسي"], "soon": ["بلاغات داخل التطبيق", "مركز تواصل متكامل"]},
     "lab": {"active": ["AI", "Search", "Pi", "Moderation", "Daily", "Broadcast", "Mini App"], "soon": ["Marketplace", "Stores", "Community", "Messaging", "Media", "Membership", "Rewards"]},
     "autocore": {"active": ["واجهة مستقلة داخل AI for", "فصل الكود والصلاحيات", "تشغيل مستقل عن واجهة AI for", "Kill Switch / سجل تدقيق مخطط"], "soon": ["ربط الخدمة المستقلة", "التنفيذ التجاري الفعلي", "طبقة التسوية الآمنة"]},
     "revenue": {"active": ["Revenue Safety Gate", "منع المقامرة والـspam والنقرات الوهمية", "إخفاء البيانات المالية الشخصية", "تمييز المحتوى المدفوع بوضوح"], "soon": ["ZYNMART+", "شبكات الإعلانات", "Rewarded Ads وفق سياسات المزود", "Promoted Products/Stores", "خطط Business", "الفوترة والتسوية الآمنة"]},
@@ -1535,14 +1585,101 @@ def _webapp_data_check(init_data):
         print(f"WebApp initData validation error: {e}")
         return None
 
+# Cost policy: free-first until real revenue exists; paid services are opt-in later.
+FREE_FIRST_POLICY = {
+    "prefer_free_services": True,
+    "avoid_unnecessary_api_calls": True,
+    "use_cache_when_safe": True,
+    "paid_services_now": False,
+    "upgrade_after_real_revenue": True
+}
+webapp_search_cache = {}
+webapp_search_cache_lock = threading.RLock()
+
+# External access / theme policy. Edit environment variables outside the code; no per-feature code edits.
+AI_FOR_PUBLIC_OPEN_SECTIONS = {x.strip() for x in os.environ.get("AI_FOR_PUBLIC_OPEN_SECTIONS", "").split(",") if x.strip()}
+AI_FOR_ALLOWED_USERNAMES = {x.strip().lstrip("@").lower() for x in os.environ.get("AI_FOR_ALLOWED_USERNAMES", "").split(",") if x.strip()}
+try:
+    AI_FOR_THEME = json.loads(os.environ.get("AI_FOR_THEME_JSON", "{}"))
+    if not isinstance(AI_FOR_THEME, dict): AI_FOR_THEME = {}
+except Exception:
+    AI_FOR_THEME = {}
+_webapp_allowed_ids = {}
+for _name, _uid in (settings.get("allowed_user_ids", {}) if isinstance(settings.get("allowed_user_ids", {}), dict) else {}).items():
+    try: _webapp_allowed_ids[str(_name).lower()] = int(_uid)
+    except Exception: pass
+_webapp_access_lock = threading.RLock()
+
+def _webapp_allowed_username(user):
+    username = str(user.get("username", "")).strip().lstrip("@").lower()
+    if not username or username not in AI_FOR_ALLOWED_USERNAMES:
+        return False
+    with _webapp_access_lock:
+        uid = int(user.get("id"))
+        _webapp_allowed_ids[username] = uid
+        settings.setdefault("allowed_user_ids", {})[username] = uid
+        try:
+            save_settings()
+        except Exception:
+            pass
+    return True
+
+def _webapp_is_owner(user):
+    return bool(user and is_owner(user.get("id")))
+
+def _webapp_is_admin(user):
+    return bool(user and int(user.get("id", 0)) in ADMIN_IDS)
+
+def _webapp_has_access(user):
+    try:
+        uid=int(user.get("id",0))
+        with _webapp_access_lock:
+            if uid in set(_webapp_allowed_ids.values()): return True
+    except Exception: pass
+    return _webapp_is_admin(user) or _webapp_allowed_username(user)
+
+def _webapp_section_open(user, key):
+    if _webapp_is_owner(user):
+        return True
+    if _webapp_is_admin(user):
+        return True
+    return key in AI_FOR_PUBLIC_OPEN_SECTIONS
+
+def _webapp_require_section(user, key):
+    if not _webapp_has_access(user):
+        return jsonify({"ok": False, "error": "access_denied"}), 403
+    if not _webapp_section_open(user, key):
+        return jsonify({"ok": False, "error": "feature_locked", "section": key}), 403
+    return None, None
+
+def _webapp_file_analysis(name, content, kind=""):
+    name = str(name or "file")[:160]
+    kind = str(kind or "").lower()
+    text = str(content or "")
+    if len(text) > 120000:
+        text = text[:120000]
+    if kind in ("text/csv", "csv") or name.lower().endswith(".csv"):
+        rows = list(csv.reader(io.StringIO(text)))
+        return {"type":"csv", "name":name, "rows":len(rows), "columns":max((len(r) for r in rows), default=0), "preview":rows[:12]}
+    if kind in ("application/json", "json") or name.lower().endswith(".json"):
+        try:
+            obj=json.loads(text)
+            return {"type":"json", "name":name, "kind":"object" if isinstance(obj,dict) else "array" if isinstance(obj,list) else type(obj).__name__, "keys":list(obj.keys())[:50] if isinstance(obj,dict) else [], "preview":json.dumps(obj, ensure_ascii=False)[:6000]}
+        except Exception:
+            return {"type":"text", "name":name, "error":"invalid_json", "preview":text[:6000]}
+    if name.lower().endswith((".pdf",".docx",".xlsx",".xls")) or kind in ("application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
+        return {"type":"soon", "name":name, "message":"هذا النوع محفوظ للتكامل المتقدم قريبًا. الملفات النصية وCSV وJSON قابلة للتحليل الآن."}
+    lines=text.splitlines()
+    words=text.split()
+    return {"type":"text", "name":name, "characters":len(text), "lines":len(lines), "words":len(words), "preview":text[:6000]}
+
 def _webapp_auth():
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user = _webapp_data_check(init_data)
     if not user:
         return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
-    uid = int(user.get("id"))
-    if uid not in ADMIN_IDS:
-        return None, jsonify({"ok": False, "error": "admin_only"}), 403
+    if not _webapp_has_access(user):
+        return None, jsonify({"ok": False, "error": "access_denied"}), 403
     return user, None, None
 
 def _webapp_set_menu_button():
@@ -1563,14 +1700,20 @@ def _webapp_platform_payload(user):
     sections = []
     for key, (icon, title, desc) in PLATFORM_SECTION_META.items():
         st = PLATFORM_STATUS.get(key, {"active": [], "soon": ["قريبًا"]})
+        open_now = _webapp_section_open(user, key)
         sections.append({"key": key, "icon": icon, "title": title, "description": desc,
                          "active": st.get("active", []), "soon": st.get("soon", []),
-                         "state": "active" if st.get("active") else "soon"})
+                         "state": "active" if st.get("active") else "soon",
+                         "public_open": open_now})
+    role = "owner" if _webapp_is_owner(user) else "admin" if _webapp_is_admin(user) else "user"
+    visible = [s for s in sections if s["public_open"] or role in ("owner", "admin")]
     return {"ok": True, "user": {"id": int(user.get("id")), "first_name": user.get("first_name", ""), "username": user.get("username", "")},
-            "role": "owner" if is_owner(user.get("id")) else "admin", "sections": sections,
+            "role": role, "sections": visible,
             "links": {"zynmart": ZYNMART_APP_URL, "auto_core": AUTO_CORE_URL},
             "assets": {"zynmart_logo": ZYNMART_LOGO_DATA},
-            "emergency": emergency_active(), "system": {"bot": bool(BOT_TOKEN), "webapp": True, "version": "platform-2"}}
+            "theme": AI_FOR_THEME,
+            "access": {"public_open_sections": sorted(AI_FOR_PUBLIC_OPEN_SECTIONS), "owner_private": _webapp_is_owner(user)},
+            "emergency": emergency_active(), "system": {"bot": bool(BOT_TOKEN), "webapp": True, "version": "platform-3"}}
 
 webapp_conversations = {}
 webapp_conversations_lock = threading.RLock()
@@ -1614,7 +1757,7 @@ def _webapp_ai_with_context(uid, conversation_id, question, user_name="", search
 WEBAPP_HTML = r'''<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"><meta name="theme-color" content="#080b12"><title>AI for</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{--bg:#070a10;--panel:#0e141d;--panel2:#121b27;--panel3:#172433;--text:#f4f7fb;--muted:#8fa0b4;--gold:#ffd24a;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#233244;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#1b2742 0,#0a0e16 42%,var(--bg) 78%);color:var(--text);font-family:Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.18)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:18%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
+:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:18%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button></nav>
@@ -1623,29 +1766,49 @@ const tg=window.Telegram?.WebApp;let state=null;let conversationId=localStorage.
 async function api(path,opts={}){opts.headers=Object.assign({'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||''},opts.headers||{});let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw new Error(d.error||'request_failed');return d}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}
-function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':'Admin'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
-function specialCards(){return `<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل داخل منظومة Pi.</p><span class="badge external">↗ فتح التطبيق</span></a><button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>وكيل أعمال مستقل. واجهته داخل AI for، بينما محركه يبقى مستقلًا.</p><span class="badge">واجهة جاهزة</span></button><button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>إعلانات واشتراكات وخدمات تجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`}
+function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
+function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
+function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
-function openSection(key){setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');let s=state.sections.find(x=>x.key===key);if(!s)return;if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="aiBox()">✍️ اختبار Content Studio</button>':''}${key==='analytics'?'<button class="action" onclick="aiBox()">📊 تحليل/تقرير نصي</button>':''}</section>`}
-function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.filter(s=>s.key!=='market').map(card).join('')}</div>`}
+function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;if(!s.public_open){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
+function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.map(card).join('')}</div>`}
 function renderAutoCore(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🚀 AUTO CORE</div><p class="small">Autonomous Business Agent — واجهة احترافية داخل AI for مع بقاء محرك Auto Core مستقلًا.</p><div class="statusBox autocore"><div class="metricGrid"><div class="metric">الحالة<b class="ok">ARCHITECTURE READY</b></div><div class="metric">الاستقلال<b class="info">SEPARATE CORE</b></div><div class="metric">التشغيل<b>AUTONOMOUS</b></div><div class="metric">الأمان<b class="ok">ISOLATED</b></div></div></div><div class="statusBox"><div class="row">🔎 Scout — البحث عن الفرص والعملاء</div><div class="row">🤝 Negotiate — فهم الطلب والتفاوض</div><div class="row">⚙️ Execute — تنفيذ المهمة كاملة</div><div class="row">📦 Deliver — التسليم</div><div class="row">💳 Settle — التسوية عبر طبقة دفع آمنة</div><div class="row">📜 Audit — سجل تدقيق</div></div><button class="action green" onclick="openAutoCore()">🚀 فتح Auto Core المستقل</button><p class="small">لا يتم تشغيل الوكيل من هذه الواجهة. تشغيله المستقل يظل خارج AI for؛ هذه البطاقة هي بوابة الوصول فقط.</p></section>`}
 function renderRevenue(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">💰 مركز الدخل</div><p class="small">منظومة ربح مبنية على خدمات حقيقية، مع حواجز تمنع المقامرة والخداع والـspam والنقرات الوهمية.</p><div class="statusBox safe"><div class="row">🛡️ Revenue Safety Gate — <span class="ok">مفعّل</span></div><div class="row">🎰 مقامرة/رهان مالي — <span class="danger">ممنوع</span></div><div class="row">🤖 نقرات إعلانية مصطنعة — <span class="danger">ممنوع</span></div><div class="row">📢 إعلان مدفوع مخفي — <span class="danger">ممنوع</span></div><div class="row">🔐 كشف بيانات الدفع الشخصية — <span class="danger">ممنوع</span></div></div><div class="statusBox"><div class="row">⭐ ZYNMART+ — 🚧 قريبًا</div><div class="row">📣 Advertising Network — 🚧 قريبًا وفق شروط المزود</div><div class="row">🎁 Rewarded Ads — 🚧 قريبًا وفق شروط المزود</div><div class="row">🏪 Promoted Stores/Products — 🚧 قريبًا</div><div class="row">🏢 Business Plans — 🚧 قريبًا</div></div></section>`}
 async function piStatus(){try{let d=await api('/api/app/pi');alert(d.text||'تعذر الحصول على بيانات Pi الموثوقة الآن.')}catch(e){alert('⚠️ لا توجد بيانات موثوقة متاحة الآن. لن نخمن.')}}
-function renderChatShell(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('ai')">← رجوع</button><section class="detail"><div class="sectionTitle">💬 دردشة AI</div><p class="small">السياق يبقى داخل هذه المحادثة. بعد الإرسال يتم تفريغ خانة الكتابة تلقائيًا.</p><div id="chat" class="chat"></div><textarea id="q" placeholder="اكتب سؤالك..." style="width:100%;min-height:105px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" id="sendBtn" onclick="askAI()">إرسال</button><button class="action dark" onclick="newConversation()">🆕 محادثة جديدة</button></section>`;loadChatHistory()}
+function renderChatShell(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('ai')">← رجوع</button><section class="detail"><div class="sectionTitle">💬 AI Workspace</div><p class="small">محادثة مستمرة مع سياق، بحث موثوق عند الحاجة، وإمكانية تحويل الهدف إلى مهمة.</p><div class="toolbar"><button class="mini" onclick="newConversation()">🆕 جديد</button><button class="mini" onclick="regenerateLast()">🔄 إعادة</button><button class="mini" onclick="taskBox()">🎯 مهمة</button></div><div id="chat" class="chat"></div><textarea id="q" placeholder="اكتب سؤالك أو هدفك..." style="width:100%;min-height:105px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><div class="toolbar"><button class="action" id="sendBtn" onclick="askAI()">إرسال</button><button class="action dark" id="stopBtn" onclick="stopAI()" disabled>⏹ إيقاف</button></div></section>`;loadChatHistory()}
+let activeController=null;
 async function loadChatHistory(){try{let d=await api('/api/app/ai/history',{method:'POST',body:JSON.stringify({conversation_id:conversationId})});for(const item of (d.history||[]))addMsg(item.role==='user'?'user':'assistant',item.text)}catch(e){}}
 function aiBox(){renderChatShell()}
 function addMsg(role,text){let c=document.getElementById('chat');if(!c)return;let d=document.createElement('div');d.className='msg '+(role==='user'?'user':'ai');d.textContent=text;c.appendChild(d);c.scrollTop=c.scrollHeight}
-async function askAI(){let q=document.getElementById('q'),btn=document.getElementById('sendBtn'),chat=document.getElementById('chat');if(!q||!q.value.trim())return;let text=q.value.trim();q.value='';btn.disabled=true;btn.textContent='جاري التحقق...';addMsg('user',text);let checking=document.createElement('div');checking.className='checking';checking.id='checking';checking.textContent='⏳ جاري التحقق...';chat.appendChild(checking);try{let d=await api('/api/app/ai',{method:'POST',body:JSON.stringify({question:text,conversation_id:conversationId})});document.getElementById('checking')?.remove();addMsg('assistant',d.text||'⚠️ لا توجد إجابة موثوقة الآن.')}catch(e){document.getElementById('checking')?.remove();addMsg('assistant','⚠️ تعذر الحصول على إجابة موثوقة الآن. لن أخمّن.')}finally{btn.disabled=false;btn.textContent='إرسال';q.focus()}}
+async function askAI(regenerate=false){let q=document.getElementById('q'),btn=document.getElementById('sendBtn'),stop=document.getElementById('stopBtn'),chat=document.getElementById('chat');let text=q?.value.trim()||'';if(!regenerate&&!text)return;if(regenerate){let msgs=chat?.querySelectorAll('.msg.user');text=msgs?.length?msgs[msgs.length-1].textContent:''}if(!text)return;if(!regenerate)q.value='';btn.disabled=true;stop.disabled=false;btn.textContent='جاري التحقق...';if(!regenerate)addMsg('user',text);let checking=document.createElement('div');checking.className='checking';checking.id='checking';checking.textContent='⏳ جاري التحقق والبحث عند الحاجة...';chat.appendChild(checking);activeController=new AbortController();try{let d=await api('/api/app/ai',{method:'POST',signal:activeController.signal,body:JSON.stringify({question:text,conversation_id:conversationId,regenerate})});document.getElementById('checking')?.remove();addMsg('assistant',d.text||'⚠️ لا توجد إجابة موثوقة الآن.')}catch(e){document.getElementById('checking')?.remove();if(e.name!=='AbortError')addMsg('assistant','⚠️ تعذر الحصول على إجابة موثوقة الآن. لن أخمّن.')}finally{activeController=null;btn.disabled=false;stop.disabled=true;btn.textContent='إرسال';q?.focus()}}
+function stopAI(){if(activeController){activeController.abort();activeController=null;document.getElementById('checking')?.remove();let b=document.getElementById('sendBtn'),s=document.getElementById('stopBtn');if(b){b.disabled=false;b.textContent='إرسال'}if(s)s.disabled=true}}
+function regenerateLast(){askAI(true)}
 async function newConversation(){conversationId='c_'+Date.now()+'_'+Math.random().toString(36).slice(2);localStorage.setItem('ai_for_conversation_id',conversationId);try{await api('/api/app/ai/new',{method:'POST',body:JSON.stringify({conversation_id:conversationId})})}catch(e){}renderChatShell()}
+function taskBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="aiBox()">← AI Workspace</button><section class="detail"><div class="sectionTitle">🎯 Task Mode</div><p class="small">حوّل الهدف إلى خطة ثم نفّذ ما يمكن إنجازه الآن.</p><textarea id="goal" placeholder="مثال: أريد خطة لإطلاق خدمة رقمية..." style="width:100%;min-height:120px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="runTask()">🚀 ابدأ المهمة</button><div id="taskResult"></div></section>`}
+async function runTask(){let g=document.getElementById('goal')?.value.trim(),r=document.getElementById('taskResult');if(!g)return;r.innerHTML='<div class="statusBox">⏳ تحليل الهدف وبناء المهمة...</div>';try{let d=await api('/api/app/task',{method:'POST',body:JSON.stringify({goal:g})});r.innerHTML='<div class="statusBox"><b>الخطة</b><div class="row">'+esc(d.plan||'')+'</div><div class="row">'+esc(d.text||'')+'</div></div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر تنفيذ المهمة الآن.</div>'}}
+function contentBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('content')">← المحتوى</button><section class="detail"><div class="sectionTitle">🎨 Content Studio</div><div class="filebox"><b>📁 File Intelligence</b><p class="small">حلّل النصوص وCSV وJSON الآن. الأنواع المتقدمة ستضاف لاحقًا.</p><input id="fileInput" type="file" accept=".txt,.csv,.json,text/plain,text/csv,application/json" style="width:100%;margin-top:10px"><button class="action" onclick="analyzeFile()">🔍 تحليل الملف</button><div id="fileResult"></div></div><div class="filebox"><b>✍️ إنشاء محتوى</b><textarea id="contentPrompt" placeholder="اكتب المطلوب..." style="width:100%;min-height:100px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="contentAI()">✨ إنشاء</button><div id="contentResult"></div></div></section>`}
+async function analyzeFile(){let f=document.getElementById('fileInput')?.files?.[0],r=document.getElementById('fileResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري التحليل...</div>';let fd=new FormData();fd.append('file',f);try{let d=await fetch('/api/app/files/analyze',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let x=await d.json();r.innerHTML='<div class="statusBox">'+esc(JSON.stringify(x.result||x,null,2))+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر تحليل الملف.</div>'}}
+async function contentAI(){let q=document.getElementById('contentPrompt')?.value.trim(),r=document.getElementById('contentResult');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري الإنشاء...</div>';try{let d=await api('/api/app/ai',{method:'POST',body:JSON.stringify({question:'أنشئ محتوى احترافيًا حسب الطلب التالي:\n'+q,conversation_id:'content_'+conversationId})});r.innerHTML='<div class="statusBox">'+esc(d.text||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر إنشاء المحتوى.</div>'}}
+function analyticsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('analytics')">← التحليلات</button><section class="detail"><div class="sectionTitle">📊 Analytics</div><p class="small">أدخل أرقامًا أو بيانات، ثم اطلب حسابًا أو مقارنة أو تحليلًا.</p><textarea id="dataPrompt" placeholder="مثال: المبيعات: 120, 150, 180. احسب المتوسط والنمو..." style="width:100%;min-height:120px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="analyzeData()">📈 تحليل البيانات</button><div id="dataResult"></div></section>`}
+async function analyzeData(){let q=document.getElementById('dataPrompt')?.value.trim(),r=document.getElementById('dataResult');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جارٍ التحليل...</div>';try{let d=await api('/api/app/ai',{method:'POST',body:JSON.stringify({question:'حلل البيانات التالية بدقة، احسب ما يمكن حسابه، واذكر الافتراضات بوضوح:\n'+q,conversation_id:'analytics_'+conversationId})});r.innerHTML='<div class="statusBox">'+esc(d.text||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر تحليل البيانات.</div>'}}
+function toolsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('tools')">← الأدوات</button><section class="detail"><div class="sectionTitle">🧰 أدوات حقيقية</div><div class="filebox"><b>🧮 حاسبة</b><input id="calc" placeholder="مثال: (25*4)+10" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="calcRun()">احسب</button><div id="calcResult"></div></div><div class="filebox"><b>🕒 وقت تونس</b><button class="action dark" onclick="timeRun()">عرض الوقت الحالي</button><div id="timeResult"></div></div><div class="filebox"><b>🌐 ترجمة</b><input id="targetLang" value="العربية" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><textarea id="transText" placeholder="النص..." style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px;font:inherit"></textarea><button class="action" onclick="translateRun()">ترجم</button><div id="transResult"></div></div></section>`}
+async function toolCall(body){return api('/api/app/tools',{method:'POST',body:JSON.stringify(body)})}
+async function calcRun(){let r=document.getElementById('calcResult');try{let d=await toolCall({op:'calculator',expression:document.getElementById('calc').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'تعذر الحساب')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحساب.</div>'}}
+async function timeRun(){let r=document.getElementById('timeResult');try{let d=await toolCall({op:'time'});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' · '+esc(d.timezone||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر قراءة الوقت.</div>'}}
+async function translateRun(){let r=document.getElementById('transResult');try{let d=await toolCall({op:'translate',text:document.getElementById('transText').value,target:document.getElementById('targetLang').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذرت الترجمة.</div>'}}
+function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'account\')">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حساب Telegram</div><div class="statusBox"><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">الدور: '+esc(state.role)+'</div><div class="row">الوصول: <span class="ok">مسموح</span></div></div></section>'}
+function securityBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">Telegram initData: <span class="ok">تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
+function supportBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'support\')">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم وحالة النظام</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">Telegram WebApp: <span class="ok">متصل</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?'<span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div></section>'}
 function searchBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">🔎 بحث موثوق</div><textarea id="sq" placeholder="اكتب ما تريد البحث عنه..." style="width:100%;min-height:95px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="doSearch()">بحث</button><div id="sr"></div></section>`}
 async function doSearch(){let q=document.getElementById('sq').value.trim(),r=document.getElementById('sr');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري التحقق من المصادر...</div>';try{let d=await api('/api/app/search',{method:'POST',body:JSON.stringify({query:q})});r.innerHTML='<div class="statusBox">'+esc(d.text||'⚠️ لا توجد نتائج موثوقة متاحة الآن.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر التحقق من المصادر الآن.</div>'}}
-function admin(){setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div>${state.role==='owner'?'<div class="row">🔐 مركز التحكم السري: <span class="ok">متاح لك فقط</span></div>':''}</div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button>${state.role==='owner'?'<button class="action" onclick="emergency()">🔐 مركز التحكم السري</button>':''}</section>`}
+function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
+function ownerArea(){setNav('n-admin');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 Owner Private Area</div><p class="small">هذه المساحة خاصة بالمالك فقط ولا تظهر لأي دور آخر.</p><div class="statusBox"><div class="row">🧩 Feature Firewall — إعداد خارجي</div><div class="row">👤 Allowlist — إعداد خارجي</div><div class="row">🎨 Theme System — إعداد خارجي</div><div class="row">🛡️ Emergency — محمي</div></div><button class="action" onclick="emergency()">🔐 حالة الطوارئ</button></section>'}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function start(){try{state=await api('/api/app/bootstrap');document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>الوصول غير متاح</h2><p class="small">هذه المنصة مخصصة للإدارة في المرحلة الحالية.</p></div>'}}start();
+async function start(){try{state=await api('/api/app/bootstrap');applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove()}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>الوصول غير متاح</h2><p class="small">لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.</p></div>'}}start();
 </script></body></html>
 '''
 
@@ -1664,6 +1827,8 @@ def webapp_bootstrap():
 def webapp_pi():
     user, err, code = _webapp_auth()
     if err: return err, code
+    denied = _webapp_require_section(user, "pi")
+    if denied[0]: return denied
     if emergency_active(): return jsonify({"ok": False, "text": "⚠️ وضع الطوارئ مفعّل حاليًا."}), 503
     try:
         text = format_pi_price()
@@ -1675,10 +1840,18 @@ def webapp_pi():
 def webapp_ai():
     user, err, code = _webapp_auth()
     if err: return err, code
+    denied = _webapp_require_section(user, "ai")
+    if denied[0]: return denied
     if emergency_active(): return jsonify({"ok": False, "text": "⚠️ وضع الطوارئ مفعّل حاليًا."}), 503
     body = request.get_json(silent=True) or {}
     question = str(body.get("question", "")).strip()
     conversation_id = str(body.get("conversation_id", "default"))[:100]
+    regenerate = bool(body.get("regenerate"))
+    if regenerate:
+        history = _webapp_history(user.get("id"), conversation_id)
+        if history and history[-1].get("role") == "assistant": history = history[:-1]
+        if history and history[-1].get("role") == "user": question = str(history[-1].get("text", ""))
+        _webapp_save_history(user.get("id"), conversation_id, history[:-1] if history else [])
     if not question or len(question) > 4000: return jsonify({"ok": False, "error": "invalid_question"}), 400
     try:
         search_res = search_official(question) if needs_fresh_search(question) else ""
@@ -1692,16 +1865,27 @@ def webapp_ai():
 def webapp_search():
     user, err, code = _webapp_auth()
     if err: return err, code
+    denied = _webapp_require_section(user, "search")
+    if denied[0]: return denied
     if emergency_active(): return jsonify({"ok": False, "text": "⚠️ وضع الطوارئ مفعّل حاليًا."}), 503
     body = request.get_json(silent=True) or {}
     query = str(body.get("query", "")).strip()
     if not query or len(query) > 1000:
         return jsonify({"ok": False, "error": "invalid_query"}), 400
     try:
+        cache_key=query.casefold()
+        now=time.time()
+        with webapp_search_cache_lock:
+            cached=webapp_search_cache.get(cache_key)
+            if cached and cached[0]>now:
+                return jsonify({"ok": True, "text": cached[1], "cached": True})
         result = search_official(query)
         if not result:
             return jsonify({"ok": False, "text": "⚠️ لا توجد نتائج موثوقة متاحة الآن. لن أخمّن."}), 503
-        return jsonify({"ok": True, "text": result[:6000]})
+        result=result[:6000]
+        with webapp_search_cache_lock:
+            webapp_search_cache[cache_key]=(now+180,result)
+        return jsonify({"ok": True, "text": result, "cached": False})
     except Exception as e:
         print(f"WebApp search error: {e}")
         return jsonify({"ok": False, "text": "⚠️ تعذر التحقق من المصادر الآن."}), 503
@@ -1710,6 +1894,8 @@ def webapp_search():
 def webapp_ai_new():
     user, err, code = _webapp_auth()
     if err: return err, code
+    denied = _webapp_require_section(user, "ai")
+    if denied[0]: return denied
     body = request.get_json(silent=True) or {}
     conversation_id = str(body.get("conversation_id", "default"))[:100]
     _webapp_new_conversation(user.get("id"), conversation_id)
@@ -1719,9 +1905,40 @@ def webapp_ai_new():
 def webapp_ai_history():
     user, err, code = _webapp_auth()
     if err: return err, code
+    denied = _webapp_require_section(user, "ai")
+    if denied[0]: return denied
     body = request.get_json(silent=True) or {}
     conversation_id = str(body.get("conversation_id", "default"))[:100]
     return jsonify({"ok": True, "history": _webapp_public_history(user.get("id"), conversation_id)})
+
+@app.route("/api/app/tools", methods=["POST"])
+def webapp_tools():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    denied = _webapp_require_section(user, "tools")
+    if denied[0]: return denied
+    body=request.get_json(silent=True) or {}
+    op=str(body.get("op","")).strip().lower()
+    if op == "calculator":
+        expr=str(body.get("expression","")).strip()
+        if not expr or len(expr)>300 or not re.fullmatch(r"[0-9+\-*/().% ^]+", expr): return jsonify({"ok":False,"error":"invalid_expression"}),400
+        try: return jsonify({"ok":True,"result":str(eval(expr.replace("^","**"), {"__builtins__":{}}, {}))})
+        except Exception: return jsonify({"ok":False,"error":"calculation_failed"}),400
+    if op == "time":
+        now=datetime.now(ZoneInfo("Africa/Tunis")); return jsonify({"ok":True,"result":now.strftime("%Y-%m-%d %H:%M:%S"),"timezone":"Africa/Tunis"})
+    if op == "translate":
+        text=str(body.get("text","")).strip(); target=str(body.get("target","العربية")).strip()
+        if not text or len(text)>4000: return jsonify({"ok":False,"error":"invalid_text"}),400
+        reply=get_ai_response(f"ترجم النص التالي إلى {target} فقط، دون شرح إضافي:\n{text}", user.get("first_name",""))
+        return jsonify({"ok":bool(reply),"result":reply or AI_PRIVATE_FAILURE_MESSAGE})
+    return jsonify({"ok":False,"error":"unknown_operation"}),400
+
+@app.route("/api/app/owner", methods=["GET"])
+def webapp_owner_private():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"owner_only"}),403
+    return jsonify({"ok":True,"area":"owner_private","features":["external feature firewall","allowlist","theme settings","system controls","audit","emergency"],"note":"Owner Private Area is never exposed to other roles."})
 
 @app.route("/api/app/emergency", methods=["GET"])
 def webapp_emergency():
@@ -1729,6 +1946,38 @@ def webapp_emergency():
     if err: return err, code
     if not is_owner(user.get("id")): return jsonify({"ok": False, "error": "owner_only"}), 403
     return jsonify({"ok": True, "text": "🔴 وضع الطوارئ مفعّل." if emergency_active() else "🟢 النظام في الوضع الطبيعي."})
+
+@app.route("/api/app/files/analyze", methods=["POST"])
+def webapp_file_analyze():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    denied = _webapp_require_section(user, "content")
+    if denied[0]: return denied
+    uploaded = request.files.get("file")
+    if uploaded:
+        raw = uploaded.read(120000)
+        try: content = raw.decode("utf-8", errors="replace")
+        except Exception: content = str(raw[:6000])
+        result = _webapp_file_analysis(uploaded.filename, content, uploaded.mimetype)
+    else:
+        body = request.get_json(silent=True) or {}
+        result = _webapp_file_analysis(body.get("name"), body.get("content"), body.get("kind"))
+    return jsonify({"ok": True, "result": result})
+
+@app.route("/api/app/task", methods=["POST"])
+def webapp_task():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    denied = _webapp_require_section(user, "ai")
+    if denied[0]: return denied
+    body=request.get_json(silent=True) or {}
+    goal=str(body.get("goal","")).strip()
+    if not goal or len(goal)>6000: return jsonify({"ok":False,"error":"invalid_goal"}),400
+    plan = "1. فهم الهدف\n2. تحديد المطلوب والقيود\n3. البحث والتحقق عند الحاجة\n4. التنفيذ خطوة بخطوة\n5. مراجعة النتيجة\n6. تقديم الناتج النهائي"
+    prompt=f"حوّل هذا الهدف إلى تنفيذ عملي خطوة بخطوة، ثم أنجز ما يمكن إنجازه الآن. لا تخمّن، واستعمل البحث الموثوق عند الحاجة. الهدف:\n{goal}"
+    search_res=search_official(goal) if needs_fresh_search(goal) else ""
+    reply=get_ai_response(prompt, user.get("first_name",""), search_context=search_res)
+    return jsonify({"ok":bool(reply),"plan":plan,"text":reply or AI_PRIVATE_FAILURE_MESSAGE})
 
 def ensure_background_services():
     """Start one scheduler thread per application process.
@@ -2005,37 +2254,43 @@ def webhook():
         return jsonify({"status": "ok"}), 200
 
     if chat_type == "private":
-        # Preserve original private protection.
+        remember_user(msg)
         if user_id not in ADMIN_IDS:
             return jsonify({"status": "ok"}), 200
 
-        # Original broadcast command behavior is preserved exactly.
+        caption = str(msg.get("caption", "")).strip()
+        has_media = bool(msg.get("photo") or msg.get("video"))
+        if has_media and (caption.startswith("ابدا البث") or caption.startswith("ابدأ البث") or admin_modes.get(user_id) == "broadcast_topic"):
+            if emergency_active():
+                send_message(chat_id, "🛑 وضع الطوارئ مفعّل مؤقتًا؛ تم إيقاف البث.")
+                return jsonify({"status": "ok"}), 200
+            media_msg=dict(msg)
+            if caption.startswith("ابدا البث") or caption.startswith("ابدأ البث"):
+                media_msg["caption"]=caption.replace("ابدا البث", "", 1).replace("ابدأ البث", "", 1).strip()
+            sent, failed = _send_broadcast_media(media_msg)
+            admin_modes.pop(user_id, None)
+            send_message(chat_id, f"✅ تم بث الوسائط إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+            return jsonify({"status": "ok"}), 200
+
         if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
             if emergency_active():
                 send_message(chat_id, "🛑 وضع الطوارئ مفعّل مؤقتًا؛ تم إيقاف البث والعمليات الآلية الحساسة.")
                 return jsonify({"status": "ok"}), 200
-            target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
-            if target_group:
-                raw_cmd = text.replace("ابدا البث", "", 1).replace("ابدأ البث", "", 1).strip()
-
-                if raw_cmd.startswith(":"):
-                    broadcast_reply = sanitize_urls(raw_cmd[1:].strip())
-                    send_message(target_group, broadcast_reply)
-                    send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
-                else:
-                    search_query = raw_cmd if raw_cmd else "اخبار Pi Network و ZYNMART"
-                    creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}"
-                    def job():
-                        search_results = search_official(search_query)
-                        broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
-                        if not broadcast_reply:
-                            send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
-                            return
-                        send_message(target_group, broadcast_reply)
-                        send_message(chat_id, "✅ تم النشر في المجموعة بنجاح!")
-                    run_ai_job(job)
+            raw_cmd = text.replace("ابدا البث", "", 1).replace("ابدأ البث", "", 1).strip()
+            if raw_cmd.startswith(":"):
+                sent, failed = _send_broadcast_text(sanitize_urls(raw_cmd[1:].strip()))
+                send_message(chat_id, f"✅ تم البث إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
             else:
-                send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
+                search_query = raw_cmd if raw_cmd else "اخبار Pi Network و ZYNMART"
+                creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}"
+                def job():
+                    search_results = search_official(search_query)
+                    broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
+                    if not broadcast_reply:
+                        send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE); return
+                    sent, failed = _send_broadcast_text(sanitize_urls(broadcast_reply))
+                    send_message(chat_id, f"✅ تم البث إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+                run_ai_job(job)
             return jsonify({"status": "ok"}), 200
 
         # Admin commands/menu modes.

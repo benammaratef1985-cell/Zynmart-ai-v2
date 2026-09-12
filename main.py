@@ -1652,7 +1652,7 @@ def _webapp_public_open_set():
         return {str(x).strip() for x in stored if str(x).strip()}
     return set(AI_FOR_PUBLIC_OPEN_SECTIONS)
 
-CORE_PUBLIC_SECTIONS = {"account"}
+CORE_PUBLIC_SECTIONS = set()
 
 def _webapp_section_open(user, key):
     if _webapp_is_owner(user): return True
@@ -1772,7 +1772,7 @@ def _webapp_ai_with_context(uid, conversation_id, question, user_name="", search
 WEBAPP_HTML = r'''<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"><meta name="theme-color" content="#080b12"><title>AI for</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1;color:var(--text)}.sub{font-size:12px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;color:var(--text);font-family:inherit;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:18px;font-weight:900;color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,.45)}.card p{margin:0;color:var(--muted);font-size:13px;line-height:1.55}.back,.nav,.action,.mini{color:var(--text);font-family:inherit}.back{font-weight:800}.sectionTitle,.hero h1{color:var(--text)}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
+:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button></nav>
@@ -1997,12 +1997,9 @@ def webapp_account_photo_get():
 
 @app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    user = _webapp_data_check(init_data)
-    if not user:
-        return jsonify({"ok":False,"error":"not_found"}),404
-    if not _webapp_is_owner(user):
-        return jsonify({"ok":False,"error":"not_found"}),404
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"owner_only"}),403
     if request.method == "GET":
         return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency"]})
     body=request.get_json(silent=True) or {}; action=str(body.get("action","")).strip().lower()
@@ -2315,20 +2312,48 @@ def webhook():
             if execute_moderation_command(chat_id, user_id, text):
                 return jsonify({"status": "ok"}), 200
 
-        # Admin broadcast commands in a Telegram group remain group publication commands.
-        # They are separate from private bot-user broadcasts.
-        if text and user_id in ADMIN_IDS and (text.startswith("ابدا البث") or text.startswith("ابدأ البث")):
+        # Broadcast matrix (group context):
+        # ابدأ البث: نص  -> literal announcement to AI for platform members
+        # ابدا البث: موضوع -> creative announcement to AI for platform members
+        # ابدأ البث نص -> literal post to the current Telegram group
+        # ابدا البث موضوع -> creative post to the current Telegram group
+        if text and user_id in ADMIN_IDS and (text.startswith("ابدأ البث") or text.startswith("ابدا البث")):
             if emergency_active():
                 send_message(chat_id, "🛑 وضع الطوارئ مفعّل مؤقتًا؛ تم إيقاف البث.")
                 return jsonify({"status":"ok"}),200
-            raw_cmd=text.replace("ابدا البث","",1).replace("ابدأ البث","",1).strip()
-            if raw_cmd.startswith(":"):
-                send_message(chat_id,sanitize_urls(raw_cmd[1:].strip()))
+            is_literal = text.startswith("ابدأ البث")
+            raw_cmd = text.replace("ابدأ البث", "", 1) if is_literal else text.replace("ابدا البث", "", 1)
+            raw_cmd = raw_cmd.strip()
+            to_platform = raw_cmd.startswith(":")
+            payload = raw_cmd[1:].strip() if to_platform else raw_cmd
+            if not payload:
+                payload = "اخبار Pi Network و ZYNMART"
+            if to_platform:
+                if is_literal:
+                    sent, failed = _send_broadcast_text(sanitize_urls(payload))
+                    send_message(chat_id, f"✅ تم البث الحرفي إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+                else:
+                    creative_order = f"اكتب منشورًا إبداعيًا كاملًا ومحفزًا وجاهزًا للنشر عن: {payload}"
+                    def platform_job():
+                        sr = search_official(payload)
+                        reply = get_ai_response(creative_order, user_name, search_context=sr)
+                        if not reply:
+                            send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                            return
+                        sent, failed = _send_broadcast_text(sanitize_urls(reply))
+                        send_message(chat_id, f"✅ تم البث الإبداعي إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+                    run_ai_job(platform_job)
+            elif is_literal:
+                send_message(chat_id, sanitize_urls(payload))
             else:
-                search_query=raw_cmd or "اخبار Pi Network و ZYNMART"
+                creative_order = f"اكتب منشورًا إبداعيًا كاملًا ومحفزًا وجاهزًا للنشر عن: {payload}"
                 def group_job():
-                    sr=search_official(search_query); reply=get_ai_response(f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}",user_name,search_context=sr)
-                    if reply: send_message(chat_id,sanitize_urls(reply))
+                    sr = search_official(payload)
+                    reply = get_ai_response(creative_order, user_name, search_context=sr)
+                    if reply:
+                        send_message(chat_id, sanitize_urls(reply))
+                    else:
+                        send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
                 run_ai_job(group_job)
             return jsonify({"status":"ok"}),200
 
@@ -2374,25 +2399,54 @@ def webhook():
             send_message(chat_id, f"✅ تم بث الوسائط إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
             return jsonify({"status": "ok"}), 200
 
-        if text.startswith("ابدا البث") or text.startswith("ابدأ البث"):
+        if text.startswith("ابدأ البث") or text.startswith("ابدا البث"):
             if emergency_active():
                 send_message(chat_id, "🛑 وضع الطوارئ مفعّل مؤقتًا؛ تم إيقاف البث والعمليات الآلية الحساسة.")
                 return jsonify({"status": "ok"}), 200
-            raw_cmd = text.replace("ابدا البث", "", 1).replace("ابدأ البث", "", 1).strip()
-            if raw_cmd.startswith(":"):
-                sent, failed = _send_broadcast_text(sanitize_urls(raw_cmd[1:].strip()))
-                send_message(chat_id, f"✅ تم البث إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+            is_literal = text.startswith("ابدأ البث")
+            raw_cmd = text.replace("ابدأ البث", "", 1) if is_literal else text.replace("ابدا البث", "", 1)
+            raw_cmd = raw_cmd.strip()
+            to_platform = raw_cmd.startswith(":")
+            payload = raw_cmd[1:].strip() if to_platform else raw_cmd
+            if not payload:
+                payload = "اخبار Pi Network و ZYNMART"
+            if to_platform:
+                if is_literal:
+                    sent, failed = _send_broadcast_text(sanitize_urls(payload))
+                    send_message(chat_id, f"✅ تم البث الحرفي إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+                else:
+                    creative_order = f"اكتب منشورًا إبداعيًا كاملًا ومحفزًا وجاهزًا للنشر عن: {payload}"
+                    def platform_job():
+                        search_results = search_official(payload)
+                        broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
+                        if not broadcast_reply:
+                            send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                            return
+                        sent, failed = _send_broadcast_text(sanitize_urls(broadcast_reply))
+                        send_message(chat_id, f"✅ تم البث الإبداعي إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
+                    run_ai_job(platform_job)
+            elif is_literal:
+                target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+                if target_group:
+                    send_message(target_group, sanitize_urls(payload))
+                    send_message(chat_id, "✅ تم نشر النص الحرفي في مجموعة Telegram.")
+                else:
+                    send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
             else:
-                search_query = raw_cmd if raw_cmd else "اخبار Pi Network و ZYNMART"
-                creative_order = f"اكتب منشور ابداعي كامل ومحفز وجاهز للنشر عن: {search_query}"
-                def job():
-                    search_results = search_official(search_query)
-                    broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
-                    if not broadcast_reply:
-                        send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE); return
-                    sent, failed = _send_broadcast_text(sanitize_urls(broadcast_reply))
-                    send_message(chat_id, f"✅ تم البث إلى مستخدمي AI for.\n📨 ناجح: {sent} · ⚠️ فشل: {failed}")
-                run_ai_job(job)
+                target_group = active_group_chat_id or DEFAULT_GROUP_CHAT_ID
+                if not target_group:
+                    send_message(chat_id, "⚠️ لم يتم التعرف على المجموعة بعد.")
+                else:
+                    creative_order = f"اكتب منشورًا إبداعيًا كاملًا ومحفزًا وجاهزًا للنشر عن: {payload}"
+                    def group_job():
+                        search_results = search_official(payload)
+                        broadcast_reply = get_ai_response(creative_order, user_name, search_context=search_results)
+                        if not broadcast_reply:
+                            send_message(chat_id, AI_PRIVATE_FAILURE_MESSAGE)
+                            return
+                        send_message(target_group, sanitize_urls(broadcast_reply))
+                        send_message(chat_id, "✅ تم نشر المنشور الإبداعي في مجموعة Telegram.")
+                    run_ai_job(group_job)
             return jsonify({"status": "ok"}), 200
 
         # Admin commands/menu modes.

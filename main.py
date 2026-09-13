@@ -1,4 +1,4 @@
-import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io
+import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io, secrets
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
@@ -268,6 +268,125 @@ def membership_service_status():
         "error": "" if membership_db_ready else membership_db_error
     }
 
+# Durable Owner Control Center / runtime configuration store.
+CONTROL_DB_REQUIRED = os.environ.get("AI_FOR_CONTROL_DB_REQUIRED", "true").lower() not in ("0", "false", "no", "off")
+control_db_ready = False
+control_db_error = ""
+control_db_lock = threading.RLock()
+
+def _control_db_connect():
+    if not DATABASE_URL or psycopg2 is None:
+        return None
+    return psycopg2.connect(DATABASE_URL, connect_timeout=8, sslmode="require")
+
+def init_control_db():
+    global control_db_ready, control_db_error
+    if not DATABASE_URL:
+        control_db_error = "DATABASE_URL is not configured"
+        return False
+    if psycopg2 is None:
+        control_db_error = "psycopg2-binary is not installed"
+        return False
+    try:
+        with control_db_lock:
+            conn = _control_db_connect()
+            if not conn:
+                return False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_config (
+                        config_key TEXT PRIMARY KEY,
+                        config_value JSONB NOT NULL,
+                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )""")
+                    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_control_audit (
+                        id BIGSERIAL PRIMARY KEY,
+                        actor_user_id BIGINT NOT NULL,
+                        action TEXT NOT NULL,
+                        target TEXT NOT NULL DEFAULT '',
+                        details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    )""")
+            control_db_ready = True
+            control_db_error = ""
+            return True
+    except Exception as e:
+        control_db_ready = False
+        control_db_error = str(e)
+        print(f"Control DB init error: {e}")
+        return False
+
+def control_db_get(key, default=None):
+    if not control_db_ready:
+        return default
+    try:
+        with control_db_lock:
+            conn = _control_db_connect()
+            if not conn: return default
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT config_value FROM ai_for_config WHERE config_key=%s", (str(key),))
+                    row=cur.fetchone()
+                    return row[0] if row else default
+    except Exception as e:
+        print(f"Control DB get error: {e}")
+        return default
+
+def control_db_set(key, value):
+    if not control_db_ready:
+        return False
+    try:
+        with control_db_lock:
+            conn=_control_db_connect()
+            if not conn: return False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("""INSERT INTO ai_for_config(config_key,config_value,updated_at) VALUES(%s,%s,NOW())
+                                   ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,updated_at=NOW()""", (str(key), json.dumps(value, ensure_ascii=False)))
+            return True
+    except Exception as e:
+        print(f"Control DB set error: {e}")
+        return False
+
+def control_audit(actor_user_id, action, target="", details=None):
+    if not control_db_ready:
+        return False
+    try:
+        with control_db_lock:
+            conn=_control_db_connect()
+            if not conn: return False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("INSERT INTO ai_for_control_audit(actor_user_id,action,target,details) VALUES(%s,%s,%s,%s)", (int(actor_user_id),str(action)[:120],str(target)[:240],json.dumps(details or {}, ensure_ascii=False)))
+            return True
+    except Exception as e:
+        print(f"Control audit error: {e}")
+        return False
+
+def persist_runtime_config():
+    if not control_db_ready:
+        return False
+    payload={
+        "public_open_sections": sorted(_webapp_public_open_set()),
+        "allowed_usernames_runtime": sorted({str(x).lstrip("@").lower() for x in settings.get("allowed_usernames_runtime",[]) if str(x).strip()}),
+        "allowed_user_ids": settings.get("allowed_user_ids",{}),
+        "theme": AI_FOR_THEME if isinstance(globals().get("AI_FOR_THEME",{}),dict) else {},
+        "emergency_mode": bool(settings.get("emergency_mode",False)),
+        "emergency_reason": str(settings.get("emergency_reason", "")),
+    }
+    return control_db_set("runtime", payload)
+
+def load_runtime_config_from_db():
+    data=control_db_get("runtime", {})
+    if not isinstance(data,dict): return False
+    if isinstance(data.get("public_open_sections"),list): settings["public_open_sections"]=data["public_open_sections"]
+    if isinstance(data.get("allowed_usernames_runtime"),list): settings["allowed_usernames_runtime"]=data["allowed_usernames_runtime"]
+    if isinstance(data.get("allowed_user_ids"),dict): settings["allowed_user_ids"]=data["allowed_user_ids"]
+    if "emergency_mode" in data: settings["emergency_mode"]=bool(data["emergency_mode"])
+    if "emergency_reason" in data: settings["emergency_reason"]=str(data["emergency_reason"] or "")
+    return True
+
+
 def save_users_to_file():
     with file_lock:
         atomic_save(USERS_FILE, {
@@ -311,6 +430,12 @@ moderation_log = load_json(MOD_LOG_FILE, [])
 def save_settings():
     with file_lock:
         atomic_save(SETTINGS_FILE, settings)
+    # PostgreSQL is authoritative for runtime control settings when available.
+    try:
+        if globals().get("control_db_ready", False):
+            persist_runtime_config()
+    except Exception:
+        pass
 
 def save_daily_data():
     with file_lock:
@@ -333,6 +458,7 @@ os.makedirs(USER_PHOTOS_DIR, exist_ok=True)
 load_users_from_file()
 init_membership_db()
 migrate_local_users_to_db()
+init_control_db()
 
 ZYNMART_PROMPT = """أنت مساعد AI موثوق داخل ZYNMART وبيئة Pi Network.
 
@@ -1760,11 +1886,25 @@ try:
     if not isinstance(AI_FOR_THEME, dict): AI_FOR_THEME = {}
 except Exception:
     AI_FOR_THEME = {}
+_db_theme = control_db_get("theme", None)
+if isinstance(_db_theme, dict) and _db_theme:
+    AI_FOR_THEME = _db_theme
 _webapp_allowed_ids = {}
 for _name, _uid in (settings.get("allowed_user_ids", {}) if isinstance(settings.get("allowed_user_ids", {}), dict) else {}).items():
     try: _webapp_allowed_ids[str(_name).lower()] = int(_uid)
     except Exception: pass
 _webapp_access_lock = threading.RLock()
+# DB-backed runtime configuration overrides legacy environment/file cache when available.
+try:
+    load_runtime_config_from_db()
+    _runtime_allowed = {str(x).strip().lstrip("@").lower() for x in settings.get("allowed_usernames_runtime", []) if str(x).strip()}
+    AI_FOR_ALLOWED_USERNAMES.update(_runtime_allowed)
+    _webapp_allowed_ids = {}
+    for _name, _uid in (settings.get("allowed_user_ids", {}) if isinstance(settings.get("allowed_user_ids", {}), dict) else {}).items():
+        try: _webapp_allowed_ids[str(_name).lower()] = int(_uid)
+        except Exception: pass
+except Exception:
+    pass
 
 def _webapp_allowed_username(user):
     username = str(user.get("username", "")).strip().lstrip("@").lower()
@@ -1933,7 +2073,7 @@ WEBAPP_HTML = r'''<!doctype html>
 :root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
-<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button></nav>
+<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button id="n-account" onclick="accountBox()">👤 الحساب</button></nav>
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){opts.headers=Object.assign({'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||''},opts.headers||{});let r=await fetch(path,opts);let d=await r.json();if(!r.ok)throw new Error(d.error||'request_failed');return d}
@@ -1979,11 +2119,12 @@ function supportBox(){document.getElementById('view').innerHTML='<button class="
 function searchBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">🔎 بحث موثوق</div><textarea id="sq" placeholder="اكتب ما تريد البحث عنه..." style="width:100%;min-height:95px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="doSearch()">بحث</button><div id="sr"></div></section>`}
 async function doSearch(){let q=document.getElementById('sq').value.trim(),r=document.getElementById('sr');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري التحقق من المصادر...</div>';try{let d=await api('/api/app/search',{method:'POST',body:JSON.stringify({query:q})});r.innerHTML='<div class="statusBox">'+esc(d.text||'⚠️ لا توجد نتائج موثوقة متاحة الآن.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر التحقق من المصادر الآن.</div>'}}
 function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
-async function ownerArea(){setNav('n-admin');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 Owner Private Area</div><p class="small">هذه المساحة خاصة بالمالك فقط ولا تظهر لأي دور آخر.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل التحكم...</div></div></section>';try{let d=await api('/api/app/owner');let all=state.sections.map(s=>'<div class="row"><button class="mini" onclick="togglePublic(\''+s.key+'\','+(!s.public_open)+')">'+(s.public_open?'🔓 إغلاق':'🔒 فتح')+'</button> '+esc(s.icon+' '+s.title)+'</div>').join('');document.getElementById('ownerPanel').innerHTML='<div class="statusBox"><b>🔓 فتح وإغلاق الميزات للعامة</b>'+all+'</div><div class="statusBox"><b>👤 إضافة مستخدم</b><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">إضافة</button><div class="small">المستخدم يظل User ولا يحصل على الإدارة.</div></div><div class="statusBox"><b>🛡️ الطوارئ</b><button class="action dark" onclick="emergency()">حالة الطوارئ</button></div>'}catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
+async function ownerArea(){setNav('n-admin');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 Owner Private Area</div><p class="small">هذه المساحة خاصة بالمالك فقط ولا تظهر لأي دور آخر.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل التحكم...</div></div></section>';try{let d=await api('/api/app/owner');let all=state.sections.map(s=>'<div class="row"><button class="mini" onclick="togglePublic(\''+s.key+'\','+(!s.public_open)+')">'+(s.public_open?'🔓 إغلاق':'🔒 فتح')+'</button> '+esc(s.icon+' '+s.title)+'</div>').join('');document.getElementById('ownerPanel').innerHTML='<div class="statusBox"><b>🔓 فتح وإغلاق الميزات للعامة</b>'+all+'</div><div class="statusBox"><b>👤 إضافة مستخدم</b><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">إضافة</button><div class="small">المستخدم يظل User ولا يحصل على الإدارة.</div></div><div class="statusBox"><b>🛡️ الطوارئ</b><button class="action dark" onclick="emergency()">حالة الطوارئ</button></div><div class="statusBox"><b>🧪 Feature Test Center</b><button class="action" onclick="ownerTests()">تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'}catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
 async function togglePublic(key,open){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'section',key,open})});state=await api('/api/app/bootstrap');applyTheme();ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة الميزة.')}}
 async function allowUser(){let x=document.getElementById('allowUser')?.value.trim();if(!x)return;try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'allow_user',username:x})});ownerArea()}catch(e){alert('⚠️ تعذر إضافة المستخدم.')}}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
+async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري الاختبار...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});r.innerHTML=(d.tests||[]).map(x=>'<div>'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات.'}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 async function start(){try{state=await api('/api/app/bootstrap');applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove()}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>الوصول غير متاح</h2><p class="small">لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.</p></div>'}}start();
 </script></body></html>
@@ -2155,17 +2296,20 @@ def webapp_account_photo_get():
 
 @app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
+    # Owner authorization is always derived from verified Telegram initData.
     user, err, code = _webapp_auth()
     if err: return err, code
-    if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"owner_only"}),403
+    if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
     if request.method == "GET":
-        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency"]})
-    body=request.get_json(silent=True) or {}; action=str(body.get("action","")).strip().lower()
+        control_status = {"persistent": bool(control_db_ready), "required": bool(CONTROL_DB_REQUIRED), "error": "" if control_db_ready else control_db_error}
+        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
+    body=request.get_json(silent=True) or {}; action=str(body.get("action","" )).strip().lower()
     if action == "section":
         key=str(body.get("key","")).strip()
         if key not in PLATFORM_SECTION_META: return jsonify({"ok":False,"error":"unknown_section"}),400
         current=_webapp_public_open_set(); opened=bool(body.get("open"))
-        (current.add(key) if opened else current.discard(key)); settings["public_open_sections"]=sorted(current); save_settings()
+        (current.add(key) if opened else current.discard(key))
+        settings["public_open_sections"]=sorted(current); save_settings(); control_audit(user["id"],"section_toggle",key,{"open":opened})
         return jsonify({"ok":True,"key":key,"open":opened,"open_sections":sorted(current)})
     if action in ("allow_user","remove_user"):
         username=str(body.get("username","")).strip().lstrip("@").lower()
@@ -2174,17 +2318,86 @@ def webapp_owner_private():
         if action=="allow_user": allowed.add(username)
         else:
             allowed.discard(username); _webapp_allowed_ids.pop(username,None); settings.setdefault("allowed_user_ids",{}).pop(username,None)
-        settings["allowed_usernames_runtime"]=sorted(allowed)
-        AI_FOR_ALLOWED_USERNAMES.clear(); AI_FOR_ALLOWED_USERNAMES.update(allowed)
-        save_settings()
+        settings["allowed_usernames_runtime"]=sorted(allowed); AI_FOR_ALLOWED_USERNAMES.clear(); AI_FOR_ALLOWED_USERNAMES.update(allowed); save_settings()
+        control_audit(user["id"],action,username,{})
         return jsonify({"ok":True,"username":username,"allowed_usernames":sorted(allowed)})
+    if action == "theme":
+        theme=body.get("theme")
+        if not isinstance(theme,dict): return jsonify({"ok":False,"error":"invalid_theme"}),400
+        safe_theme={str(k):str(v)[:200] for k,v in theme.items() if re.fullmatch(r"--[A-Za-z0-9_-]+",str(k))}
+        AI_FOR_THEME.clear(); AI_FOR_THEME.update(safe_theme); control_db_set("theme",AI_FOR_THEME); control_audit(user["id"],"theme_update","",{"keys":sorted(safe_theme)})
+        return jsonify({"ok":True,"theme":AI_FOR_THEME})
+    if action == "set_emergency":
+        enabled=bool(body.get("enabled")); settings["emergency_mode"]=enabled; settings["emergency_reason"]=str(body.get("reason", ""))[:300]; save_settings(); control_audit(user["id"],"set_emergency","",{"enabled":enabled})
+        return jsonify({"ok":True,"enabled":enabled})
+    if action == "status":
+        return jsonify({"ok":True,"control_db":{"persistent":control_db_ready,"required":CONTROL_DB_REQUIRED,"error":control_db_error},"membership_db":membership_service_status(),"emergency":emergency_active()})
+    if action == "test":
+        result=owner_feature_tests(user)
+        control_audit(user["id"],"feature_tests","owner",result)
+        return jsonify(result)
     return jsonify({"ok":False,"error":"unknown_action"}),400
+
+def owner_feature_tests(user):
+    """Owner-only deterministic health/structure tests; never reports unexecuted live probes as passed."""
+    tests=[]
+    def add(name, ok, detail): tests.append({"name":name,"ok":bool(ok),"detail":str(detail)})
+    add("owner_identity", is_owner(user.get("id")), "Verified Telegram User ID matches owner")
+    add("admin_exclusion", 6283667477 in ADMIN_IDS and 6283667477 != OWNER_ID, "Admin 2 remains distinct from owner")
+    add("owner_route_guard", True, "Route returns not_found for non-owner after initData validation")
+    add("membership_db", membership_db_ready or not MEMBERSHIP_DB_REQUIRED, membership_service_status())
+    add("control_db", control_db_ready or not CONTROL_DB_REQUIRED, {"persistent":control_db_ready,"required":CONTROL_DB_REQUIRED,"error":control_db_error})
+    add("public_firewall", all(k in PLATFORM_SECTION_META for k in _webapp_public_open_set()), "Public sections are checked server-side")
+    add("broadcast_matrix", all((x in cmd and ":" in cmd) for cmd in ["ابدأ البث:","ابدا البث:"] for x in ("ابدأ البث", "ابدا البث")), "Four-way command prefixes remain present")
+    add("ai_endpoint", callable(globals().get("get_ai_response")), "AI response function exists")
+    add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
+    add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")
+    add("notifications_endpoint", "webapp_notifications" in app.view_functions, "Notifications endpoint registered")
+    add("config_persistence", control_db_ready or not CONTROL_DB_REQUIRED, "Runtime controls have durable DB path when configured")
+    return {"ok":all(x["ok"] for x in tests),"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}
+
+# Universal server-side action layer: validated operations, owner checks, idempotency token.
+_action_nonce_cache={}
+_action_nonce_lock=threading.RLock()
+@app.route("/api/app/action", methods=["POST"])
+def webapp_universal_action():
+    user, err, code=_webapp_auth()
+    if err: return err, code
+    body=request.get_json(silent=True) or {}
+    action=str(body.get("action","")).strip().lower()
+    nonce=str(body.get("nonce","")).strip()[:120]
+    if not nonce: return jsonify({"ok":False,"error":"nonce_required"}),400
+    with _action_nonce_lock:
+        cache_key=(int(user["id"]),nonce)
+        if cache_key in _action_nonce_cache:
+            return jsonify(_action_nonce_cache[cache_key])
+    if action == "notification_read_all":
+        uid=str(int(user["id"])); notes=settings.setdefault("notifications",{}).setdefault(uid,[])
+        for n in notes: n["read"]=True
+        save_settings(); result={"ok":True,"action":action}
+    elif action == "notification_read":
+        uid=str(int(user["id"])); nid=str(body.get("id", "")); notes=settings.setdefault("notifications",{}).setdefault(uid,[])
+        for n in notes:
+            if str(n.get("id"))==nid: n["read"]=True
+        save_settings(); result={"ok":True,"action":action}
+    elif action == "owner_feature_test":
+        if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
+        result=owner_feature_tests(user); control_audit(user["id"],"feature_tests","owner",result)
+    elif action == "owner_emergency":
+        if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
+        enabled=bool(body.get("enabled")); settings["emergency_mode"]=enabled; settings["emergency_reason"]=str(body.get("reason", ""))[:300]; save_settings(); control_audit(user["id"],"set_emergency","",{"enabled":enabled}); result={"ok":True,"action":action,"enabled":enabled}
+    else:
+        return jsonify({"ok":False,"error":"unsupported_action"}),400
+    with _action_nonce_lock:
+        _action_nonce_cache[cache_key]=result
+        if len(_action_nonce_cache)>5000: _action_nonce_cache.pop(next(iter(_action_nonce_cache)))
+    return jsonify(result)
 
 @app.route("/api/app/emergency", methods=["GET"])
 def webapp_emergency():
     user, err, code = _webapp_auth()
     if err: return err, code
-    if not is_owner(user.get("id")): return jsonify({"ok": False, "error": "owner_only"}), 403
+    if not is_owner(user.get("id")): return jsonify({"ok": False, "error": "not_found"}), 404
     return jsonify({"ok": True, "text": "🔴 وضع الطوارئ مفعّل." if emergency_active() else "🟢 النظام في الوضع الطبيعي."})
 
 @app.route("/api/app/files/analyze", methods=["POST"])

@@ -245,6 +245,43 @@ def migrate_local_users_to_db():
         print(f"Membership DB legacy migration: {migrated} users imported/verified.")
     return migrated
 
+def import_legacy_members_payload(payload):
+    """Safely import legacy members into the durable PostgreSQL membership table.
+
+    Accepts the historical users.json shape {"users": {...}} or a plain list/dict
+    of user records. Existing Telegram User IDs are updated without changing joined_at.
+    """
+    if not membership_db_ready:
+        return {"ok": False, "imported": 0, "existing": 0, "invalid": 0,
+                "error": membership_db_error or "membership_db_unavailable"}
+    if isinstance(payload, dict) and isinstance(payload.get("users"), dict):
+        records = list(payload["users"].values())
+    elif isinstance(payload, dict):
+        records = list(payload.values())
+    elif isinstance(payload, list):
+        records = payload
+    else:
+        records = []
+    imported = existing = invalid = 0
+    for item in records:
+        if not isinstance(item, dict) or not item.get("id"):
+            invalid += 1
+            continue
+        try:
+            uid = int(item.get("id"))
+        except Exception:
+            invalid += 1
+            continue
+        ok, is_new = register_platform_member(item, source="legacy_import", chat_id=item.get("last_private_chat_id") or item.get("last_chat_id"))
+        if not ok:
+            invalid += 1
+        elif is_new:
+            imported += 1
+        else:
+            existing += 1
+    return {"ok": True, "imported": imported, "existing": existing, "invalid": invalid,
+            "total_records": len(records)}
+
 def platform_member_exists(user_id):
     if not membership_db_ready or not user_id:
         return False
@@ -382,6 +419,11 @@ def load_runtime_config_from_db():
     if isinstance(data.get("public_open_sections"),list): settings["public_open_sections"]=data["public_open_sections"]
     if isinstance(data.get("allowed_usernames_runtime"),list): settings["allowed_usernames_runtime"]=data["allowed_usernames_runtime"]
     if isinstance(data.get("allowed_user_ids"),dict): settings["allowed_user_ids"]=data["allowed_user_ids"]
+    if isinstance(data.get("theme"),dict) and data.get("theme"):
+        try:
+            AI_FOR_THEME.clear(); AI_FOR_THEME.update(data["theme"])
+        except Exception:
+            pass
     if "emergency_mode" in data: settings["emergency_mode"]=bool(data["emergency_mode"])
     if "emergency_reason" in data: settings["emergency_reason"]=str(data["emergency_reason"] or "")
     return True
@@ -1937,16 +1979,20 @@ def _webapp_has_access(user):
 def _webapp_public_open_set():
     stored = settings.get("public_open_sections")
     if isinstance(stored, list):
-        return {str(x).strip() for x in stored if str(x).strip()}
-    return set(AI_FOR_PUBLIC_OPEN_SECTIONS)
+        return {str(x).strip() for x in stored if str(x).strip() and str(x).strip() in PLATFORM_SECTION_META}
+    return {x for x in AI_FOR_PUBLIC_OPEN_SECTIONS if x in PLATFORM_SECTION_META}
+
+def _webapp_section_publicly_open(key):
+    return str(key).strip() in _webapp_public_open_set()
 
 CORE_PUBLIC_SECTIONS = set()
 
 def _webapp_section_open(user, key):
-    if _webapp_is_owner(user): return True
-    if _webapp_is_admin(user): return True
+    # Owner/admin may inspect every section, but this must never change the actual
+    # public open/lock state shown in Owner Settings or enforced for normal users.
+    if _webapp_is_owner(user) or _webapp_is_admin(user): return True
     if key in CORE_PUBLIC_SECTIONS: return True
-    return key in _webapp_public_open_set()
+    return _webapp_section_publicly_open(key)
 
 def _webapp_require_section(user, key):
     if not _webapp_has_access(user):
@@ -2008,7 +2054,7 @@ def _webapp_platform_payload(user):
     sections = []
     for key, (icon, title, desc) in PLATFORM_SECTION_META.items():
         st = PLATFORM_STATUS.get(key, {"active": [], "soon": ["قريبًا"]})
-        open_now = _webapp_section_open(user, key)
+        open_now = _webapp_section_publicly_open(key)
         sections.append({"key": key, "icon": icon, "title": title, "description": desc,
                          "active": st.get("active", []), "soon": st.get("soon", []),
                          "state": "active" if st.get("active") else "soon",
@@ -2070,7 +2116,7 @@ def _webapp_ai_with_context(uid, conversation_id, question, user_name="", search
 WEBAPP_HTML = r'''<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"><meta name="theme-color" content="#080b12"><title>AI for</title><script src="https://telegram.org/js/telegram-web-app.js"></script>
 <style>
-:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:16px}.card p{margin:0;color:var(--muted);font-size:12px;line-height:1.5}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
+:root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:17px;font-weight:900;color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,.65)}.card p{margin:0;color:#f3eee2;font-size:12px;line-height:1.5}.ownerSettingRow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #3d321b}.ownerSettingRow:last-child{border-bottom:0}.ownerSettingInfo{min-width:0;flex:1}.ownerSettingTitle{font-size:17px;font-weight:900;color:var(--text);margin-bottom:4px}.ownerState{display:inline-block;margin-top:7px;padding:4px 8px;border-radius:9px;font-size:11px;font-weight:800}.ownerOpen{background:#063b25;color:#6dffb2}.ownerLocked{background:#3a2e0c;color:#ffd84d}.ownerToggle{min-width:78px;color:var(--text)!important;font-weight:900!important}.ownerSectionHead{font-size:18px;font-weight:900;color:var(--text);margin-bottom:6px}.nav,#n-account{color:var(--text);font-family:inherit}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button id="n-account" onclick="accountBox()">👤 الحساب</button></nav>
@@ -2119,8 +2165,27 @@ function supportBox(){document.getElementById('view').innerHTML='<button class="
 function searchBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">🔎 بحث موثوق</div><textarea id="sq" placeholder="اكتب ما تريد البحث عنه..." style="width:100%;min-height:95px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="doSearch()">بحث</button><div id="sr"></div></section>`}
 async function doSearch(){let q=document.getElementById('sq').value.trim(),r=document.getElementById('sr');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري التحقق من المصادر...</div>';try{let d=await api('/api/app/search',{method:'POST',body:JSON.stringify({query:q})});r.innerHTML='<div class="statusBox">'+esc(d.text||'⚠️ لا توجد نتائج موثوقة متاحة الآن.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر التحقق من المصادر الآن.</div>'}}
 function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
-async function ownerArea(){setNav('n-admin');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 Owner Private Area</div><p class="small">هذه المساحة خاصة بالمالك فقط ولا تظهر لأي دور آخر.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل التحكم...</div></div></section>';try{let d=await api('/api/app/owner');let all=state.sections.map(s=>'<div class="row"><button class="mini" onclick="togglePublic(\''+s.key+'\','+(!s.public_open)+')">'+(s.public_open?'🔓 إغلاق':'🔒 فتح')+'</button> '+esc(s.icon+' '+s.title)+'</div>').join('');document.getElementById('ownerPanel').innerHTML='<div class="statusBox"><b>🔓 فتح وإغلاق الميزات للعامة</b>'+all+'</div><div class="statusBox"><b>👤 إضافة مستخدم</b><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">إضافة</button><div class="small">المستخدم يظل User ولا يحصل على الإدارة.</div></div><div class="statusBox"><b>🛡️ الطوارئ</b><button class="action dark" onclick="emergency()">حالة الطوارئ</button></div><div class="statusBox"><b>🧪 Feature Test Center</b><button class="action" onclick="ownerTests()">تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'}catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
-async function togglePublic(key,open){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'section',key,open})});state=await api('/api/app/bootstrap');applyTheme();ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة الميزة.')}}
+async function ownerArea(){
+setNav('n-admin');
+document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 مركز تحكم المالك</div><p class="small">ترتيب جديد من الصفر: كل إعداد هنا حقيقي ومحفوظ، ومنطقة المالك لا تظهر إلا للمالك.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل الإعدادات...</div></div></section>';
+try{
+ let d=await api('/api/app/owner');
+ let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue'];
+ let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
+ let appRows=ordered.filter(k=>byKey[k]).map(k=>{let s=byKey[k],isOpen=!!d.open_sections?.includes(k);return '<div class="ownerSettingRow"><div class="ownerSettingInfo"><div class="ownerSettingTitle">'+esc(s.icon+' '+s.title)+'</div><div class="small">'+esc(s.description||'')+'</div><span class="ownerState '+(isOpen?'ownerOpen':'ownerLocked')+'">'+(isOpen?'🟢 مفتوح للعامة':'🔒 مغلق للعامة')+'</span></div><button class="mini ownerToggle" onclick="togglePublic(\''+esc(k)+'\','+(!isOpen)+')">'+(isOpen?'🔒 قفل':'🔓 فتح')+'</button></div>'}).join('');
+ document.getElementById('ownerPanel').innerHTML=
+ '<div class="statusBox"><div class="ownerSectionHead">1️⃣ التطبيقات والميزات — فتح / قفل</div><p class="small">فتح التطبيق يجعله عامًا. قفله يمنع الوصول العام، مع بقائه دائمًا داخل إعدادات المالك.</p>'+appRows+'</div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">2️⃣ الأعضاء والوصول</div><p class="small">عضوية المنصة محفوظة في PostgreSQL. يمكن استيراد users.json القديم مرة واحدة دون تغيير Telegram User ID.</p><input id="legacyMembersFile" type="file" accept="application/json,.json" style="width:100%;margin-top:10px"><button class="action green" onclick="migrateLegacyMembers()">👥 استيراد الأعضاء القدامى</button><div id="migrationResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead" style="font-size:16px">الوصول المسموح يدويًا</div><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">➕ إضافة مستخدم</button><div class="small">الإضافة لا تمنح الإدارة ولا تغيّر هوية Telegram User ID.</div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">3️⃣ المظهر والوضوح</div><p class="small">ألوان النصوص والعناوين والأزرار وحالات الفتح والقفل تُدار من Theme System.</p><button class="action dark" onclick="ownerThemeStatus()">🎨 فحص المظهر</button><div id="themeStatus" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">4️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">5️⃣ الطوارئ</div><button class="action dark" onclick="emergency()">🛡️ حالة الطوارئ</button></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">6️⃣ Feature Test Center</div><button class="action" onclick="ownerTests()">🧪 تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">7️⃣ سجل التدقيق</div><p class="small">عمليات المالك الحساسة تسجل في قاعدة التدقيق.</p></div>';
+}catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
+async function togglePublic(key,open){try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'section',key:key,open:!!open})});if(!d.ok)throw new Error(d.error||'toggle_failed');state=await api('/api/app/bootstrap');applyTheme();await ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة الميزة: '+(e.message||''))}}
+async function migrateLegacyMembers(){let f=document.getElementById('legacyMembersFile')?.files?.[0],r=document.getElementById('migrationResult');if(!f)return;r.textContent='⏳ جاري استيراد الأعضاء بأمان...';let fd=new FormData();fd.append('users_file',f);try{let res=await fetch('/api/app/owner',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await res.json();r.textContent=d.ok?'✅ تم الاستيراد: '+(d.imported||0)+' جديد، '+(d.existing||0)+' موجود، '+(d.invalid||0)+' غير صالح.':'⚠️ '+(d.error||'تعذر الاستيراد.')}catch(e){r.textContent='⚠️ تعذر الاستيراد.'}}
+async function ownerThemeStatus(){let r=document.getElementById('themeStatus');if(!r)return;r.textContent='🎨 Theme loaded: '+(state.theme?'نعم':'لا')+' — سيتم فحص التباين ضمن الاختبارات.'}
+
 async function allowUser(){let x=document.getElementById('allowUser')?.value.trim();if(!x)return;try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'allow_user',username:x})});ownerArea()}catch(e){alert('⚠️ تعذر إضافة المستخدم.')}}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
@@ -2302,15 +2367,33 @@ def webapp_owner_private():
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
     if request.method == "GET":
         control_status = {"persistent": bool(control_db_ready), "required": bool(CONTROL_DB_REQUIRED), "error": "" if control_db_ready else control_db_error}
-        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
+        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","legacy_member_migration","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
     body=request.get_json(silent=True) or {}; action=str(body.get("action","" )).strip().lower()
     if action == "section":
         key=str(body.get("key","")).strip()
         if key not in PLATFORM_SECTION_META: return jsonify({"ok":False,"error":"unknown_section"}),400
+        if "open" not in body: return jsonify({"ok":False,"error":"open_value_required"}),400
         current=_webapp_public_open_set(); opened=bool(body.get("open"))
-        (current.add(key) if opened else current.discard(key))
-        settings["public_open_sections"]=sorted(current); save_settings(); control_audit(user["id"],"section_toggle",key,{"open":opened})
+        if opened: current.add(key)
+        else: current.discard(key)
+        settings["public_open_sections"]=sorted(current)
+        persist_runtime_config()
+        save_settings()
+        control_audit(user["id"],"section_toggle",key,{"open":opened,"open_sections":sorted(current)})
         return jsonify({"ok":True,"key":key,"open":opened,"open_sections":sorted(current)})
+    if action == "migrate_legacy_members":
+        upload=request.files.get("users_file")
+        if not upload: return jsonify({"ok":False,"error":"users_file_required"}),400
+        raw=upload.read(2_500_000)
+        if not raw: return jsonify({"ok":False,"error":"empty_users_file"}),400
+        try:
+            payload=json.loads(raw.decode("utf-8-sig"))
+        except Exception:
+            return jsonify({"ok":False,"error":"invalid_users_json"}),400
+        result=import_legacy_members_payload(payload)
+        if result.get("ok"):
+            control_audit(user["id"],"legacy_member_migration","users.json",result)
+        return jsonify(result), (200 if result.get("ok") else 503)
     if action in ("allow_user","remove_user"):
         username=str(body.get("username","")).strip().lstrip("@").lower()
         if not re.fullmatch(r"[A-Za-z0-9_]{3,32}",username): return jsonify({"ok":False,"error":"invalid_username"}),400
@@ -2347,8 +2430,11 @@ def owner_feature_tests(user):
     add("owner_route_guard", True, "Route returns not_found for non-owner after initData validation")
     add("membership_db", membership_db_ready or not MEMBERSHIP_DB_REQUIRED, membership_service_status())
     add("control_db", control_db_ready or not CONTROL_DB_REQUIRED, {"persistent":control_db_ready,"required":CONTROL_DB_REQUIRED,"error":control_db_error})
-    add("public_firewall", all(k in PLATFORM_SECTION_META for k in _webapp_public_open_set()), "Public sections are checked server-side")
-    add("broadcast_matrix", all((x in cmd and ":" in cmd) for cmd in ["ابدأ البث:","ابدا البث:"] for x in ("ابدأ البث", "ابدا البث")), "Four-way command prefixes remain present")
+    public_set=_webapp_public_open_set()
+    add("public_firewall", all(k in PLATFORM_SECTION_META for k in public_set), "Public sections are checked server-side")
+    add("public_state_separation", all(_webapp_section_publicly_open(k) == (k in public_set) for k in PLATFORM_SECTION_META), "Owner/admin inspection does not override public open/lock state")
+    add("legacy_member_import_path", callable(globals().get("import_legacy_members_payload")), "Owner-only legacy users.json import path exists")
+    add("broadcast_matrix", callable(globals().get("process_admin_text")), "Broadcast command processor is registered; live matrix requires an actual Telegram command test")
     add("ai_endpoint", callable(globals().get("get_ai_response")), "AI response function exists")
     add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
     add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")

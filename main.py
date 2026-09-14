@@ -1,9 +1,9 @@
-import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io, secrets
+import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io, secrets, uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 from zoneinfo import ZoneInfo
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect, make_response
 from bs4 import BeautifulSoup
 
 try:
@@ -147,7 +147,10 @@ def load_json(path, default):
 DB_POOL_MIN = int(os.environ.get("AI_FOR_DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("AI_FOR_DB_POOL_MAX", "5"))
 DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
-DB_SCHEMA_VERSION = 2
+DB_SCHEMA_VERSION = 5
+WEB_IDENTITY_COOKIE = "ai_for_sid"
+WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
+
 
 def _db_connect_direct():
     if not DATABASE_URL or psycopg2 is None:
@@ -221,6 +224,31 @@ def _ensure_db_schema(cur):
             photo_updated_at TIMESTAMPTZ
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_web_accounts (
+            account_id UUID PRIMARY KEY,
+            display_name TEXT NOT NULL DEFAULT '',
+            username TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            status TEXT NOT NULL DEFAULT 'active',
+            role TEXT NOT NULL DEFAULT 'member',
+            session_token_hash TEXT NOT NULL UNIQUE,
+            profile_photo BYTEA,
+            profile_photo_mime TEXT,
+            photo_updated_at TIMESTAMPTZ,
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_web_accounts_username ON ai_for_web_accounts (lower(username))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_web_accounts_status ON ai_for_web_accounts (status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_web_accounts_created_at ON ai_for_web_accounts (created_at)")
+    for stmt in [
+        "ALTER TABLE ai_for_web_accounts ADD COLUMN IF NOT EXISTS profile_photo BYTEA",
+        "ALTER TABLE ai_for_web_accounts ADD COLUMN IF NOT EXISTS profile_photo_mime TEXT",
+        "ALTER TABLE ai_for_web_accounts ADD COLUMN IF NOT EXISTS photo_updated_at TIMESTAMPTZ",
+    ]:
+        cur.execute(stmt)
     # Non-destructive upgrades for databases created by earlier AI for versions.
     for stmt in [
         "ALTER TABLE ai_for_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member'",
@@ -233,6 +261,49 @@ def _ensure_db_schema(cur):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_username ON ai_for_members (lower(username))")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_status ON ai_for_members (membership_status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_joined_at ON ai_for_members (joined_at)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_external_apps (
+            app_id UUID PRIMARY KEY,
+            url TEXT NOT NULL UNIQUE,
+            canonical_url TEXT NOT NULL DEFAULT '',
+            name TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            icon_url TEXT NOT NULL DEFAULT '',
+            image_url TEXT NOT NULL DEFAULT '',
+            host TEXT NOT NULL DEFAULT '',
+            category TEXT NOT NULL DEFAULT 'external',
+            platform TEXT NOT NULL DEFAULT 'web',
+            public_open BOOLEAN NOT NULL DEFAULT FALSE,
+            enabled BOOLEAN NOT NULL DEFAULT TRUE,
+            clicks BIGINT NOT NULL DEFAULT 0,
+            unique_visits BIGINT NOT NULL DEFAULT 0,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_metadata_check TIMESTAMPTZ
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_conversations (
+            identity_key TEXT NOT NULL,
+            conversation_id TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            message_text TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (identity_key, conversation_id, seq)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_conversations_recent ON ai_for_conversations (identity_key, conversation_id, created_at)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_external_apps_public ON ai_for_external_apps (public_open, enabled)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_external_apps_created ON ai_for_external_apps (created_at)")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_external_app_visitors (
+            app_id UUID NOT NULL REFERENCES ai_for_external_apps(app_id) ON DELETE CASCADE,
+            visitor_key TEXT NOT NULL,
+            first_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (app_id, visitor_key)
+        )
+    """)
     cur.execute("""INSERT INTO ai_for_db_meta(key,value) VALUES('schema_version',%s)
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
     db_schema_version = DB_SCHEMA_VERSION
@@ -362,6 +433,111 @@ def list_platform_members(limit=100, offset=0, search=""):
         return []
     finally:
         _membership_db_release(conn)
+
+def _web_token_hash(token):
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+def _web_account_numeric_id(account_id):
+    """Stable positive internal integer for memory-only Web app conversation keys."""
+    raw = hashlib.sha256(str(account_id).encode("utf-8")).digest()[:8]
+    value = int.from_bytes(raw, "big") & ((1 << 62) - 1)
+    return value or 1
+
+def create_web_account(display_name="", username=""):
+    if not membership_db_ready and not init_membership_db():
+        return None, "database_unavailable"
+    token = secrets.token_urlsafe(48)
+    account_id = str(uuid.uuid4())
+    display_name = str(display_name or "").strip()[:80]
+    username = str(username or "").strip().lstrip("@").lower()[:32]
+    if username and not re.fullmatch(r"[a-z0-9_]{3,32}", username):
+        return None, "invalid_username"
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return None, "database_unavailable"
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                if username:
+                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1", (username,))
+                    if cur.fetchone():
+                        return None, "username_taken"
+                cur.execute("""INSERT INTO ai_for_web_accounts
+                    (account_id,display_name,username,session_token_hash)
+                    VALUES (%s,%s,%s,%s)""", (account_id,display_name,username,_web_token_hash(token)))
+        return {"account_id": account_id, "display_name": display_name, "username": username, "role": "member", "token": token}, None
+    except Exception as e:
+        print(f"Web account create error: {e}")
+        return None, "database_error"
+    finally:
+        _membership_db_release(conn)
+
+def get_web_account(token):
+    if not token or not membership_db_ready:
+        return None
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn: return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""SELECT account_id,display_name,username,created_at,last_seen,status,role
+                              FROM ai_for_web_accounts WHERE session_token_hash=%s LIMIT 1""", (_web_token_hash(token),))
+                row = cur.fetchone()
+                if not row or row["status"] != "active": return None
+                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s", (row["account_id"],))
+                return row
+    except Exception as e:
+        print(f"Web account lookup error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
+
+def save_web_profile_photo(account_id, raw, mime):
+    if not membership_db_ready or not account_id or not raw: return False
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_for_web_accounts SET profile_photo=%s,profile_photo_mime=%s,photo_updated_at=NOW(),last_seen=NOW() WHERE account_id=%s AND status='active'",(psycopg2.Binary(raw),mime,str(account_id)))
+                return cur.rowcount==1
+    except Exception as e:
+        print(f"Web account photo save error: {e}")
+        return False
+    finally:
+        _membership_db_release(conn)
+
+def get_web_profile_photo(account_id):
+    if not membership_db_ready or not account_id:return None
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT profile_photo,profile_photo_mime FROM ai_for_web_accounts WHERE account_id=%s AND status='active'",(str(account_id),))
+                row=cur.fetchone()
+                return row if row and row[0] else None
+    except Exception as e:
+        print(f"Web account photo get error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
+
+def _web_account_user(row):
+    aid = str(row.get("account_id"))
+    return {
+        "id": _web_account_numeric_id(aid),
+        "first_name": str(row.get("display_name") or "AI for user"),
+        "username": str(row.get("username") or ""),
+        "platform_account_id": aid,
+        "auth_type": "web",
+        "platform_member": True,
+        "platform_member_new": False,
+    }
 
 def membership_service_status():
     """Return a safe, JSON-serializable snapshot of the membership database service."""
@@ -1969,6 +2145,7 @@ PLATFORM_SECTION_META = {
     "lab": ("🧪", "ZYN LAB", "الوظائف الحالية والقادمة"),
     "autocore": ("🚀", "AUTO CORE", "وكيل أعمال مستقل — بحث، تفاوض، تنفيذ وتسوية"),
     "revenue": ("💰", "مركز الدخل", "الاشتراكات والإعلانات والخدمات التجارية بأمان"),
+    "external_apps": ("🔗", "التطبيقات الخارجية", "بوابة تطبيقات خارجية — Pi Browser والويب"),
 }
 PLATFORM_STATUS = {
     "ai": {"active": ["دردشة AI", "بحث موثوق", "تحليل", "كتابة", "تلخيص", "ترجمة", "برمجة"], "soon": ["توليد الصور داخل التطبيق", "الفيديو", "الصوت"]},
@@ -1993,6 +2170,7 @@ PLATFORM_STATUS = {
     "lab": {"active": ["AI", "Search", "Pi", "Moderation", "Daily", "Broadcast", "Mini App"], "soon": ["Marketplace", "Stores", "Community", "Messaging", "Media", "Membership", "Rewards"]},
     "autocore": {"active": ["واجهة مستقلة داخل AI for", "فصل الكود والصلاحيات", "تشغيل مستقل عن واجهة AI for", "Kill Switch / سجل تدقيق مخطط"], "soon": ["ربط الخدمة المستقلة", "التنفيذ التجاري الفعلي", "طبقة التسوية الآمنة"]},
     "revenue": {"active": ["Revenue Safety Gate", "منع المقامرة والـspam والنقرات الوهمية", "إخفاء البيانات المالية الشخصية", "تمييز المحتوى المدفوع بوضوح"], "soon": ["ZYNMART+", "شبكات الإعلانات", "Rewarded Ads وفق سياسات المزود", "Promoted Products/Stores", "خطط Business", "الفوترة والتسوية الآمنة"]},
+    "external_apps": {"active": ["إضافة تطبيق خارجي بالرابط", "استخراج الاسم والهوية البصرية عند توفرها", "فتح مباشر للتطبيق", "تتبع زيارات الوصول داخل AI for"], "soon": ["برامج إحالة واتفاقيات Revenue Share", "Featured Apps", "خطط Business للتطبيقات"]},
 }
 
 def _webapp_data_check(init_data):
@@ -2076,10 +2254,15 @@ def _webapp_is_admin(user):
     return bool(user and int(user.get("id", 0)) in ADMIN_IDS)
 
 def _webapp_has_access(user):
-    # Owner and Admin always have platform access for private inspection/control.
-    # Public open/lock state must never be used to block the Owner.
+    # Platform entry is intentionally global for authenticated users.
+    # Public availability is controlled per section below; opening a section in
+    # Owner Settings must therefore make it visible to every registered user,
+    # whether they entered from Telegram WebApp or a normal/Pi Browser.
     if _webapp_is_owner(user) or _webapp_is_admin(user):
         return True
+    if user and user.get("auth_type") in ("web", "telegram"):
+        return True
+    # Legacy allowlist remains available as a fallback for older/private flows.
     try:
         uid=int(user.get("id",0))
         with _webapp_access_lock:
@@ -2096,7 +2279,8 @@ def _webapp_public_open_set():
 def _webapp_section_publicly_open(key):
     return str(key).strip() in _webapp_public_open_set()
 
-CORE_PUBLIC_SECTIONS = set()
+# Core account access is always available; service sections still require Owner public-open state.
+CORE_PUBLIC_SECTIONS = {"account"}
 
 def _webapp_section_open(user, key):
     # Owner/admin may inspect every section, but this must never change the actual
@@ -2136,16 +2320,18 @@ def _webapp_file_analysis(name, content, kind=""):
 def _webapp_auth():
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user = _webapp_data_check(init_data)
-    if not user:
-        return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
-    ok, is_new = register_platform_member(user, source="webapp")
-    if not _webapp_has_access(user):
-        return None, jsonify({"ok": False, "error": "access_denied"}), 403
-    if MEMBERSHIP_DB_REQUIRED and not ok:
-        return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
-    user["platform_member"] = bool(ok)
-    user["platform_member_new"] = bool(is_new)
-    return user, None, None
+    if user:
+        ok, is_new = register_platform_member(user, source="webapp")
+        if MEMBERSHIP_DB_REQUIRED and not ok:
+            return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
+        user["platform_member"] = bool(ok)
+        user["platform_member_new"] = bool(is_new)
+        user["auth_type"] = "telegram"
+        return user, None, None
+    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE, ""))
+    if account:
+        return _web_account_user(account), None, None
+    return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
 
 def _webapp_set_menu_button():
     global webapp_menu_configured
@@ -2161,6 +2347,175 @@ def _webapp_set_menu_button():
         else:
             print("Telegram Mini App menu configuration failed.")
 
+def _external_app_safe_url(raw):
+    raw = str(raw or "").strip()
+    if not re.match(r"^https?://", raw, re.I):
+        raw = "https://" + raw
+    try:
+        parsed = urlparse(raw)
+        host = (parsed.hostname or "").lower().strip(".")
+        if parsed.scheme not in ("http", "https") or not host:
+            return None
+        if host in {"localhost", "localhost.localdomain"} or host.endswith(".local") or host.endswith(".internal"):
+            return None
+        # Reject literal and DNS-resolved private/loopback/link-local targets so
+        # the metadata fetcher cannot be used as a server-side request proxy.
+        import ipaddress, socket
+        try:
+            ips = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                ips = [ipaddress.ip_address(x[4][0]) for x in socket.getaddrinfo(host, None)]
+            except Exception:
+                ips = []
+        for ip in ips:
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+                return None
+        clean = f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+        if parsed.query: clean += "?" + parsed.query
+        return clean
+    except Exception:
+        return None
+
+def _external_app_fetch_metadata(url):
+    safe = _external_app_safe_url(url)
+    if not safe:
+        return {"ok": False, "error": "invalid_or_unsafe_url"}
+    current = safe
+    for _ in range(2):
+        try:
+            r = requests.get(current, headers={"User-Agent":"AI-for/1.0 (+external-app-metadata)"}, timeout=5, allow_redirects=False, stream=True)
+            if r.status_code in (301,302,303,307,308):
+                nxt = r.headers.get("Location", "")
+                safe_nxt = _external_app_safe_url(nxt)
+                if not safe_nxt: break
+                current = safe_nxt
+                continue
+            if r.status_code >= 400:
+                return {"ok": False, "error": f"http_{r.status_code}", "canonical_url": current}
+            content_type = str(r.headers.get("Content-Type", "")).lower()
+            if "html" not in content_type:
+                host = (urlparse(current).hostname or "").lower()
+                return {"ok": True, "canonical_url": current, "host": host, "name": host, "description": "", "icon_url": current.rstrip("/") + "/favicon.ico", "image_url": "", "category": "external", "platform": "pi_browser" if host.endswith(".pinet.com") else "web"}
+            raw = r.raw.read(600000, decode_content=True)
+            text = raw.decode("utf-8", errors="replace")
+            soup = BeautifulSoup(text, "html.parser")
+            def meta(*names):
+                for n in names:
+                    tag = soup.find("meta", attrs={"property": n}) or soup.find("meta", attrs={"name": n})
+                    if tag and tag.get("content"):
+                        return str(tag.get("content")).strip()
+                return ""
+            title = meta("og:site_name", "og:title") or (soup.title.get_text(" ", strip=True) if soup.title else "")
+            desc = meta("og:description", "description")
+            icon = meta("og:logo", "twitter:image")
+            image = meta("og:image", "twitter:image")
+            host = (urlparse(current).hostname or "").lower()
+            if not icon:
+                icon = urljoin(current, "/favicon.ico")
+            else:
+                icon = urljoin(current, icon)
+            if image:
+                image = urljoin(current, image)
+            return {"ok": True, "canonical_url": current, "host": host, "name": title[:160] or host, "description": desc[:500], "icon_url": icon[:1000], "image_url": image[:1000], "category": "pi_app" if host.endswith(".pinet.com") else "external", "platform": "pi_browser" if host.endswith(".pinet.com") else "web"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)[:200]}
+    return {"ok": False, "error": "redirect_metadata_failed"}
+
+def _external_apps_list(public_only=False, limit=100):
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn: return []
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            if public_only:
+                cur.execute("SELECT app_id,url,canonical_url,name,description,icon_url,image_url,host,category,platform,public_open,enabled,clicks,unique_visits,created_at,updated_at FROM ai_for_external_apps WHERE public_open=TRUE AND enabled=TRUE ORDER BY created_at ASC LIMIT %s", (max(1,min(int(limit),200)),))
+            else:
+                cur.execute("SELECT app_id,url,canonical_url,name,description,icon_url,image_url,host,category,platform,public_open,enabled,clicks,unique_visits,created_at,updated_at FROM ai_for_external_apps ORDER BY created_at DESC LIMIT %s", (max(1,min(int(limit),200)),))
+            rows=cur.fetchall()
+            return [dict(x) for x in rows]
+    except Exception as e:
+        print(f"External apps list error: {e}")
+        return []
+    finally:
+        _membership_db_release(conn)
+
+def _external_app_add(url):
+    safe = _external_app_safe_url(url)
+    if not safe: return {"ok":False,"error":"invalid_or_unsafe_url"}
+    meta = _external_app_fetch_metadata(safe)
+    canonical = meta.get("canonical_url") or safe
+    info = {"name":meta.get("name") or (urlparse(canonical).hostname or "External App"), "description":meta.get("description", ""), "icon_url":meta.get("icon_url", ""), "image_url":meta.get("image_url", ""), "host":meta.get("host", urlparse(canonical).hostname or ""), "category":meta.get("category","external"), "platform":meta.get("platform","web")}
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn: return {"ok":False,"error":"database_unavailable"}
+        app_id=str(uuid.uuid4())
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""INSERT INTO ai_for_external_apps(app_id,url,canonical_url,name,description,icon_url,image_url,host,category,platform) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT(url) DO UPDATE SET canonical_url=EXCLUDED.canonical_url,name=EXCLUDED.name,description=EXCLUDED.description,icon_url=EXCLUDED.icon_url,image_url=EXCLUDED.image_url,host=EXCLUDED.host,category=EXCLUDED.category,platform=EXCLUDED.platform,updated_at=NOW(),last_metadata_check=NOW() RETURNING *""", (app_id,safe,canonical,info["name"],info["description"],info["icon_url"],info["image_url"],info["host"],info["category"],info["platform"]))
+                row=cur.fetchone()
+                return {"ok":True,"app":dict(row),"metadata_ok":bool(meta.get("ok")),"metadata_error":meta.get("error","")}
+    except Exception as e:
+        return {"ok":False,"error":str(e)[:250]}
+    finally:
+        _membership_db_release(conn)
+
+def _external_app_set_open(app_id, opened):
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return {"ok":False,"error":"database_unavailable"}
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("UPDATE ai_for_external_apps SET public_open=%s,updated_at=NOW() WHERE app_id=%s RETURNING app_id,url,name,public_open,enabled", (bool(opened),str(app_id)))
+                row=cur.fetchone()
+                if not row:return {"ok":False,"error":"app_not_found"}
+                return {"ok":True,"app":dict(row)}
+    except Exception as e:return {"ok":False,"error":str(e)[:200]}
+    finally:_membership_db_release(conn)
+
+def _external_app_delete(app_id):
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return {"ok":False,"error":"database_unavailable"}
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM ai_for_external_apps WHERE app_id=%s", (str(app_id),))
+                if cur.rowcount==0:return {"ok":False,"error":"app_not_found"}
+                return {"ok":True,"app_id":str(app_id)}
+    except Exception as e:return {"ok":False,"error":str(e)[:200]}
+    finally:_membership_db_release(conn)
+
+def _external_app_track_open(app_id, visitor_key=""):
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT canonical_url FROM ai_for_external_apps WHERE app_id=%s AND public_open=TRUE AND enabled=TRUE FOR UPDATE", (str(app_id),))
+                row=cur.fetchone()
+                if not row:return None
+                cur.execute("UPDATE ai_for_external_apps SET clicks=clicks+1,updated_at=NOW() WHERE app_id=%s", (str(app_id),))
+                if visitor_key:
+                    cur.execute("INSERT INTO ai_for_external_app_visitors(app_id,visitor_key) VALUES(%s,%s) ON CONFLICT DO NOTHING", (str(app_id),str(visitor_key)[:200]))
+                    if cur.rowcount:
+                        cur.execute("UPDATE ai_for_external_apps SET unique_visits=unique_visits+1 WHERE app_id=%s", (str(app_id),))
+                return dict(row)
+    except Exception as e:
+        print(f"External app tracking error: {e}")
+        return None
+    finally:_membership_db_release(conn)
+
+def _external_apps_payload(user):
+    rows=_external_apps_list(public_only=not (_webapp_is_owner(user) or _webapp_is_admin(user)))
+    out=[]
+    for r in rows:
+        out.append({"app_id":str(r.get("app_id")),"name":r.get("name") or r.get("host") or "External App","description":r.get("description") or "تطبيق خارجي","url":r.get("canonical_url") or r.get("url"),"icon_url":r.get("icon_url") or "","image_url":r.get("image_url") or "","host":r.get("host") or "","platform":r.get("platform") or "web","category":r.get("category") or "external","public_open":bool(r.get("public_open")),"enabled":bool(r.get("enabled")),"clicks":int(r.get("clicks") or 0),"unique_visits":int(r.get("unique_visits") or 0)})
+    return out
+
 def _webapp_platform_payload(user):
     sections = []
     for key, (icon, title, desc) in PLATFORM_SECTION_META.items():
@@ -2172,9 +2527,10 @@ def _webapp_platform_payload(user):
                          "public_open": open_now})
     role = "owner" if _webapp_is_owner(user) else "admin" if _webapp_is_admin(user) else "user"
     visible = [s for s in sections if s["public_open"] or role in ("owner", "admin")]
-    return {"ok": True, "user": {"id": int(user.get("id")), "first_name": user.get("first_name", ""), "username": user.get("username", "")},
+    return {"ok": True, "user": {"id": int(user.get("id")), "first_name": user.get("first_name", ""), "username": user.get("username", ""), "platform_account_id": user.get("platform_account_id"), "auth_type": user.get("auth_type", "telegram")},
             "role": role, "sections": visible,
             "links": {"zynmart": ZYNMART_APP_URL, "auto_core": AUTO_CORE_URL},
+            "external_apps": _external_apps_payload(user),
             "assets": {"zynmart_logo": ZYNMART_LOGO_DATA},
             "theme": AI_FOR_THEME,
             "access": {"public_open_sections": sorted(_webapp_public_open_set()), "owner_private": _webapp_is_owner(user)},
@@ -2189,20 +2545,79 @@ webapp_conversations = {}
 webapp_conversations_lock = threading.RLock()
 WEBAPP_MAX_HISTORY = 20
 
+def _webapp_identity_key(user_or_id):
+    if isinstance(user_or_id, dict):
+        if user_or_id.get("auth_type") == "web" and user_or_id.get("platform_account_id"):
+            return "web:" + str(user_or_id.get("platform_account_id"))
+        return "tg:" + str(user_or_id.get("id", ""))
+    return "tg:" + str(user_or_id)
+
 def _webapp_history(uid, conversation_id):
-    key = (int(uid), str(conversation_id or "default"))
+    identity_key = _webapp_identity_key(uid)
+    cid = str(conversation_id or "default")[:100]
+    conn = None
+    try:
+        if membership_db_ready:
+            conn = _membership_db_connect()
+            if conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT role,message_text FROM ai_for_conversations WHERE identity_key=%s AND conversation_id=%s ORDER BY seq ASC LIMIT %s", (identity_key,cid,WEBAPP_MAX_HISTORY))
+                    rows=cur.fetchall()
+                    if rows:
+                        return [{"role":r.get("role"),"text":str(r.get("message_text", ""))[:4000]} for r in rows]
+    except Exception as e:
+        print(f"AI conversation load error: {e}")
+    finally:
+        _membership_db_release(conn)
+    key=(identity_key,cid)
     with webapp_conversations_lock:
         return list(webapp_conversations.get(key, []))
 
 def _webapp_save_history(uid, conversation_id, history):
-    key = (int(uid), str(conversation_id or "default"))
+    identity_key = _webapp_identity_key(uid)
+    cid = str(conversation_id or "default")[:100]
+    trimmed=list(history[-WEBAPP_MAX_HISTORY:])
+    conn=None
+    saved=False
+    try:
+        if membership_db_ready:
+            conn=_membership_db_connect()
+            if conn:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM ai_for_conversations WHERE identity_key=%s AND conversation_id=%s", (identity_key,cid))
+                        for seq,item in enumerate(trimmed,1):
+                            role=str(item.get("role",""))[:20]
+                            text=str(item.get("text",""))[:4000]
+                            if role in ("user","assistant") and text:
+                                cur.execute("INSERT INTO ai_for_conversations(identity_key,conversation_id,seq,role,message_text) VALUES(%s,%s,%s,%s,%s)", (identity_key,cid,seq,role,text))
+                saved=True
+    except Exception as e:
+        print(f"AI conversation save error: {e}")
+    finally:
+        _membership_db_release(conn)
+    key=(identity_key,cid)
     with webapp_conversations_lock:
-        webapp_conversations[key] = history[-WEBAPP_MAX_HISTORY:]
+        webapp_conversations[key]=trimmed
+    return saved
 
 def _webapp_new_conversation(uid, conversation_id):
-    key = (int(uid), str(conversation_id or "default"))
+    identity_key=_webapp_identity_key(uid)
+    cid=str(conversation_id or "default")[:100]
+    conn=None
+    try:
+        if membership_db_ready:
+            conn=_membership_db_connect()
+            if conn:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute("DELETE FROM ai_for_conversations WHERE identity_key=%s AND conversation_id=%s", (identity_key,cid))
+    except Exception as e:
+        print(f"AI conversation reset error: {e}")
+    finally:
+        _membership_db_release(conn)
     with webapp_conversations_lock:
-        webapp_conversations.pop(key, None)
+        webapp_conversations.pop((identity_key,cid),None)
 
 def _webapp_public_history(uid, conversation_id):
     history = _webapp_history(uid, conversation_id)
@@ -2230,7 +2645,7 @@ WEBAPP_HTML = r'''<!doctype html>
 :root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:17px;font-weight:900;color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,.65)}.card p{margin:0;color:#f3eee2;font-size:12px;line-height:1.5}.ownerSettingRow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #3d321b}.ownerSettingRow:last-child{border-bottom:0}.ownerSettingInfo{min-width:0;flex:1}.ownerSettingTitle{font-size:17px;font-weight:900;color:var(--text);margin-bottom:4px}.ownerState{display:inline-block;margin-top:7px;padding:4px 8px;border-radius:9px;font-size:11px;font-weight:800}.ownerOpen{background:#063b25;color:#6dffb2}.ownerLocked{background:#3a2e0c;color:#ffd84d}.ownerToggle{min-width:78px;color:var(--text)!important;font-weight:900!important}.ownerSectionHead{font-size:18px;font-weight:900;color:var(--text);margin-bottom:6px}.nav,#n-account{color:var(--text);font-family:inherit}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}
 </style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
-<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button id="n-account" onclick="accountBox()">👤 الحساب</button></nav>
+<nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button class="nav" id="n-account" onclick="accountBox()"><b>👤</b>الحساب</button></nav>
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){opts.headers=Object.assign({'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||''},opts.headers||{});let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}
@@ -2238,21 +2653,28 @@ function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.rem
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
 function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
-function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
+function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
-function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;if(!s.public_open){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
+function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;let privileged=(state.role==='owner'||state.role==='admin');if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
 function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.map(card).join('')}</div>`}
+async function renderExternalApps(){
+ document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔗 التطبيقات الخارجية</div><p class="small">تطبيقات مستقلة يمكن فتحها مباشرة. هوية التطبيق تُستخرج من بياناته العامة عند الإضافة عندما تكون متاحة.</p><div id="externalAppsView" class="grid"></div></section>`;
+ let r=document.getElementById('externalAppsView'); let apps=state.external_apps||[];
+ if(!apps.length){r.innerHTML='<div class="statusBox">لا توجد تطبيقات مفتوحة حاليًا.</div>';return}
+ r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
+}
+async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
 function renderAutoCore(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🚀 AUTO CORE</div><p class="small">Autonomous Business Agent — واجهة احترافية داخل AI for مع بقاء محرك Auto Core مستقلًا.</p><div class="statusBox autocore"><div class="metricGrid"><div class="metric">الحالة<b class="ok">ARCHITECTURE READY</b></div><div class="metric">الاستقلال<b class="info">SEPARATE CORE</b></div><div class="metric">التشغيل<b>AUTONOMOUS</b></div><div class="metric">الأمان<b class="ok">ISOLATED</b></div></div></div><div class="statusBox"><div class="row">🔎 Scout — البحث عن الفرص والعملاء</div><div class="row">🤝 Negotiate — فهم الطلب والتفاوض</div><div class="row">⚙️ Execute — تنفيذ المهمة كاملة</div><div class="row">📦 Deliver — التسليم</div><div class="row">💳 Settle — التسوية عبر طبقة دفع آمنة</div><div class="row">📜 Audit — سجل تدقيق</div></div><button class="action green" onclick="openAutoCore()">🚀 فتح Auto Core المستقل</button><p class="small">لا يتم تشغيل الوكيل من هذه الواجهة. تشغيله المستقل يظل خارج AI for؛ هذه البطاقة هي بوابة الوصول فقط.</p></section>`}
 function renderRevenue(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">💰 مركز الدخل</div><p class="small">منظومة ربح مبنية على خدمات حقيقية، مع حواجز تمنع المقامرة والخداع والـspam والنقرات الوهمية.</p><div class="statusBox safe"><div class="row">🛡️ Revenue Safety Gate — <span class="ok">مفعّل</span></div><div class="row">🎰 مقامرة/رهان مالي — <span class="danger">ممنوع</span></div><div class="row">🤖 نقرات إعلانية مصطنعة — <span class="danger">ممنوع</span></div><div class="row">📢 إعلان مدفوع مخفي — <span class="danger">ممنوع</span></div><div class="row">🔐 كشف بيانات الدفع الشخصية — <span class="danger">ممنوع</span></div></div><div class="statusBox"><div class="row">⭐ ZYNMART+ — 🚧 قريبًا</div><div class="row">📣 Advertising Network — 🚧 قريبًا وفق شروط المزود</div><div class="row">🎁 Rewarded Ads — 🚧 قريبًا وفق شروط المزود</div><div class="row">🏪 Promoted Stores/Products — 🚧 قريبًا</div><div class="row">🏢 Business Plans — 🚧 قريبًا</div></div></section>`}
 async function piStatus(){try{let d=await api('/api/app/pi');alert(d.text||'تعذر الحصول على بيانات Pi الموثوقة الآن.')}catch(e){alert('⚠️ لا توجد بيانات موثوقة متاحة الآن. لن نخمن.')}}
-function renderChatShell(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('ai')">← رجوع</button><section class="detail"><div class="sectionTitle">💬 AI Workspace</div><p class="small">محادثة مستمرة مع سياق، بحث موثوق عند الحاجة، وإمكانية تحويل الهدف إلى مهمة.</p><div class="toolbar"><button class="mini" onclick="newConversation()">🆕 جديد</button><button class="mini" onclick="regenerateLast()">🔄 إعادة</button><button class="mini" onclick="taskBox()">🎯 مهمة</button></div><div id="chat" class="chat"></div><textarea id="q" placeholder="اكتب سؤالك أو هدفك..." style="width:100%;min-height:105px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><div class="toolbar"><button class="action" id="sendBtn" onclick="askAI()">إرسال</button><button class="action dark" id="stopBtn" onclick="stopAI()" disabled>⏹ إيقاف</button></div></section>`;loadChatHistory()}
+function renderChatShell(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('ai')">← رجوع</button><section class="detail"><div class="sectionTitle">💬 AI Workspace</div><p class="small">محادثة مستمرة مع سياق، بحث موثوق عند الحاجة، وإمكانية تحويل الهدف إلى مهمة.</p><div class="statusBox"><div style="display:flex;align-items:center;justify-content:space-between;gap:10px"><b>🛡️ Evidence Mode</b><label style="display:flex;gap:7px;align-items:center;font-size:12px"><input id="evidenceMode" type="checkbox"> تحقق بالمصادر قبل الإجابة</label></div><div class="small" style="margin-top:6px">عند التفعيل يتم طلب مصدر موثوق قبل تمرير السؤال إلى محرك AI.</div></div><div class="toolbar"><button class="mini" onclick="newConversation()">🆕 جديد</button><button class="mini" onclick="regenerateLast()">🔄 إعادة</button><button class="mini" onclick="taskBox()">🎯 مهمة</button></div><div id="chat" class="chat"></div><textarea id="q" placeholder="اكتب سؤالك أو هدفك..." style="width:100%;min-height:105px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><div class="toolbar"><button class="action" id="sendBtn" onclick="askAI()">إرسال</button><button class="action dark" id="stopBtn" onclick="stopAI()" disabled>⏹ إيقاف</button></div></section>`;loadChatHistory()}
 let activeController=null;
 async function loadChatHistory(){try{let d=await api('/api/app/ai/history',{method:'POST',body:JSON.stringify({conversation_id:conversationId})});for(const item of (d.history||[]))addMsg(item.role==='user'?'user':'assistant',item.text)}catch(e){}}
 function aiBox(){renderChatShell()}
 function addMsg(role,text){let c=document.getElementById('chat');if(!c)return;let d=document.createElement('div');d.className='msg '+(role==='user'?'user':'ai');d.textContent=text;c.appendChild(d);c.scrollTop=c.scrollHeight}
-async function askAI(regenerate=false){let q=document.getElementById('q'),btn=document.getElementById('sendBtn'),stop=document.getElementById('stopBtn'),chat=document.getElementById('chat');let text=q?.value.trim()||'';if(!regenerate&&!text)return;if(regenerate){let msgs=chat?.querySelectorAll('.msg.user');text=msgs?.length?msgs[msgs.length-1].textContent:''}if(!text)return;if(!regenerate)q.value='';btn.disabled=true;stop.disabled=false;btn.textContent='جاري التحقق...';if(!regenerate)addMsg('user',text);let checking=document.createElement('div');checking.className='checking';checking.id='checking';checking.textContent='⏳ جاري التحقق والبحث عند الحاجة...';chat.appendChild(checking);activeController=new AbortController();try{let d=await api('/api/app/ai',{method:'POST',signal:activeController.signal,body:JSON.stringify({question:text,conversation_id:conversationId,regenerate})});document.getElementById('checking')?.remove();addMsg('assistant',d.text||'⚠️ لا توجد إجابة موثوقة الآن.')}catch(e){document.getElementById('checking')?.remove();if(e.name!=='AbortError')addMsg('assistant','⚠️ تعذر الحصول على إجابة موثوقة الآن. لن أخمّن.')}finally{activeController=null;btn.disabled=false;stop.disabled=true;btn.textContent='إرسال';q?.focus()}}
+async function askAI(regenerate=false){let q=document.getElementById('q'),btn=document.getElementById('sendBtn'),stop=document.getElementById('stopBtn'),chat=document.getElementById('chat');let text=q?.value.trim()||'';if(!regenerate&&!text)return;if(regenerate){let msgs=chat?.querySelectorAll('.msg.user');text=msgs?.length?msgs[msgs.length-1].textContent:''}if(!text)return;if(!regenerate)q.value='';btn.disabled=true;stop.disabled=false;btn.textContent='جاري التحقق...';if(!regenerate)addMsg('user',text);let checking=document.createElement('div');checking.className='checking';checking.id='checking';checking.textContent='⏳ جاري التحقق والبحث عند الحاجة...';chat.appendChild(checking);activeController=new AbortController();try{let d=await api('/api/app/ai',{method:'POST',signal:activeController.signal,body:JSON.stringify({question:text,conversation_id:conversationId,regenerate,evidence_mode:!!document.getElementById('evidenceMode')?.checked})});document.getElementById('checking')?.remove();addMsg('assistant',d.text||'⚠️ لا توجد إجابة موثوقة الآن.')}catch(e){document.getElementById('checking')?.remove();if(e.name!=='AbortError')addMsg('assistant','⚠️ تعذر الحصول على إجابة موثوقة الآن. لن أخمّن.')}finally{activeController=null;btn.disabled=false;stop.disabled=true;btn.textContent='إرسال';q?.focus()}}
 function stopAI(){if(activeController){activeController.abort();activeController=null;document.getElementById('checking')?.remove();let b=document.getElementById('sendBtn'),s=document.getElementById('stopBtn');if(b){b.disabled=false;b.textContent='إرسال'}if(s)s.disabled=true}}
 function regenerateLast(){askAI(true)}
 async function newConversation(){conversationId='c_'+Date.now()+'_'+Math.random().toString(36).slice(2);localStorage.setItem('ai_for_conversation_id',conversationId);try{await api('/api/app/ai/new',{method:'POST',body:JSON.stringify({conversation_id:conversationId})})}catch(e){}renderChatShell()}
@@ -2271,8 +2693,8 @@ async function translateRun(){let r=document.getElementById('transResult');try{l
 function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-Telegram-Init-Data':tg?.initData||''}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
 async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري الرفع...</div>';let fd=new FormData();fd.append('photo',f);try{let x=await fetch('/api/app/account/photo',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await x.json();r.innerHTML='<div class="statusBox">'+(d.ok?'✅ تم حفظ الصورة في قاعدة البيانات الدائمة.':'⚠️ تعذر حفظ الصورة: '+esc(d.error||'unknown'))+'</div>';if(d.ok)setTimeout(accountBox,300)}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر رفع الصورة.</div>'}}
 async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<section class="hero"><h1>🔔 الإشعارات</h1><p>تحديثات النظام والميزات والإشعارات الخاصة بك.</p></section><div id="notes" class="detail"><div class="statusBox">⏳ جاري التحميل...</div></div>';try{let d=await api('/api/app/notifications');document.getElementById('notes').innerHTML=(d.notifications||[]).slice().reverse().map(n=>'<div class="statusBox"><b>'+esc(n.title||'إشعار')+'</b><div class="row">'+esc(n.text||'')+'</div><div class="small">'+esc(n.time||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد إشعارات.</div>';document.getElementById('notifyBadge').textContent=d.unread?'🔔 '+d.unread:'الإشعارات';if(d.unread)await api('/api/app/notifications',{method:'POST',body:JSON.stringify({action:'read_all'})})}catch(e){document.getElementById('notes').innerHTML='<div class="statusBox">⚠️ تعذر تحميل الإشعارات.</div>'}}
-function securityBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">Telegram initData: <span class="ok">تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
-function supportBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'support\')">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم وحالة النظام</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">Telegram WebApp: <span class="ok">متصل</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?'<span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div></section>'}
+function securityBox(){let auth=state?.user?.auth_type==='web'?'حساب Web + جلسة آمنة':'Telegram initData';document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">المصادقة: <span class="ok">'+esc(auth)+' — تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
+function supportBox(){let channel=state?.user?.auth_type==='web'?'متصفح Web / Pi Browser':'Telegram WebApp';document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'support\')">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم وحالة النظام</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">قناة الدخول: <span class="ok">'+esc(channel)+'</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?' <span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div></section>'}
 function searchBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">🔎 بحث موثوق</div><textarea id="sq" placeholder="اكتب ما تريد البحث عنه..." style="width:100%;min-height:95px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="doSearch()">بحث</button><div id="sr"></div></section>`}
 async function doSearch(){let q=document.getElementById('sq').value.trim(),r=document.getElementById('sr');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري التحقق من المصادر...</div>';try{let d=await api('/api/app/search',{method:'POST',body:JSON.stringify({query:q})});r.innerHTML='<div class="statusBox">'+esc(d.text||'⚠️ لا توجد نتائج موثوقة متاحة الآن.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر التحقق من المصادر الآن.</div>'}}
 function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
@@ -2281,19 +2703,23 @@ setNav('n-admin');
 document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 مركز تحكم المالك</div><p class="small">ترتيب جديد من الصفر: كل إعداد هنا حقيقي ومحفوظ، ومنطقة المالك لا تظهر إلا للمالك.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل الإعدادات...</div></div></section>';
 try{
  let d=await api('/api/app/owner');
- let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue'];
- let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
+ let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps'];
+ async function toggleExternalApp(id,open){try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_toggle',app_id:id,open:!!open})});if(!d.ok)throw new Error(d.error||'toggle_failed');state=await api('/api/app/bootstrap');applyTheme();await ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة التطبيق: '+(e.message||''))}}
+async function deleteExternalApp(id){if(!confirm('حذف التطبيق من AI for؟'))return;try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_delete',app_id:id})});if(!d.ok)throw new Error(d.error||'delete_failed');state=await api('/api/app/bootstrap');await ownerArea()}catch(e){alert('⚠️ تعذر حذف التطبيق: '+(e.message||''))}}
+let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
  let appRows=ordered.filter(k=>byKey[k]).map(k=>{let s=byKey[k],isOpen=!!d.open_sections?.includes(k);return '<div class="ownerSettingRow"><div class="ownerSettingInfo"><div class="ownerSettingTitle">'+esc(s.icon+' '+s.title)+'</div><div class="small">'+esc(s.description||'')+'</div><span class="ownerState '+(isOpen?'ownerOpen':'ownerLocked')+'">'+(isOpen?'🟢 مفتوح للعامة':'🔒 مغلق للعامة')+'</span></div><button class="mini ownerToggle" onclick="togglePublic(\''+esc(k)+'\','+(!isOpen)+')">'+(isOpen?'🔒 قفل':'🔓 فتح')+'</button></div>'}).join('');
  document.getElementById('ownerPanel').innerHTML=
  '<div class="statusBox"><div class="ownerSectionHead">1️⃣ التطبيقات والميزات — فتح / قفل</div><p class="small">فتح التطبيق يجعله عامًا. قفله يمنع الوصول العام، مع بقائه دائمًا داخل إعدادات المالك.</p>'+appRows+'</div>'+
  '<div class="statusBox"><div class="ownerSectionHead">2️⃣ الأعضاء والوصول</div><p class="small">PostgreSQL هو المصدر الدائم والوحيد لعضوية AI for. كل مستخدم يبدأ/يتفاعل مع البوت يُسجّل بمعرّف Telegram الثابت.</p><button class="action green" onclick="loadMembers()">👥 معاينة أعضاء PostgreSQL</button><div id="membersResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead" style="font-size:16px">الوصول المسموح يدويًا</div><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">➕ إضافة مستخدم</button><div class="small">الإضافة لا تمنح الإدارة ولا تغيّر هوية Telegram User ID.</div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">3️⃣ المظهر والوضوح</div><p class="small">ألوان النصوص والعناوين والأزرار وحالات الفتح والقفل تُدار من Theme System.</p><button class="action dark" onclick="ownerThemeStatus()">🎨 فحص المظهر</button><div id="themeStatus" class="small"></div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">4️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">5️⃣ الطوارئ</div><button class="action dark" onclick="emergency()">🛡️ حالة الطوارئ</button></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">6️⃣ Feature Test Center</div><button class="action" onclick="ownerTests()">🧪 تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">7️⃣ سجل التدقيق</div><p class="small">عمليات المالك الحساسة تسجل في قاعدة التدقيق.</p></div>';
+ '<div class="statusBox"><div class="ownerSectionHead">3️⃣ التطبيقات الخارجية</div><p class="small">أدخل رابط التطبيق فقط. AI for يحاول استخراج الاسم والهوية البصرية من البيانات العامة، ثم يحفظ التطبيق في PostgreSQL. التطبيق يبقى مغلقًا حتى تفتحه أنت.</p><input id="externalAppUrl" placeholder="https://example.pinet.com" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action green" onclick="addExternalApp()">➕ إضافة تطبيق بالرابط</button><div id="externalAppsOwnerResult" class="small"></div></div>'+ '<div class="statusBox"><div class="ownerSectionHead">4️⃣ المظهر والوضوح</div><p class="small">ألوان النصوص والعناوين والأزرار وحالات الفتح والقفل تُدار من Theme System.</p><button class="action dark" onclick="ownerThemeStatus()">🎨 فحص المظهر</button><div id="themeStatus" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">5️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">6️⃣ الطوارئ</div><button class="action dark" onclick="emergency()">🛡️ حالة الطوارئ</button></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">7️⃣ Feature Test Center</div><button class="action" onclick="ownerTests()">🧪 تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">8️⃣ سجل التدقيق</div><p class="small">عمليات المالك الحساسة تسجل في قاعدة التدقيق.</p></div>';
+ try{let ed=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_apps'})});let box=document.getElementById('externalAppsOwnerResult');if(box){box.innerHTML=(ed.apps||[]).map(a=>`<div class="statusBox"><b>${esc(a.name)}</b><div class="small">${esc(a.url)} · ${esc(a.platform)} · ${a.public_open?'🟢 مفتوح':'🔒 مغلق'} · ${Number(a.clicks||0)} وصول</div><div class="toolbar"><button class="mini" onclick="toggleExternalApp('${esc(a.app_id)}',${!a.public_open})">${a.public_open?'🔒 قفل':'🔓 فتح'}</button><button class="mini" onclick="deleteExternalApp('${esc(a.app_id)}')">🗑️ حذف</button></div></div>`).join('')||'لا توجد تطبيقات مضافة.'}}catch(e){}
 }catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
 async function togglePublic(key,open){try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'section',key:key,open:!!open})});if(!d.ok)throw new Error(d.error||'toggle_failed');state=await api('/api/app/bootstrap');applyTheme();await ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة الميزة: '+(e.message||''))}}
+async function addExternalApp(){let x=document.getElementById('externalAppUrl')?.value.trim();let r=document.getElementById('externalAppsOwnerResult');if(!x||!r)return;r.textContent='⏳ جاري التحقق من الرابط واستخراج هوية التطبيق...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_add',url:x})});if(!d.ok)throw new Error(d.error||'add_failed');r.innerHTML='✅ تمت إضافة التطبيق: '+esc(d.app?.name||'')+' — '+(d.metadata_ok?'تم استخراج الهوية العامة.':'تم الحفظ مع هوية أساسية؛ يمكن تحديثها لاحقًا.')+'<br><button class="mini" onclick="ownerArea()">تحديث القائمة</button>'}catch(e){r.textContent='⚠️ تعذر إضافة التطبيق: '+(e.message||'')}}
 async function ownerThemeStatus(){let r=document.getElementById('themeStatus');if(!r)return;r.textContent='🎨 Theme loaded: '+(state.theme?'نعم':'لا')+' — سيتم فحص التباين ضمن الاختبارات.'}
 
 async function allowUser(){let x=document.getElementById('allowUser')?.value.trim();if(!x)return;try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'allow_user',username:x})});ownerArea()}catch(e){alert('⚠️ تعذر إضافة المستخدم.')}}
@@ -2303,11 +2729,68 @@ async function memberRole(id,role){try{await api('/api/app/owner',{method:'POST'
 async function dbHealth(){let r=document.getElementById('dbHealthResult');if(!r)return;r.textContent='⏳ فحص الاتصال والجداول...';try{let d=await api('/api/app/db/health');r.innerHTML=(d.ok?'✅ PostgreSQL يعمل بشكل سليم.':'⚠️ قاعدة البيانات تحتاج مراجعة.')+'<br>'+esc(JSON.stringify({ping:d.ping,schema:d.membership?.schema_version,pool:d.membership?.pool_max,last_ok:d.membership?.last_ok_at,error:d.membership?.error||d.control?.error||''}))}catch(e){r.textContent='❌ '+e.message}}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
-async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري الاختبار...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});r.innerHTML=(d.tests||[]).map(x=>'<div>'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات.'}}
+async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري تنفيذ مركز الاختبار الشامل...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});let z=d.summary||{};let head=(d.ok?'🟢 الاختبار الشامل ناجح':'🔴 توجد اختبارات تحتاج مراجعة')+'<br><b>النتيجة: '+esc(z.passed||0)+' / '+esc(z.total||0)+' ناجحة</b><br><span class="small">وقت التنفيذ: '+esc(d.executed_at||'—')+'</span><hr style="border:0;border-top:1px solid #3d321b;margin:10px 0">';r.innerHTML=head+(d.tests||[]).map(x=>'<div class="row">'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(typeof x.detail==='object'?JSON.stringify(x.detail):x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات: '+(e.message||'')}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function start(){try{state=await api('/api/app/bootstrap');applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove()}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='يجب فتح AI for من Telegram';msg='هذه الصفحة تحتاج Telegram WebApp. افتح AI for من زر البوت داخل Telegram، وليس من رابط المتصفح مباشرة.'}else if(!tg.initData){title='لم تصل بيانات Telegram';msg='Telegram WebApp لم يرسل initData. أغلق الصفحة وافتح AI for من زر البوت داخل Telegram من جديد.'}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من Telegram';msg='وصلت بيانات Telegram لكن الخادم رفض التحقق منها. راجع BOT_TOKEN في Render وتأكد أنه يخص البوت الذي يفتح AI for.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
+async function start(){try{state=await api('/api/app/bootstrap');applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();['n-ai','n-search','n-notify','n-more'].forEach(id=>{let el=document.getElementById(id);if(el)el.style.display='none'});}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(!tg.initData){title='لم تصل بيانات Telegram';msg='لم تصل بيانات Telegram؛ إذا كنت تفتح المنصة من المتصفح العادي، ارجع للصفحة الرئيسية وسجّل حساب Web.'}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من Telegram';msg='وصلت بيانات Telegram لكن الخادم رفض التحقق منها. راجع BOT_TOKEN في Render وتأكد أنه يخص البوت الذي يفتح AI for.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
 </script></body></html>
 '''
+
+PLATFORM_HTML = r"""<!doctype html>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><title>AI for — Web3 Platform</title>
+<style>
+:root{--bg:#071018;--panel:#0d1822;--line:#1e3443;--text:#f4f8fb;--muted:#a9bac7;--accent:#49e6a1}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0%,#123026 0,#071018 42%,#050a0f 100%);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}.brand{font-size:25px;font-weight:800}.badge{font-size:12px;border:1px solid #285543;color:var(--accent);padding:7px 10px;border-radius:999px;background:#0b1d17}.hero{padding:48px 0 28px}.hero h1{font-size:clamp(34px,7vw,68px);line-height:1.05;margin:0 0 18px}.hero h1 span{color:var(--accent)}.hero p{font-size:18px;line-height:1.8;color:var(--muted);max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;color:#04110b;background:var(--accent);padding:13px 18px;border-radius:13px;font-weight:800}.btn.alt{color:var(--text);background:#102131;border:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{background:rgba(13,24,34,.88);border:1px solid var(--line);border-radius:18px;padding:20px}.icon{font-size:28px}.card h3{margin:10px 0 7px}.card p{margin:0;color:var(--muted);line-height:1.7}.section{margin-top:34px}.section h2{font-size:25px}.road{display:grid;gap:10px}.step{display:flex;gap:12px;align-items:flex-start;background:#0b151e;border:1px solid var(--line);padding:14px;border-radius:14px}.num{min-width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#123529;color:var(--accent);font-weight:800}.foot{padding:30px 0;color:#8195a3;font-size:13px}
+</style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Web3 Platform Foundation</div></header>
+<section class="hero"><h1>AI for <span>Web3</span></h1><p>منصة مستقلة قابلة للتوسع تجمع الذكاء الاصطناعي والخدمات الرقمية والهوية والمنظومة المحلية في بنية واحدة. هذه طبقة المنصة، بينما يبقى بوت Telegram وخدماته الأساسية مستقلًا.</p><div class="actions"><button class="btn" onclick="showRegister()">إنشاء حساب AI for</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="registerBox" class="card" style="display:none;margin-top:18px;max-width:620px"><h3>إنشاء حساب المنصة</h3><p>سجّل حسابك في AI for. تسجيل الحساب لا يعني فتح الخدمات؛ الوصول العام يبقى مغلقًا حتى يفتحه المالك.</p><input id="displayName" placeholder="الاسم المعروض" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><input id="webUsername" placeholder="اسم مستخدم اختياري" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><button class="btn" onclick="registerWeb()">تسجيل الحساب</button><div id="regMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
+<section class="grid"><div class="card"><div class="icon">🧠</div><h3>AI Center</h3><p>محرك الذكاء والخدمات مع قابلية إضافة مزايا وأدوات جديدة.</p></div><div class="card"><div class="icon">🔐</div><h3>Identity & Access</h3><p>هوية وصلاحيات منفصلة عن الواجهة العامة مع حماية منطقة المالك.</p></div><div class="card"><div class="icon">🗄️</div><h3>Persistent Core</h3><p>الإعدادات والعضويات والبيانات الحساسة مصممة لتكون محفوظة في PostgreSQL.</p></div><div class="card"><div class="icon">⛓️</div><h3>Web3 Ready</h3><p>طبقة قابلة لإضافة الهوية والمحافظ والخدمات اللامركزية لاحقًا دون كسر الأساس.</p></div></section>
+<section class="section" id="architecture"><h2>البنية</h2><div class="road"><div class="step"><div class="num">1</div><div><b>Web3 Platform</b><br><span style="color:var(--muted)">الموقع والحساب ولوحة التحكم والإعدادات والخدمات.</span></div></div><div class="step"><div class="num">2</div><div><b>Core & PostgreSQL</b><br><span style="color:var(--muted)">مصدر دائم للإعدادات والعضويات والصلاحيات والسجل.</span></div></div><div class="step"><div class="num">3</div><div><b>Telegram Bot</b><br><span style="color:var(--muted)">مسار مستقل يحافظ على سلوكه ووظائفه الحالية.</span></div></div><div class="step"><div class="num">4</div><div><b>AI for Local</b><br><span style="color:var(--muted)">الطبقة القادمة لـ SoloHost وTermux بعد تثبيت المنصة.</span></div></div></div></section>
+<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for — البناء التدريجي مع الحفاظ على الخدمات الأساسية.</div></main><script>async function showRegister(){const m=document.getElementById("registerBox");m.style.display="block";try{const r=await fetch("/api/platform/me");if(r.ok){location.href="/app"}}catch(e){}}async function registerWeb(){const msg=document.getElementById("regMsg");msg.textContent="⏳ جاري إنشاء الحساب...";try{const r=await fetch("/api/platform/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({display_name:document.getElementById("displayName").value,username:document.getElementById("webUsername").value})});const d=await r.json();if(!r.ok)throw new Error(d.error||"register_failed");msg.textContent="✅ تم تسجيل الحساب. الوصول إلى الخدمات يبقى مغلقًا حتى يفتحها المالك.";setTimeout(()=>location.href="/app",500)}catch(e){msg.textContent="⚠️ تعذر إنشاء الحساب: "+e.message}}</script></body></html>"""
+
+@app.route("/api/platform/register", methods=["POST"])
+def platform_register():
+    """Create a direct Web account. This is separate from Telegram identity."""
+    body = request.get_json(silent=True) or {}
+    display_name = str(body.get("display_name", "")).strip()
+    username = str(body.get("username", "")).strip()
+    account, error = create_web_account(display_name, username)
+    if error:
+        status = 503 if error == "database_unavailable" else 409 if error == "username_taken" else 400
+        return jsonify({"ok": False, "error": error}), status
+    resp = make_response(jsonify({"ok": True, "account": {k: account[k] for k in ("account_id","display_name","username","role")}}), 201)
+    resp.set_cookie(WEB_IDENTITY_COOKIE, account["token"], max_age=WEB_IDENTITY_MAX_AGE, httponly=True, secure=True, samesite="Lax")
+    return resp
+
+@app.route("/api/platform/me", methods=["GET"])
+def platform_me():
+    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE, ""))
+    if not account:
+        return jsonify({"ok": False, "error": "not_authenticated"}), 401
+    return jsonify({"ok": True, "account": {"account_id": str(account["account_id"]), "display_name": account["display_name"], "username": account["username"], "role": account["role"]}})
+
+@app.route("/", methods=["GET"])
+def public_home():
+    """Public entry point for AI for. Never routes through Telegram auth."""
+    return redirect("/platform", code=302)
+
+@app.route("/manifest.webmanifest", methods=["GET"])
+def platform_manifest():
+    """Small Web3/mobile manifest so AI for behaves like a first-class web app in mobile browsers."""
+    manifest = {
+        "name": "AI for",
+        "short_name": "AI for",
+        "description": "AI for Web3 Platform",
+        "start_url": "/platform",
+        "scope": "/",
+        "display": "standalone",
+        "orientation": "portrait-primary",
+        "prefer_related_applications": False,
+        "icons": []
+    }
+    return jsonify(manifest), 200, {"Cache-Control": "no-store"}
+
+@app.route("/platform", methods=["GET"])
+def platform_home():
+    ensure_background_services()
+    return PLATFORM_HTML, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])
 def webapp():
@@ -2344,15 +2827,18 @@ def webapp_ai():
     question = str(body.get("question", "")).strip()
     conversation_id = str(body.get("conversation_id", "default"))[:100]
     regenerate = bool(body.get("regenerate"))
+    evidence_mode = bool(body.get("evidence_mode"))
     if regenerate:
-        history = _webapp_history(user.get("id"), conversation_id)
+        history = _webapp_history(user, conversation_id)
         if history and history[-1].get("role") == "assistant": history = history[:-1]
         if history and history[-1].get("role") == "user": question = str(history[-1].get("text", ""))
-        _webapp_save_history(user.get("id"), conversation_id, history[:-1] if history else [])
+        _webapp_save_history(user, conversation_id, history[:-1] if history else [])
     if not question or len(question) > 4000: return jsonify({"ok": False, "error": "invalid_question"}), 400
     try:
-        search_res = search_official(question) if needs_fresh_search(question) else ""
-        reply = _webapp_ai_with_context(user.get("id"), conversation_id, question, user.get("first_name", ""), search_context=search_res)
+        search_res = search_official(question) if (evidence_mode or needs_fresh_search(question)) else ""
+        if evidence_mode and not search_res:
+            return jsonify({"ok": False, "text": "⚠️ وضع Evidence Mode مفعّل، لكن تعذر الحصول على مصدر موثوق الآن."}), 503
+        reply = _webapp_ai_with_context(user, conversation_id, question, user.get("first_name", ""), search_context=search_res)
         return jsonify({"ok": True, "text": reply or AI_PRIVATE_FAILURE_MESSAGE})
     except Exception as e:
         print(f"WebApp AI error: {e}")
@@ -2395,7 +2881,7 @@ def webapp_ai_new():
     if denied[0]: return denied
     body = request.get_json(silent=True) or {}
     conversation_id = str(body.get("conversation_id", "default"))[:100]
-    _webapp_new_conversation(user.get("id"), conversation_id)
+    _webapp_new_conversation(user, conversation_id)
     return jsonify({"ok": True})
 
 @app.route("/api/app/ai/history", methods=["POST"])
@@ -2406,7 +2892,7 @@ def webapp_ai_history():
     if denied[0]: return denied
     body = request.get_json(silent=True) or {}
     conversation_id = str(body.get("conversation_id", "default"))[:100]
-    return jsonify({"ok": True, "history": _webapp_public_history(user.get("id"), conversation_id)})
+    return jsonify({"ok": True, "history": _webapp_public_history(user, conversation_id)})
 
 @app.route("/api/app/tools", methods=["POST"])
 def webapp_tools():
@@ -2459,7 +2945,8 @@ def webapp_account_photo():
     raw=uploaded.read(2_000_000); mime=(uploaded.mimetype or "image/jpeg").lower()
     if not raw: return jsonify({"ok":False,"error":"empty_photo"}),400
     if mime not in ("image/jpeg","image/png","image/webp"): return jsonify({"ok":False,"error":"unsupported_image"}),400
-    if not save_profile_photo(user.get("id"),raw,mime):
+    saved = save_web_profile_photo(user.get("platform_account_id"), raw, mime) if user.get("auth_type") == "web" else save_profile_photo(user.get("id"), raw, mime)
+    if not saved:
         return jsonify({"ok":False,"error":"photo_persistence_unavailable"}),503
     return jsonify({"ok":True,"photo_url":"/api/app/account/photo"})
 
@@ -2467,7 +2954,7 @@ def webapp_account_photo():
 def webapp_account_photo_get():
     user, err, code=_webapp_auth()
     if err: return err, code
-    row=get_profile_photo(user.get("id"))
+    row=get_web_profile_photo(user.get("platform_account_id")) if user.get("auth_type") == "web" else get_profile_photo(user.get("id"))
     if not row: return jsonify({"ok":False,"error":"photo_not_found"}),404
     from flask import send_file
     return send_file(io.BytesIO(bytes(row[0])),mimetype=row[1] or "image/jpeg",max_age=0,download_name="profile")
@@ -2502,6 +2989,20 @@ def webapp_owner_private():
         control_status = {"persistent": bool(control_db_ready), "required": bool(CONTROL_DB_REQUIRED), "error": "" if control_db_ready else control_db_error}
         return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
     body=request.get_json(silent=True) or {}; action=str(body.get("action","" )).strip().lower()
+    if action == "external_app_add":
+        result=_external_app_add(body.get("url", ""))
+        if result.get("ok"): control_audit(user["id"],"external_app_add",str(result["app"].get("app_id")),{"url":result["app"].get("url"),"name":result["app"].get("name")})
+        return jsonify(result), (200 if result.get("ok") else 400)
+    if action == "external_app_toggle":
+        result=_external_app_set_open(body.get("app_id", ""), bool(body.get("open")))
+        if result.get("ok"): control_audit(user["id"],"external_app_toggle",str(result["app"].get("app_id")),{"open":bool(body.get("open"))})
+        return jsonify(result), (200 if result.get("ok") else 400)
+    if action == "external_app_delete":
+        result=_external_app_delete(body.get("app_id", ""))
+        if result.get("ok"): control_audit(user["id"],"external_app_delete",str(body.get("app_id")),{})
+        return jsonify(result), (200 if result.get("ok") else 400)
+    if action == "external_apps":
+        return jsonify({"ok":True,"apps":_external_apps_payload(user)})
     if action == "section":
         key=str(body.get("key","")).strip()
         if key not in PLATFORM_SECTION_META: return jsonify({"ok":False,"error":"unknown_section"}),400
@@ -2570,6 +3071,7 @@ def owner_feature_tests(user):
     public_set=_webapp_public_open_set()
     add("public_firewall", all(k in PLATFORM_SECTION_META for k in public_set), "Public sections are checked server-side")
     add("public_state_separation", all(_webapp_section_publicly_open(k) == (k in public_set) for k in PLATFORM_SECTION_META), "Owner/admin inspection does not override public open/lock state")
+    add("external_apps_architecture", all(callable(globals().get(x)) for x in ("_external_app_add","_external_app_set_open","_external_app_delete","_external_app_track_open")), "External Apps Hub uses PostgreSQL, Owner controls, and unique visitor tracking")
     add("legacy_member_store_removed", "import_legacy_members_payload" not in globals(), "Legacy local member store is not part of the runtime path")
     add("broadcast_matrix", callable(globals().get("process_admin_text")), "Broadcast command processor is registered; live matrix requires an actual Telegram command test")
     add("ai_endpoint", callable(globals().get("get_ai_response")), "AI response function exists")
@@ -2577,7 +3079,29 @@ def owner_feature_tests(user):
     add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")
     add("notifications_endpoint", "webapp_notifications" in app.view_functions, "Notifications endpoint registered")
     add("config_persistence", control_db_ready or not CONTROL_DB_REQUIRED, "Runtime controls have durable DB path when configured")
-    return {"ok":all(x["ok"] for x in tests),"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}
+    # Route registration integrity: detect accidental route removal/duplication at runtime.
+    required_routes={
+        "webapp_platform_register":"/api/platform/register",
+        "webapp_platform_me":"/api/platform/me",
+        "webapp_bootstrap":"/api/app/bootstrap",
+        "webapp_ai":"/api/app/ai",
+        "webapp_search":"/api/app/search",
+        "webapp_owner_private":"/api/app/owner",
+        "webapp_universal_action":"/api/app/action",
+        "webapp_db_health":"/api/app/db/health",
+        "webapp_external_apps":"/api/app/external-apps",
+        "webapp_external_app_open":"/api/app/external-apps/open"
+    }
+    for endpoint, path in required_routes.items():
+        add("route:"+path, endpoint in app.view_functions, "Registered endpoint: "+endpoint)
+    add("feature_test_center", callable(globals().get("owner_feature_tests")) and "webapp_owner_private" in app.view_functions, "Owner-only Feature Test Center is wired to the protected Owner route")
+    add("universal_action_owner_test", "webapp_universal_action" in app.view_functions, "Universal Action Layer contains the Owner feature-test action")
+    add("web_identity_cookie", bool(WEB_IDENTITY_COOKIE and WEB_IDENTITY_MAX_AGE > 0), "Web identity cookie has a bounded lifetime")
+    add("external_apps_public_state_separation", callable(globals().get("_external_apps_payload")) and callable(globals().get("_external_app_set_open")), "External app public visibility is controlled separately from Owner inspection")
+    add("conversation_persistence", callable(globals().get("_webapp_save_history")) and callable(globals().get("_webapp_history")), "Persistent conversation helpers are present")
+    passed=sum(1 for x in tests if x["ok"])
+    failed=len(tests)-passed
+    return {"ok":failed==0,"summary":{"total":len(tests),"passed":passed,"failed":failed},"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}
 
 # Universal server-side action layer: validated operations, owner checks, idempotency token.
 _action_nonce_cache={}
@@ -2615,6 +3139,17 @@ def webapp_universal_action():
         _action_nonce_cache[cache_key]=result
         if len(_action_nonce_cache)>5000: _action_nonce_cache.pop(next(iter(_action_nonce_cache)))
     return jsonify(result)
+
+@app.route("/api/app/external-apps/<app_id>/open", methods=["POST"])
+def webapp_external_app_open(app_id):
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    denied=_webapp_require_section(user,"external_apps")
+    if denied[0]: return denied
+    visitor_key=str(user.get("platform_account_id") or user.get("id") or "")
+    row=_external_app_track_open(app_id,visitor_key)
+    if not row: return jsonify({"ok":False,"error":"app_unavailable"}),404
+    return jsonify({"ok":True,"url":row.get("canonical_url")})
 
 @app.route("/api/app/emergency", methods=["GET"])
 def webapp_emergency():
@@ -2855,8 +3390,9 @@ def handle_callback(data):
     elif action == "admin_back":
         show_admin_panel(chat_id)
 
-@app.route("/", methods=["GET"])
+@app.route("/health", methods=["GET"])
 def index():
+    """Lightweight health endpoint; the public root belongs to the AI for platform."""
     ensure_background_services()
     return "Zynmart Bot Status: Online", 200
 

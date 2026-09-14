@@ -363,6 +363,17 @@ def list_platform_members(limit=100, offset=0, search=""):
     finally:
         _membership_db_release(conn)
 
+def membership_service_status():
+    """Return a safe, JSON-serializable snapshot of the membership database service."""
+    return {
+        "required": bool(MEMBERSHIP_DB_REQUIRED),
+        "ready": bool(membership_db_ready),
+        "schema_version": int(DB_SCHEMA_VERSION),
+        "pool": bool(membership_db_pool is not None),
+        "last_ok_at": db_last_ok_at or None,
+        "error": str(membership_db_error or "")[:500],
+    }
+
 def set_platform_member_status(user_id, status):
     if status not in ("active","banned","suspended"): return False
     conn=None

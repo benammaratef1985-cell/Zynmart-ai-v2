@@ -147,7 +147,7 @@ def load_json(path, default):
 DB_POOL_MIN = int(os.environ.get("AI_FOR_DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("AI_FOR_DB_POOL_MAX", "5"))
 DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
-DB_SCHEMA_VERSION = 5
+DB_SCHEMA_VERSION = 6
 WEB_IDENTITY_COOKIE = "ai_for_sid"
 WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
 
@@ -293,6 +293,20 @@ def _ensure_db_schema(cur):
             PRIMARY KEY (identity_key, conversation_id, seq)
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_nft_projects (
+            project_id UUID PRIMARY KEY,
+            owner_identity TEXT NOT NULL,
+            name TEXT NOT NULL DEFAULT '',
+            description TEXT NOT NULL DEFAULT '',
+            collection_name TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'draft',
+            metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_projects_owner ON ai_for_nft_projects (owner_identity, updated_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_conversations_recent ON ai_for_conversations (identity_key, conversation_id, created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_external_apps_public ON ai_for_external_apps (public_open, enabled)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_external_apps_created ON ai_for_external_apps (created_at)")
@@ -2382,6 +2396,59 @@ def _webapp_set_menu_button():
         else:
             print("Telegram Mini App menu configuration failed.")
 
+def _nft_project_create(user, name='', description='', collection_name=''):
+    """Create an NFT Studio draft; assets/minting remain future features until a real path exists."""
+    identity = _webapp_identity_key(user)
+    project_id = str(uuid.uuid4())
+    conn = None
+    try:
+        if not membership_db_ready:
+            return {"ok": False, "error": "database_unavailable"}
+        conn = _membership_db_connect()
+        if not conn:
+            return {"ok": False, "error": "database_unavailable"}
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO ai_for_nft_projects
+                    (project_id, owner_identity, name, description, collection_name, status, metadata)
+                    VALUES (%s,%s,%s,%s,%s,'draft',%s)""",
+                    (project_id, identity, str(name or '')[:160], str(description or '')[:2000],
+                     str(collection_name or '')[:160], json.dumps({}, ensure_ascii=False)))
+        return {"ok": True, "project": {"project_id": project_id, "name": str(name or '')[:160],
+                "description": str(description or '')[:2000], "collection_name": str(collection_name or '')[:160],
+                "status": "draft"}}
+    except Exception as e:
+        print(f"NFT project create error: {e}")
+        return {"ok": False, "error": "nft_project_create_failed"}
+    finally:
+        _membership_db_release(conn)
+
+def _nft_projects_list(user):
+    identity = _webapp_identity_key(user)
+    conn = None
+    try:
+        if not membership_db_ready:
+            return {"ok": False, "error": "database_unavailable", "projects": []}
+        conn = _membership_db_connect()
+        if not conn:
+            return {"ok": False, "error": "database_unavailable", "projects": []}
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""SELECT project_id,name,description,collection_name,status,created_at,updated_at
+                           FROM ai_for_nft_projects WHERE owner_identity=%s ORDER BY updated_at DESC LIMIT 100""", (identity,))
+            rows = cur.fetchall()
+        projects=[]
+        for r in rows:
+            projects.append({"project_id": str(r["project_id"]), "name": r["name"], "description": r["description"],
+                             "collection_name": r["collection_name"], "status": r["status"],
+                             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                             "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None})
+        return {"ok": True, "projects": projects}
+    except Exception as e:
+        print(f"NFT projects list error: {e}")
+        return {"ok": False, "error": "nft_projects_list_failed", "projects": []}
+    finally:
+        _membership_db_release(conn)
+
 def _external_app_safe_url(raw):
     raw = str(raw or "").strip()
     if not re.match(r"^https?://", raw, re.I):
@@ -2692,7 +2759,7 @@ function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_op
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
-function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;let privileged=(state.role==='owner'||state.role==='admin');if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
+function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;let privileged=(state.role==='owner'||state.role==='admin');if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
 function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.map(card).join('')}</div>`}
 async function renderExternalApps(){
  document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔗 التطبيقات الخارجية</div><p class="small">تطبيقات مستقلة يمكن فتحها مباشرة. هوية التطبيق تُستخرج من بياناته العامة عند الإضافة عندما تكون متاحة.</p><div id="externalAppsView" class="grid"></div></section>`;
@@ -2701,6 +2768,9 @@ async function renderExternalApps(){
  r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
 }
 async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
+function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">مساحة مخصصة لبناء وتصميم مشاريع NFT، تمهيدًا لبوابة عالمية حقيقية. هذه المرحلة تحفظ مسودات المشاريع فقط؛ الإنشاء الفعلي والـMint والسوق والتكاملات تبقى 🚧 قريبًا.</p><div class="statusBox"><div class="row">🎨 مصمم NFT — 🚧 قريبًا</div><div class="row">🗂️ إنشاء مجموعات — 🚧 قريبًا</div><div class="row">🧾 Metadata — 🚧 قريبًا</div><div class="row">🌐 بوابة عرض عالمية — 🚧 قريبًا</div><div class="row">⛓️ Web3 / Minting — 🚧 قريبًا</div><div class="row">💱 البيع والمعاملات — 🚧 قريبًا</div></div><div class="statusBox"><b>مسودة مشروع</b><input id="nftName" placeholder="اسم المشروع" style="width:100%;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"><input id="nftCollection" placeholder="اسم المجموعة (اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"><textarea id="nftDescription" placeholder="وصف المشروع" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"></textarea><button class="action green" onclick="createNFTProject()">💾 حفظ المسودة</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects()}
+async function loadNFTProjects(){let r=document.getElementById('nftProjects');if(!r)return;try{let d=await api('/api/app/nft/projects');if(!d.ok)throw new Error(d.error||'load_failed');r.innerHTML=(d.projects||[]).length?(d.projects||[]).map(p=>`<div class="row">🖼️ <b>${esc(p.name||'بدون اسم')}</b> · ${esc(p.collection_name||'بدون مجموعة')} · ${esc(p.status)}</div>`).join(''):'<span class="small">لا توجد مسودات بعد.</span>'}catch(e){r.textContent='⚠️ '+(e.message||'')}}
+async function createNFTProject(){let m=document.getElementById('nftMsg');if(!m)return;m.textContent='⏳ جاري حفظ المسودة...';try{let d=await api('/api/app/nft/projects',{method:'POST',body:JSON.stringify({name:document.getElementById('nftName').value,collection_name:document.getElementById('nftCollection').value,description:document.getElementById('nftDescription').value})});if(!d.ok)throw new Error(d.error||'save_failed');m.textContent='✅ تم حفظ مسودة NFT في PostgreSQL.';loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'')}}
 function renderAutoCore(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🚀 AUTO CORE</div><p class="small">Autonomous Business Agent — واجهة احترافية داخل AI for مع بقاء محرك Auto Core مستقلًا.</p><div class="statusBox autocore"><div class="metricGrid"><div class="metric">الحالة<b class="ok">ARCHITECTURE READY</b></div><div class="metric">الاستقلال<b class="info">SEPARATE CORE</b></div><div class="metric">التشغيل<b>AUTONOMOUS</b></div><div class="metric">الأمان<b class="ok">ISOLATED</b></div></div></div><div class="statusBox"><div class="row">🔎 Scout — البحث عن الفرص والعملاء</div><div class="row">🤝 Negotiate — فهم الطلب والتفاوض</div><div class="row">⚙️ Execute — تنفيذ المهمة كاملة</div><div class="row">📦 Deliver — التسليم</div><div class="row">💳 Settle — التسوية عبر طبقة دفع آمنة</div><div class="row">📜 Audit — سجل تدقيق</div></div><button class="action green" onclick="openAutoCore()">🚀 فتح Auto Core المستقل</button><p class="small">لا يتم تشغيل الوكيل من هذه الواجهة. تشغيله المستقل يظل خارج AI for؛ هذه البطاقة هي بوابة الوصول فقط.</p></section>`}
 function renderRevenue(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">💰 مركز الدخل</div><p class="small">منظومة ربح مبنية على خدمات حقيقية، مع حواجز تمنع المقامرة والخداع والـspam والنقرات الوهمية.</p><div class="statusBox safe"><div class="row">🛡️ Revenue Safety Gate — <span class="ok">مفعّل</span></div><div class="row">🎰 مقامرة/رهان مالي — <span class="danger">ممنوع</span></div><div class="row">🤖 نقرات إعلانية مصطنعة — <span class="danger">ممنوع</span></div><div class="row">📢 إعلان مدفوع مخفي — <span class="danger">ممنوع</span></div><div class="row">🔐 كشف بيانات الدفع الشخصية — <span class="danger">ممنوع</span></div></div><div class="statusBox"><div class="row">⭐ ZYNMART+ — 🚧 قريبًا</div><div class="row">📣 Advertising Network — 🚧 قريبًا وفق شروط المزود</div><div class="row">🎁 Rewarded Ads — 🚧 قريبًا وفق شروط المزود</div><div class="row">🏪 Promoted Stores/Products — 🚧 قريبًا</div><div class="row">🏢 Business Plans — 🚧 قريبًا</div></div></section>`}
 async function piStatus(){try{let d=await api('/api/app/pi');alert(d.text||'تعذر الحصول على بيانات Pi الموثوقة الآن.')}catch(e){alert('⚠️ لا توجد بيانات موثوقة متاحة الآن. لن نخمن.')}}
@@ -2995,6 +3065,20 @@ def webapp_account_photo_get():
     from flask import send_file
     return send_file(io.BytesIO(bytes(row[0])),mimetype=row[1] or "image/jpeg",max_age=0,download_name="profile")
 
+@app.route("/api/app/nft/projects", methods=["GET", "POST"])
+def webapp_nft_projects():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    denied = _webapp_require_section(user, "nft")
+    if denied[0]: return denied
+    if request.method == "GET":
+        return jsonify(_nft_projects_list(user))
+    body = request.get_json(silent=True) or {}
+    result = _nft_project_create(user, body.get("name"), body.get("description"), body.get("collection_name"))
+    if result.get("ok"):
+        control_audit(user["id"], "nft_project_create", result["project"]["project_id"], {"name": result["project"]["name"]})
+    return jsonify(result), (201 if result.get("ok") else 503)
+
 @app.route("/api/app/db/health", methods=["GET"])
 def webapp_db_health():
     user, err, code = _webapp_auth()
@@ -3133,7 +3217,8 @@ def owner_feature_tests(user):
         "webapp_universal_action":"/api/app/action",
         "webapp_db_health":"/api/app/db/health",
         "webapp_external_apps":"/api/app/external-apps",
-        "webapp_external_app_open":"/api/app/external-apps/open"
+        "webapp_external_app_open":"/api/app/external-apps/open",
+        "webapp_nft_projects":"/api/app/nft/projects"
     }
     for endpoint, path in required_routes.items():
         add("route:"+path, endpoint in app.view_functions, "Registered endpoint: "+endpoint)
@@ -3143,6 +3228,7 @@ def owner_feature_tests(user):
     add("external_apps_public_state_separation", callable(globals().get("_external_apps_payload")) and callable(globals().get("_external_app_set_open")), "External app public visibility is controlled separately from Owner inspection")
     add("conversation_persistence", callable(globals().get("_webapp_save_history")) and callable(globals().get("_webapp_history")), "Persistent conversation helpers are present")
     add("durable_persistence_architecture", bool(DATABASE_URL) and callable(globals().get("_persistence_probe")), "Critical platform persistence has a PostgreSQL path and a cross-deploy probe; Render filesystem is not used for the probe")
+    add("nft_studio_architecture", callable(globals().get("_nft_project_create")) and callable(globals().get("_nft_projects_list")) and "webapp_nft_projects" in app.view_functions, "NFT Studio drafts have a PostgreSQL-backed project path; minting/market transactions remain future")
     passed=sum(1 for x in tests if x["ok"])
     failed=len(tests)-passed
     return {"ok":failed==0,"summary":{"total":len(tests),"passed":passed,"failed":failed},"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}

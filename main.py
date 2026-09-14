@@ -308,6 +308,39 @@ def _ensure_db_schema(cur):
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
     db_schema_version = DB_SCHEMA_VERSION
 
+# Durable PostgreSQL persistence probe. This marker is intentionally stored in PostgreSQL,
+# not on Render's filesystem, so it can be verified across restart/redeploy events.
+PERSISTENCE_PROBE_KEY = 'render_persistence_probe'
+
+def _persistence_probe(mode='status'):
+    """Prepare/verify a durable marker in PostgreSQL; never use local files for the marker."""
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return {"ok": False, "error": membership_db_error or "database_unavailable"}
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT value, updated_at FROM ai_for_db_meta WHERE key=%s", (PERSISTENCE_PROBE_KEY,))
+                row = cur.fetchone()
+                if mode == 'prepare':
+                    if row and row[0]:
+                        return {"ok": True, "mode": "prepare", "token": str(row[0]), "created": False, "updated_at": row[1].isoformat() if row[1] else None}
+                    token = secrets.token_hex(16)
+                    cur.execute("INSERT INTO ai_for_db_meta(key,value) VALUES(%s,%s) ON CONFLICT(key) DO NOTHING", (PERSISTENCE_PROBE_KEY, token))
+                    cur.execute("SELECT value, updated_at FROM ai_for_db_meta WHERE key=%s", (PERSISTENCE_PROBE_KEY,))
+                    row = cur.fetchone()
+                    return {"ok": bool(row and row[0]), "mode": "prepare", "token": str(row[0]) if row else None, "created": True, "updated_at": row[1].isoformat() if row and row[1] else None}
+                if mode == 'verify':
+                    if not row or not row[0]:
+                        return {"ok": False, "mode": "verify", "error": "probe_not_prepared"}
+                    return {"ok": True, "mode": "verify", "token": str(row[0]), "updated_at": row[1].isoformat() if row[1] else None}
+                return {"ok": True, "mode": "status", "prepared": bool(row and row[0]), "token": str(row[0]) if row else None, "updated_at": row[1].isoformat() if row and row[1] else None}
+    except Exception as e:
+        return {"ok": False, "mode": mode, "error": str(e)}
+    finally:
+        _membership_db_release(conn)
+
 def init_membership_db():
     """Initialize the durable PostgreSQL membership store without deleting or replacing data."""
     global membership_db_ready, membership_db_error, db_last_ok_at
@@ -2146,6 +2179,7 @@ PLATFORM_SECTION_META = {
     "autocore": ("🚀", "AUTO CORE", "وكيل أعمال مستقل — بحث، تفاوض، تنفيذ وتسوية"),
     "revenue": ("💰", "مركز الدخل", "الاشتراكات والإعلانات والخدمات التجارية بأمان"),
     "external_apps": ("🔗", "التطبيقات الخارجية", "بوابة تطبيقات خارجية — Pi Browser والويب"),
+    "nft": ("🖼️", "NFT Studio", "مساحة تصميم وإدارة NFT وبوابة عالمية للأصول الرقمية"),
 }
 PLATFORM_STATUS = {
     "ai": {"active": ["دردشة AI", "بحث موثوق", "تحليل", "كتابة", "تلخيص", "ترجمة", "برمجة"], "soon": ["توليد الصور داخل التطبيق", "الفيديو", "الصوت"]},
@@ -2171,6 +2205,7 @@ PLATFORM_STATUS = {
     "autocore": {"active": ["واجهة مستقلة داخل AI for", "فصل الكود والصلاحيات", "تشغيل مستقل عن واجهة AI for", "Kill Switch / سجل تدقيق مخطط"], "soon": ["ربط الخدمة المستقلة", "التنفيذ التجاري الفعلي", "طبقة التسوية الآمنة"]},
     "revenue": {"active": ["Revenue Safety Gate", "منع المقامرة والـspam والنقرات الوهمية", "إخفاء البيانات المالية الشخصية", "تمييز المحتوى المدفوع بوضوح"], "soon": ["ZYNMART+", "شبكات الإعلانات", "Rewarded Ads وفق سياسات المزود", "Promoted Products/Stores", "خطط Business", "الفوترة والتسوية الآمنة"]},
     "external_apps": {"active": ["إضافة تطبيق خارجي بالرابط", "استخراج الاسم والهوية البصرية عند توفرها", "فتح مباشر للتطبيق", "تتبع زيارات الوصول داخل AI for"], "soon": ["برامج إحالة واتفاقيات Revenue Share", "Featured Apps", "خطط Business للتطبيقات"]},
+    "nft": {"active": [], "soon": ["مصمم NFT", "إنشاء مجموعات", "بيانات وMetadata", "بوابة عرض عالمية", "البيع/المعاملات", "تكاملات Web3"]}
 }
 
 def _webapp_data_check(init_data):
@@ -2703,7 +2738,7 @@ setNav('n-admin');
 document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 مركز تحكم المالك</div><p class="small">ترتيب جديد من الصفر: كل إعداد هنا حقيقي ومحفوظ، ومنطقة المالك لا تظهر إلا للمالك.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل الإعدادات...</div></div></section>';
 try{
  let d=await api('/api/app/owner');
- let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps'];
+ let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps','nft'];
  async function toggleExternalApp(id,open){try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_toggle',app_id:id,open:!!open})});if(!d.ok)throw new Error(d.error||'toggle_failed');state=await api('/api/app/bootstrap');applyTheme();await ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة التطبيق: '+(e.message||''))}}
 async function deleteExternalApp(id){if(!confirm('حذف التطبيق من AI for؟'))return;try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_delete',app_id:id})});if(!d.ok)throw new Error(d.error||'delete_failed');state=await api('/api/app/bootstrap');await ownerArea()}catch(e){alert('⚠️ تعذر حذف التطبيق: '+(e.message||''))}}
 let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
@@ -2712,7 +2747,7 @@ let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
  '<div class="statusBox"><div class="ownerSectionHead">1️⃣ التطبيقات والميزات — فتح / قفل</div><p class="small">فتح التطبيق يجعله عامًا. قفله يمنع الوصول العام، مع بقائه دائمًا داخل إعدادات المالك.</p>'+appRows+'</div>'+
  '<div class="statusBox"><div class="ownerSectionHead">2️⃣ الأعضاء والوصول</div><p class="small">PostgreSQL هو المصدر الدائم والوحيد لعضوية AI for. كل مستخدم يبدأ/يتفاعل مع البوت يُسجّل بمعرّف Telegram الثابت.</p><button class="action green" onclick="loadMembers()">👥 معاينة أعضاء PostgreSQL</button><div id="membersResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead" style="font-size:16px">الوصول المسموح يدويًا</div><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">➕ إضافة مستخدم</button><div class="small">الإضافة لا تمنح الإدارة ولا تغيّر هوية Telegram User ID.</div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">3️⃣ التطبيقات الخارجية</div><p class="small">أدخل رابط التطبيق فقط. AI for يحاول استخراج الاسم والهوية البصرية من البيانات العامة، ثم يحفظ التطبيق في PostgreSQL. التطبيق يبقى مغلقًا حتى تفتحه أنت.</p><input id="externalAppUrl" placeholder="https://example.pinet.com" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action green" onclick="addExternalApp()">➕ إضافة تطبيق بالرابط</button><div id="externalAppsOwnerResult" class="small"></div></div>'+ '<div class="statusBox"><div class="ownerSectionHead">4️⃣ المظهر والوضوح</div><p class="small">ألوان النصوص والعناوين والأزرار وحالات الفتح والقفل تُدار من Theme System.</p><button class="action dark" onclick="ownerThemeStatus()">🎨 فحص المظهر</button><div id="themeStatus" class="small"></div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">5️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">5️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead">🧪 اختبار بقاء البيانات بعد Deploy</div><p class="small">أنشئ علامة اختبار داخل PostgreSQL قبل Deploy، ثم بعد Deploy نفّذ التحقق. إذا ظهرت نفس العلامة، ثبت أن الذاكرة الدائمة مستقلة عن ملفات Render.</p><div class="toolbar"><button class="mini" onclick="persistenceProbe('prepare')">1️⃣ تجهيز الاختبار</button><button class="mini" onclick="persistenceProbe('verify')">2️⃣ تحقق بعد Deploy</button></div><div id="persistenceProbeResult" class="small"></div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">6️⃣ الطوارئ</div><button class="action dark" onclick="emergency()">🛡️ حالة الطوارئ</button></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">7️⃣ Feature Test Center</div><button class="action" onclick="ownerTests()">🧪 تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">8️⃣ سجل التدقيق</div><p class="small">عمليات المالك الحساسة تسجل في قاعدة التدقيق.</p></div>';
@@ -2726,6 +2761,7 @@ async function allowUser(){let x=document.getElementById('allowUser')?.value.tri
 async function loadMembers(){let r=document.getElementById('membersResult');if(!r)return;r.textContent='⏳ جاري قراءة PostgreSQL...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'members',limit:100})});r.innerHTML=(d.members||[]).map(m=>`<div class="statusBox"><b>${esc((m.first_name||'')+' '+(m.last_name||''))}</b><div class="small">ID: ${esc(m.user_id)} · ${esc(m.username?'@'+m.username:'بدون username')} · ${esc(m.membership_status)} · ${esc(m.role)}</div><div class="toolbar"><button class="mini" onclick="memberStatus(${Number(m.user_id)},'active')">🟢 تفعيل</button><button class="mini" onclick="memberStatus(${Number(m.user_id)},'banned')">🚫 حظر</button><button class="mini" onclick="memberRole(${Number(m.user_id)},'member')">👤 عضو</button><button class="mini" onclick="memberRole(${Number(m.user_id)},'admin')">🛡️ Admin</button></div></div>`).join('')||'<div>لا يوجد أعضاء.</div>'}catch(e){r.textContent='⚠️ تعذر قراءة قاعدة الأعضاء: '+e.message}}
 async function memberStatus(id,status){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'member_status',user_id:id,status})});loadMembers()}catch(e){alert('⚠️ '+e.message)}}
 async function memberRole(id,role){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'member_role',user_id:id,role})});loadMembers()}catch(e){alert('⚠️ '+e.message)}}
+async function persistenceProbe(mode){let r=document.getElementById('persistenceProbeResult');if(!r)return;r.textContent=mode==='prepare'?'⏳ جاري إنشاء علامة اختبار دائمة...':'⏳ جاري التحقق من علامة الاختبار داخل PostgreSQL...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'persistence_probe',mode})});r.innerHTML=(d.ok?'✅ ':'❌ ')+esc(d.message||d.error||'')+(d.token?'<br><b>Probe: '+esc(d.token)+'</b>':'')+(d.updated_at?'<br><span class="small">'+esc(d.updated_at)+'</span>':'')}catch(e){r.textContent='❌ '+(e.message||'')}}
 async function dbHealth(){let r=document.getElementById('dbHealthResult');if(!r)return;r.textContent='⏳ فحص الاتصال والجداول...';try{let d=await api('/api/app/db/health');r.innerHTML=(d.ok?'✅ PostgreSQL يعمل بشكل سليم.':'⚠️ قاعدة البيانات تحتاج مراجعة.')+'<br>'+esc(JSON.stringify({ping:d.ping,schema:d.membership?.schema_version,pool:d.membership?.pool_max,last_ok:d.membership?.last_ok_at,error:d.membership?.error||d.control?.error||''}))}catch(e){r.textContent='❌ '+e.message}}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
@@ -2989,6 +3025,13 @@ def webapp_owner_private():
         control_status = {"persistent": bool(control_db_ready), "required": bool(CONTROL_DB_REQUIRED), "error": "" if control_db_ready else control_db_error}
         return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
     body=request.get_json(silent=True) or {}; action=str(body.get("action","" )).strip().lower()
+    if action == "persistence_probe":
+        mode=str(body.get("mode","status")).strip().lower()
+        if mode not in ("prepare","verify","status"): return jsonify({"ok":False,"error":"invalid_probe_mode"}),400
+        result=_persistence_probe(mode)
+        result["message"] = {"prepare":"تم تجهيز علامة الاختبار الدائمة. الآن نفّذ Deploy ثم اختر تحقق بعد Deploy.","verify":"تم العثور على علامة الاختبار داخل PostgreSQL بعد Deploy؛ الاستمرارية مثبتة لهذا الاختبار.","status":"حالة علامة الاستمرارية الحالية."}.get(mode,"")
+        if result.get("ok"): control_audit(user["id"],"persistence_probe",mode,{"token":result.get("token")})
+        return jsonify(result), (200 if result.get("ok") else 503)
     if action == "external_app_add":
         result=_external_app_add(body.get("url", ""))
         if result.get("ok"): control_audit(user["id"],"external_app_add",str(result["app"].get("app_id")),{"url":result["app"].get("url"),"name":result["app"].get("name")})
@@ -3099,6 +3142,7 @@ def owner_feature_tests(user):
     add("web_identity_cookie", bool(WEB_IDENTITY_COOKIE and WEB_IDENTITY_MAX_AGE > 0), "Web identity cookie has a bounded lifetime")
     add("external_apps_public_state_separation", callable(globals().get("_external_apps_payload")) and callable(globals().get("_external_app_set_open")), "External app public visibility is controlled separately from Owner inspection")
     add("conversation_persistence", callable(globals().get("_webapp_save_history")) and callable(globals().get("_webapp_history")), "Persistent conversation helpers are present")
+    add("durable_persistence_architecture", bool(DATABASE_URL) and callable(globals().get("_persistence_probe")), "Critical platform persistence has a PostgreSQL path and a cross-deploy probe; Render filesystem is not used for the probe")
     passed=sum(1 for x in tests if x["ok"])
     failed=len(tests)-passed
     return {"ok":failed==0,"summary":{"total":len(tests),"passed":passed,"failed":failed},"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}

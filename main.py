@@ -360,13 +360,8 @@ def _persistence_probe(mode='status'):
     finally:
         _membership_db_release(conn)
 
-def init_membership_db(lock_timeout_seconds=None):
-    """Initialize the durable PostgreSQL membership store without deleting or replacing data.
-
-    WebApp bootstrap may supply a bounded lock wait so a busy worker cannot
-    leave the platform opening screen waiting indefinitely. Persistence is
-    still mandatory; a timeout returns failure rather than bypassing the DB.
-    """
+def init_membership_db():
+    """Initialize the durable PostgreSQL membership store without deleting or replacing data."""
     global membership_db_ready, membership_db_error, db_last_ok_at
     if not DATABASE_URL:
         membership_db_error = "DATABASE_URL is not configured"
@@ -377,29 +372,19 @@ def init_membership_db(lock_timeout_seconds=None):
         membership_db_ready = False
         return False
     conn = None
-    acquired = False
     try:
-        if lock_timeout_seconds is None:
-            membership_db_lock.acquire()
-            acquired = True
-        else:
-            acquired = membership_db_lock.acquire(timeout=max(0.1, float(lock_timeout_seconds)))
-        if not acquired:
-            membership_db_error = "PostgreSQL initialization lock timeout"
-            membership_db_ready = False
-            print("Membership DB init lock timeout")
-            return False
-        _db_pool_init()
-        conn = _pool_conn(membership_db_pool)
-        if not conn:
-            raise RuntimeError("PostgreSQL connection pool unavailable")
-        with conn:
-            with conn.cursor() as cur:
-                _ensure_db_schema(cur)
-        membership_db_ready = True
-        membership_db_error = ""
-        db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
-        return True
+        with membership_db_lock:
+            _db_pool_init()
+            conn = _pool_conn(membership_db_pool)
+            if not conn:
+                raise RuntimeError("PostgreSQL connection pool unavailable")
+            with conn:
+                with conn.cursor() as cur:
+                    _ensure_db_schema(cur)
+            membership_db_ready = True
+            membership_db_error = ""
+            db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
+            return True
     except Exception as e:
         membership_db_error = str(e)
         membership_db_ready = False
@@ -407,8 +392,6 @@ def init_membership_db(lock_timeout_seconds=None):
         return False
     finally:
         _membership_db_release(conn)
-        if acquired:
-            membership_db_lock.release()
 
 def ensure_database_ready():
     """Retry DB initialization after transient Render/Postgres restarts."""
@@ -419,64 +402,49 @@ def ensure_database_ready():
         init_control_db()
         return bool(ok and membership_db_ready)
 
-def register_platform_member(user, source="webapp", chat_id=None, lock_timeout_seconds=None):
-    """Register/update a platform member by immutable Telegram User ID.
-
-    The optional lock timeout is used by WebApp bootstrap only to fail fast
-    when another worker is holding the membership DB lock. It never bypasses
-    durable membership persistence.
-    """
+def register_platform_member(user, source="webapp", chat_id=None):
+    """Register/update a platform member by immutable Telegram User ID."""
     uid = user.get("id") if isinstance(user, dict) else None
     if not uid:
         return False, False
-    if not membership_db_ready and not init_membership_db(lock_timeout_seconds=lock_timeout_seconds):
+    if not membership_db_ready and not init_membership_db():
         return False, False
     now = datetime.now(ZoneInfo("Africa/Tunis"))
     conn = None
-    acquired = False
     try:
-        if lock_timeout_seconds is None:
-            membership_db_lock.acquire()
-            acquired = True
-        else:
-            acquired = membership_db_lock.acquire(timeout=max(0.1, float(lock_timeout_seconds)))
-        if not acquired:
-            print(f"Membership DB register lock timeout for {uid}")
-            return False, False
-        conn = _membership_db_connect()
-        if not conn:
-            return False, False
-        with conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s", (int(uid),))
-                existed = cur.fetchone() is not None
-                cur.execute("""
-                    INSERT INTO ai_for_members
-                        (user_id, username, first_name, last_name, joined_at, last_seen,
-                         last_chat_id, last_private_chat_id, membership_status, membership_source)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        username=EXCLUDED.username, first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
-                        last_seen=EXCLUDED.last_seen,
-                        last_chat_id=COALESCE(EXCLUDED.last_chat_id, ai_for_members.last_chat_id),
-                        last_private_chat_id=COALESCE(EXCLUDED.last_private_chat_id, ai_for_members.last_private_chat_id),
-                        membership_source=EXCLUDED.membership_source
-                """, (
-                    int(uid), str(user.get("username") or ""), str(user.get("first_name") or ""),
-                    str(user.get("last_name") or ""), now, now,
-                    int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() else None,
-                    int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() and source == "telegram_bot" else None,
-                    str(source)[:40]
-                ))
-        return True, not existed
+        with membership_db_lock:
+            conn = _membership_db_connect()
+            if not conn:
+                return False, False
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s", (int(uid),))
+                    existed = cur.fetchone() is not None
+                    cur.execute("""
+                        INSERT INTO ai_for_members
+                            (user_id, username, first_name, last_name, joined_at, last_seen,
+                             last_chat_id, last_private_chat_id, membership_status, membership_source)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
+                        ON CONFLICT (user_id) DO UPDATE SET
+                            username=EXCLUDED.username, first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
+                            last_seen=EXCLUDED.last_seen,
+                            last_chat_id=COALESCE(EXCLUDED.last_chat_id, ai_for_members.last_chat_id),
+                            last_private_chat_id=COALESCE(EXCLUDED.last_private_chat_id, ai_for_members.last_private_chat_id),
+                            membership_source=EXCLUDED.membership_source
+                    """, (
+                        int(uid), str(user.get("username") or ""), str(user.get("first_name") or ""),
+                        str(user.get("last_name") or ""), now, now,
+                        int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() else None,
+                        int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() and source == "telegram_bot" else None,
+                        str(source)[:40]
+                    ))
+            return True, not existed
     except Exception as e:
         print(f"Membership DB register error for {uid}: {e}")
         membership_db_error = str(e)
         return False, False
     finally:
         _membership_db_release(conn)
-        if acquired:
-            membership_db_lock.release()
 
 def get_platform_member(user_id):
     if not membership_db_ready or not user_id:
@@ -2407,7 +2375,7 @@ def _webapp_auth():
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user = _webapp_data_check(init_data)
     if user:
-        ok, is_new = register_platform_member(user, source="webapp", lock_timeout_seconds=6)
+        ok, is_new = register_platform_member(user, source="webapp")
         if MEMBERSHIP_DB_REQUIRED and not ok:
             return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
         user["platform_member"] = bool(ok)
@@ -2786,7 +2754,7 @@ WEBAPP_HTML = r'''<!doctype html>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button class="nav" id="n-account" onclick="accountBox()"><b>👤</b>الحساب</button></nav>
 <script>
-const tg=window.Telegram?.WebApp;let state=null;let conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());if(tg){tg.ready();tg.expand();}
+const tg=window.Telegram?.WebApp;let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;opts.headers=Object.assign({'Content-Type':'application/json','X-Telegram-Init-Data':tg?.initData||''},opts.headers||{});try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}

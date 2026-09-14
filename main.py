@@ -147,6 +147,11 @@ def load_json(path, default):
 DB_POOL_MIN = int(os.environ.get("AI_FOR_DB_POOL_MIN", "1"))
 DB_POOL_MAX = int(os.environ.get("AI_FOR_DB_POOL_MAX", "5"))
 DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
+# Bound database statements/locks so a blocked PostgreSQL session can never leave
+# the WebApp bootstrap waiting indefinitely. Render may restart workers, but the
+# database remains durable and requests fail fast instead of looking like data loss.
+DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_STATEMENT_TIMEOUT_MS", "10000"))
+DB_LOCK_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_LOCK_TIMEOUT_MS", "5000"))
 DB_SCHEMA_VERSION = 6
 WEB_IDENTITY_COOKIE = "ai_for_sid"
 WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
@@ -155,7 +160,7 @@ WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
 def _db_connect_direct():
     if not DATABASE_URL or psycopg2 is None:
         return None
-    return psycopg2.connect(DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT, sslmode="require")
+    return psycopg2.connect(DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT, sslmode="require", options=f"-c statement_timeout={max(1000, DB_STATEMENT_TIMEOUT_MS)} -c lock_timeout={max(1000, DB_LOCK_TIMEOUT_MS)}")
 
 def _db_pool_init():
     global membership_db_pool, control_db_pool
@@ -163,7 +168,7 @@ def _db_pool_init():
         return False
     try:
         if membership_db_pool is None:
-            membership_db_pool = ThreadedConnectionPool(DB_POOL_MIN, DB_POOL_MAX, DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT, sslmode="require")
+            membership_db_pool = ThreadedConnectionPool(DB_POOL_MIN, DB_POOL_MAX, DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT, sslmode="require", options=f"-c statement_timeout={max(1000, DB_STATEMENT_TIMEOUT_MS)} -c lock_timeout={max(1000, DB_LOCK_TIMEOUT_MS)}")
         if control_db_pool is None:
             control_db_pool = membership_db_pool
         return True
@@ -355,8 +360,13 @@ def _persistence_probe(mode='status'):
     finally:
         _membership_db_release(conn)
 
-def init_membership_db():
-    """Initialize the durable PostgreSQL membership store without deleting or replacing data."""
+def init_membership_db(lock_timeout_seconds=None):
+    """Initialize the durable PostgreSQL membership store without deleting or replacing data.
+
+    WebApp bootstrap may supply a bounded lock wait so a busy worker cannot
+    leave the platform opening screen waiting indefinitely. Persistence is
+    still mandatory; a timeout returns failure rather than bypassing the DB.
+    """
     global membership_db_ready, membership_db_error, db_last_ok_at
     if not DATABASE_URL:
         membership_db_error = "DATABASE_URL is not configured"
@@ -367,19 +377,29 @@ def init_membership_db():
         membership_db_ready = False
         return False
     conn = None
+    acquired = False
     try:
-        with membership_db_lock:
-            _db_pool_init()
-            conn = _pool_conn(membership_db_pool)
-            if not conn:
-                raise RuntimeError("PostgreSQL connection pool unavailable")
-            with conn:
-                with conn.cursor() as cur:
-                    _ensure_db_schema(cur)
-            membership_db_ready = True
-            membership_db_error = ""
-            db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
-            return True
+        if lock_timeout_seconds is None:
+            membership_db_lock.acquire()
+            acquired = True
+        else:
+            acquired = membership_db_lock.acquire(timeout=max(0.1, float(lock_timeout_seconds)))
+        if not acquired:
+            membership_db_error = "PostgreSQL initialization lock timeout"
+            membership_db_ready = False
+            print("Membership DB init lock timeout")
+            return False
+        _db_pool_init()
+        conn = _pool_conn(membership_db_pool)
+        if not conn:
+            raise RuntimeError("PostgreSQL connection pool unavailable")
+        with conn:
+            with conn.cursor() as cur:
+                _ensure_db_schema(cur)
+        membership_db_ready = True
+        membership_db_error = ""
+        db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
+        return True
     except Exception as e:
         membership_db_error = str(e)
         membership_db_ready = False
@@ -387,6 +407,8 @@ def init_membership_db():
         return False
     finally:
         _membership_db_release(conn)
+        if acquired:
+            membership_db_lock.release()
 
 def ensure_database_ready():
     """Retry DB initialization after transient Render/Postgres restarts."""
@@ -397,49 +419,64 @@ def ensure_database_ready():
         init_control_db()
         return bool(ok and membership_db_ready)
 
-def register_platform_member(user, source="webapp", chat_id=None):
-    """Register/update a platform member by immutable Telegram User ID."""
+def register_platform_member(user, source="webapp", chat_id=None, lock_timeout_seconds=None):
+    """Register/update a platform member by immutable Telegram User ID.
+
+    The optional lock timeout is used by WebApp bootstrap only to fail fast
+    when another worker is holding the membership DB lock. It never bypasses
+    durable membership persistence.
+    """
     uid = user.get("id") if isinstance(user, dict) else None
     if not uid:
         return False, False
-    if not membership_db_ready and not init_membership_db():
+    if not membership_db_ready and not init_membership_db(lock_timeout_seconds=lock_timeout_seconds):
         return False, False
     now = datetime.now(ZoneInfo("Africa/Tunis"))
     conn = None
+    acquired = False
     try:
-        with membership_db_lock:
-            conn = _membership_db_connect()
-            if not conn:
-                return False, False
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s", (int(uid),))
-                    existed = cur.fetchone() is not None
-                    cur.execute("""
-                        INSERT INTO ai_for_members
-                            (user_id, username, first_name, last_name, joined_at, last_seen,
-                             last_chat_id, last_private_chat_id, membership_status, membership_source)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
-                        ON CONFLICT (user_id) DO UPDATE SET
-                            username=EXCLUDED.username, first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
-                            last_seen=EXCLUDED.last_seen,
-                            last_chat_id=COALESCE(EXCLUDED.last_chat_id, ai_for_members.last_chat_id),
-                            last_private_chat_id=COALESCE(EXCLUDED.last_private_chat_id, ai_for_members.last_private_chat_id),
-                            membership_source=EXCLUDED.membership_source
-                    """, (
-                        int(uid), str(user.get("username") or ""), str(user.get("first_name") or ""),
-                        str(user.get("last_name") or ""), now, now,
-                        int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() else None,
-                        int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() and source == "telegram_bot" else None,
-                        str(source)[:40]
-                    ))
-            return True, not existed
+        if lock_timeout_seconds is None:
+            membership_db_lock.acquire()
+            acquired = True
+        else:
+            acquired = membership_db_lock.acquire(timeout=max(0.1, float(lock_timeout_seconds)))
+        if not acquired:
+            print(f"Membership DB register lock timeout for {uid}")
+            return False, False
+        conn = _membership_db_connect()
+        if not conn:
+            return False, False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s", (int(uid),))
+                existed = cur.fetchone() is not None
+                cur.execute("""
+                    INSERT INTO ai_for_members
+                        (user_id, username, first_name, last_name, joined_at, last_seen,
+                         last_chat_id, last_private_chat_id, membership_status, membership_source)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
+                    ON CONFLICT (user_id) DO UPDATE SET
+                        username=EXCLUDED.username, first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
+                        last_seen=EXCLUDED.last_seen,
+                        last_chat_id=COALESCE(EXCLUDED.last_chat_id, ai_for_members.last_chat_id),
+                        last_private_chat_id=COALESCE(EXCLUDED.last_private_chat_id, ai_for_members.last_private_chat_id),
+                        membership_source=EXCLUDED.membership_source
+                """, (
+                    int(uid), str(user.get("username") or ""), str(user.get("first_name") or ""),
+                    str(user.get("last_name") or ""), now, now,
+                    int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() else None,
+                    int(chat_id) if chat_id is not None and str(chat_id).lstrip("-").isdigit() and source == "telegram_bot" else None,
+                    str(source)[:40]
+                ))
+        return True, not existed
     except Exception as e:
         print(f"Membership DB register error for {uid}: {e}")
         membership_db_error = str(e)
         return False, False
     finally:
         _membership_db_release(conn)
+        if acquired:
+            membership_db_lock.release()
 
 def get_platform_member(user_id):
     if not membership_db_ready or not user_id:
@@ -2370,7 +2407,7 @@ def _webapp_auth():
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user = _webapp_data_check(init_data)
     if user:
-        ok, is_new = register_platform_member(user, source="webapp")
+        ok, is_new = register_platform_member(user, source="webapp", lock_timeout_seconds=6)
         if MEMBERSHIP_DB_REQUIRED and not ok:
             return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
         user["platform_member"] = bool(ok)
@@ -2905,9 +2942,15 @@ def webapp():
 
 @app.route("/api/app/bootstrap", methods=["GET","POST"])
 def webapp_bootstrap():
+    started_at = time.monotonic()
     user, err, code = _webapp_auth()
     if err: return err, code
-    return jsonify(_webapp_platform_payload(user))
+    payload = _webapp_platform_payload(user)
+    elapsed = time.monotonic() - started_at
+    if elapsed > 5:
+        print(f"WebApp bootstrap slow: {elapsed:.2f}s")
+    payload.setdefault("system", {})["persistence"] = "postgresql"
+    return jsonify(payload), 200, {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
 @app.route("/api/app/pi", methods=["GET"])
 def webapp_pi():

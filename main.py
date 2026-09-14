@@ -2065,12 +2065,16 @@ def _webapp_is_admin(user):
     return bool(user and int(user.get("id", 0)) in ADMIN_IDS)
 
 def _webapp_has_access(user):
+    # Owner and Admin always have platform access for private inspection/control.
+    # Public open/lock state must never be used to block the Owner.
+    if _webapp_is_owner(user) or _webapp_is_admin(user):
+        return True
     try:
         uid=int(user.get("id",0))
         with _webapp_access_lock:
             if uid in set(_webapp_allowed_ids.values()): return True
     except Exception: pass
-    return _webapp_is_admin(user) or _webapp_allowed_username(user)
+    return _webapp_allowed_username(user)
 
 def _webapp_public_open_set():
     stored = settings.get("public_open_sections")

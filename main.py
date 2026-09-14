@@ -9,9 +9,11 @@ from bs4 import BeautifulSoup
 try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
+    from psycopg2.pool import ThreadedConnectionPool
 except Exception:
     psycopg2 = None
     RealDictCursor = None
+    ThreadedConnectionPool = None
 
 app = Flask(__name__)
 
@@ -73,7 +75,6 @@ ALLOWED_DOMAINS = [
 ]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-USERS_FILE = os.path.join(BASE_DIR, "users.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "bot_settings.json")
 WARNINGS_FILE = os.path.join(BASE_DIR, "warnings.json")
 MOD_LOG_FILE = os.path.join(BASE_DIR, "moderation_log.json")
@@ -86,6 +87,11 @@ MEMBERSHIP_DB_REQUIRED = os.environ.get("AI_FOR_REQUIRE_PERSISTENT_MEMBERS", "tr
 membership_db_ready = False
 membership_db_error = ""
 membership_db_lock = threading.RLock()
+membership_db_pool = None
+control_db_pool = None
+db_schema_version = 0
+db_last_ok_at = None
+db_retry_lock = threading.Lock()
 
 known_users = {}
 active_group_chat_id = DEFAULT_GROUP_CHAT_ID
@@ -138,61 +144,150 @@ def load_json(path, default):
         print(f"Load Error {path}: {e}")
     return default
 
-def _membership_db_connect():
+DB_POOL_MIN = int(os.environ.get("AI_FOR_DB_POOL_MIN", "1"))
+DB_POOL_MAX = int(os.environ.get("AI_FOR_DB_POOL_MAX", "5"))
+DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
+DB_SCHEMA_VERSION = 2
+
+def _db_connect_direct():
     if not DATABASE_URL or psycopg2 is None:
         return None
-    return psycopg2.connect(DATABASE_URL, connect_timeout=8, sslmode="require")
+    return psycopg2.connect(DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT, sslmode="require")
+
+def _db_pool_init():
+    global membership_db_pool, control_db_pool
+    if not DATABASE_URL or psycopg2 is None or ThreadedConnectionPool is None:
+        return False
+    try:
+        if membership_db_pool is None:
+            membership_db_pool = ThreadedConnectionPool(DB_POOL_MIN, DB_POOL_MAX, DATABASE_URL, connect_timeout=DB_CONNECT_TIMEOUT, sslmode="require")
+        if control_db_pool is None:
+            control_db_pool = membership_db_pool
+        return True
+    except Exception as e:
+        print(f"PostgreSQL pool init error: {e}")
+        membership_db_pool = None
+        control_db_pool = None
+        return False
+
+def _pool_conn(pool):
+    try:
+        return pool.getconn() if pool else None
+    except Exception as e:
+        print(f"PostgreSQL pool getconn error: {e}")
+        return None
+
+def _pool_put(pool, conn, broken=False):
+    if not pool or not conn:
+        return
+    try:
+        pool.putconn(conn, close=broken)
+    except Exception as e:
+        print(f"PostgreSQL pool putconn error: {e}")
+
+def _membership_db_connect():
+    if not _db_pool_init():
+        return None
+    return _pool_conn(membership_db_pool)
+
+def _membership_db_release(conn, broken=False):
+    _pool_put(membership_db_pool, conn, broken)
+
+def _ensure_db_schema(cur):
+    global db_schema_version
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_db_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_members (
+            user_id BIGINT PRIMARY KEY,
+            username TEXT NOT NULL DEFAULT '',
+            first_name TEXT NOT NULL DEFAULT '',
+            last_name TEXT NOT NULL DEFAULT '',
+            joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_chat_id BIGINT,
+            last_private_chat_id BIGINT,
+            membership_status TEXT NOT NULL DEFAULT 'active',
+            membership_source TEXT NOT NULL DEFAULT 'telegram',
+            role TEXT NOT NULL DEFAULT 'member',
+            permissions JSONB NOT NULL DEFAULT '{}'::jsonb,
+            profile_photo BYTEA,
+            profile_photo_mime TEXT,
+            photo_updated_at TIMESTAMPTZ
+        )
+    """)
+    # Non-destructive upgrades for databases created by earlier AI for versions.
+    for stmt in [
+        "ALTER TABLE ai_for_members ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'member'",
+        "ALTER TABLE ai_for_members ADD COLUMN IF NOT EXISTS permissions JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ALTER TABLE ai_for_members ADD COLUMN IF NOT EXISTS profile_photo BYTEA",
+        "ALTER TABLE ai_for_members ADD COLUMN IF NOT EXISTS profile_photo_mime TEXT",
+        "ALTER TABLE ai_for_members ADD COLUMN IF NOT EXISTS photo_updated_at TIMESTAMPTZ",
+    ]:
+        cur.execute(stmt)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_username ON ai_for_members (lower(username))")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_status ON ai_for_members (membership_status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_joined_at ON ai_for_members (joined_at)")
+    cur.execute("""INSERT INTO ai_for_db_meta(key,value) VALUES('schema_version',%s)
+                   ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
+    db_schema_version = DB_SCHEMA_VERSION
 
 def init_membership_db():
-    """Create the durable member table. Never silently replace or delete member data."""
-    global membership_db_ready, membership_db_error
+    """Initialize the durable PostgreSQL membership store without deleting or replacing data."""
+    global membership_db_ready, membership_db_error, db_last_ok_at
     if not DATABASE_URL:
         membership_db_error = "DATABASE_URL is not configured"
+        membership_db_ready = False
         return False
     if psycopg2 is None:
         membership_db_error = "psycopg2-binary is not installed"
+        membership_db_ready = False
         return False
+    conn = None
     try:
         with membership_db_lock:
-            conn = _membership_db_connect()
+            _db_pool_init()
+            conn = _pool_conn(membership_db_pool)
             if not conn:
-                return False
+                raise RuntimeError("PostgreSQL connection pool unavailable")
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute("""
-                        CREATE TABLE IF NOT EXISTS ai_for_members (
-                            user_id BIGINT PRIMARY KEY,
-                            username TEXT NOT NULL DEFAULT '',
-                            first_name TEXT NOT NULL DEFAULT '',
-                            last_name TEXT NOT NULL DEFAULT '',
-                            joined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                            last_chat_id BIGINT,
-                            last_private_chat_id BIGINT,
-                            membership_status TEXT NOT NULL DEFAULT 'active',
-                            membership_source TEXT NOT NULL DEFAULT 'telegram'
-                        )
-                    """)
-                    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_members_username ON ai_for_members (lower(username))")
+                    _ensure_db_schema(cur)
             membership_db_ready = True
             membership_db_error = ""
+            db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
             return True
     except Exception as e:
         membership_db_error = str(e)
         membership_db_ready = False
         print(f"Membership DB init error: {e}")
         return False
+    finally:
+        _membership_db_release(conn)
+
+def ensure_database_ready():
+    """Retry DB initialization after transient Render/Postgres restarts."""
+    if membership_db_ready and control_db_ready:
+        return True
+    with db_retry_lock:
+        ok = init_membership_db()
+        init_control_db()
+        return bool(ok and membership_db_ready)
 
 def register_platform_member(user, source="webapp", chat_id=None):
-    """Register/update a real AI for member by immutable Telegram User ID.
-
-    Returns (ok, is_new). If persistence is unavailable, returns (False, False)
-    rather than claiming the user joined.
-    """
+    """Register/update a platform member by immutable Telegram User ID."""
     uid = user.get("id") if isinstance(user, dict) else None
-    if not uid or not membership_db_ready:
+    if not uid:
+        return False, False
+    if not membership_db_ready and not init_membership_db():
         return False, False
     now = datetime.now(ZoneInfo("Africa/Tunis"))
+    conn = None
     try:
         with membership_db_lock:
             conn = _membership_db_connect()
@@ -208,13 +303,10 @@ def register_platform_member(user, source="webapp", chat_id=None):
                              last_chat_id, last_private_chat_id, membership_status, membership_source)
                         VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'active',%s)
                         ON CONFLICT (user_id) DO UPDATE SET
-                            username=EXCLUDED.username,
-                            first_name=EXCLUDED.first_name,
-                            last_name=EXCLUDED.last_name,
+                            username=EXCLUDED.username, first_name=EXCLUDED.first_name, last_name=EXCLUDED.last_name,
                             last_seen=EXCLUDED.last_seen,
                             last_chat_id=COALESCE(EXCLUDED.last_chat_id, ai_for_members.last_chat_id),
                             last_private_chat_id=COALESCE(EXCLUDED.last_private_chat_id, ai_for_members.last_private_chat_id),
-                            membership_status='active',
                             membership_source=EXCLUDED.membership_source
                     """, (
                         int(uid), str(user.get("username") or ""), str(user.get("first_name") or ""),
@@ -226,84 +318,115 @@ def register_platform_member(user, source="webapp", chat_id=None):
             return True, not existed
     except Exception as e:
         print(f"Membership DB register error for {uid}: {e}")
+        membership_db_error = str(e)
         return False, False
+    finally:
+        _membership_db_release(conn)
 
-def migrate_local_users_to_db():
-    """One-way safe import of any legacy users.json members into Postgres.
-    Existing joined_at values in Postgres are never overwritten.
-    """
-    if not membership_db_ready or not isinstance(known_users, dict):
-        return 0
-    migrated = 0
-    for item in known_users.values():
-        if not isinstance(item, dict) or not item.get("id"):
-            continue
-        ok, _ = register_platform_member(item, source="legacy_import", chat_id=item.get("last_private_chat_id"))
-        if ok:
-            migrated += 1
-    if migrated:
-        print(f"Membership DB legacy migration: {migrated} users imported/verified.")
-    return migrated
-
-def import_legacy_members_payload(payload):
-    """Safely import legacy members into the durable PostgreSQL membership table.
-
-    Accepts the historical users.json shape {"users": {...}} or a plain list/dict
-    of user records. Existing Telegram User IDs are updated without changing joined_at.
-    """
-    if not membership_db_ready:
-        return {"ok": False, "imported": 0, "existing": 0, "invalid": 0,
-                "error": membership_db_error or "membership_db_unavailable"}
-    if isinstance(payload, dict) and isinstance(payload.get("users"), dict):
-        records = list(payload["users"].values())
-    elif isinstance(payload, dict):
-        records = list(payload.values())
-    elif isinstance(payload, list):
-        records = payload
-    else:
-        records = []
-    imported = existing = invalid = 0
-    for item in records:
-        if not isinstance(item, dict) or not item.get("id"):
-            invalid += 1
-            continue
-        try:
-            uid = int(item.get("id"))
-        except Exception:
-            invalid += 1
-            continue
-        ok, is_new = register_platform_member(item, source="legacy_import", chat_id=item.get("last_private_chat_id") or item.get("last_chat_id"))
-        if not ok:
-            invalid += 1
-        elif is_new:
-            imported += 1
-        else:
-            existing += 1
-    return {"ok": True, "imported": imported, "existing": existing, "invalid": invalid,
-            "total_records": len(records)}
-
-def platform_member_exists(user_id):
+def get_platform_member(user_id):
     if not membership_db_ready or not user_id:
-        return False
+        return None
+    conn=None
     try:
-        with membership_db_lock:
-            conn = _membership_db_connect()
-            if not conn:
-                return False
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1 FROM ai_for_members WHERE user_id=%s LIMIT 1", (int(user_id),))
-                    return cur.fetchone() is not None
+        conn=_membership_db_connect()
+        if not conn: return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT user_id,username,first_name,last_name,joined_at,last_seen,last_chat_id,last_private_chat_id,membership_status,membership_source,role,permissions,(profile_photo IS NOT NULL) AS has_photo,photo_updated_at FROM ai_for_members WHERE user_id=%s", (int(user_id),))
+                return cur.fetchone()
     except Exception as e:
-        print(f"Membership DB lookup error: {e}")
-        return False
+        print(f"Membership DB member lookup error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
 
-def membership_service_status():
-    return {
-        "persistent": bool(membership_db_ready),
-        "required": bool(MEMBERSHIP_DB_REQUIRED),
-        "error": "" if membership_db_ready else membership_db_error
-    }
+def list_platform_members(limit=100, offset=0, search=""):
+    if not membership_db_ready: return []
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn: return []
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                q="SELECT user_id,username,first_name,last_name,joined_at,last_seen,membership_status,membership_source,role,permissions,(profile_photo IS NOT NULL) AS has_photo,photo_updated_at FROM ai_for_members"
+                params=[]
+                if search:
+                    q += " WHERE CAST(user_id AS TEXT)=%s OR lower(username)=lower(%s) OR lower(first_name) LIKE lower(%s)"
+                    params.extend([search.lstrip("@"), search.lstrip("@"), "%"+search+"%"] )
+                q += " ORDER BY joined_at DESC LIMIT %s OFFSET %s"
+                params.extend([max(1,min(int(limit),500)),max(0,int(offset))])
+                cur.execute(q,params)
+                return cur.fetchall()
+    except Exception as e:
+        print(f"Membership DB list error: {e}")
+        return []
+    finally:
+        _membership_db_release(conn)
+
+def set_platform_member_status(user_id, status):
+    if status not in ("active","banned","suspended"): return False
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_for_members SET membership_status=%s,last_seen=NOW() WHERE user_id=%s",(status,int(user_id)))
+                return cur.rowcount==1
+    except Exception as e:
+        print(f"Membership DB status error: {e}")
+        return False
+    finally:
+        _membership_db_release(conn)
+
+def set_platform_member_role(user_id, role):
+    if role not in ("member","admin"): return False
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_for_members SET role=%s WHERE user_id=%s",(role,int(user_id)))
+                return cur.rowcount==1
+    except Exception as e:
+        print(f"Membership DB role error: {e}")
+        return False
+    finally:
+        _membership_db_release(conn)
+
+def save_profile_photo(user_id, raw, mime):
+    if not membership_db_ready or not raw: return False
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_for_members SET profile_photo=%s,profile_photo_mime=%s,photo_updated_at=NOW(),last_seen=NOW() WHERE user_id=%s",(psycopg2.Binary(raw),mime,int(user_id)))
+                return cur.rowcount==1
+    except Exception as e:
+        print(f"Membership DB photo save error: {e}")
+        return False
+    finally:
+        _membership_db_release(conn)
+
+def get_profile_photo(user_id):
+    if not membership_db_ready or not user_id:return None
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT profile_photo,profile_photo_mime FROM ai_for_members WHERE user_id=%s",(int(user_id),))
+                row=cur.fetchone()
+                return row if row and row[0] else None
+    except Exception as e:
+        print(f"Membership DB photo get error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
 
 # Durable Owner Control Center / runtime configuration store.
 CONTROL_DB_REQUIRED = os.environ.get("AI_FOR_CONTROL_DB_REQUIRED", "true").lower() not in ("0", "false", "no", "off")
@@ -312,93 +435,78 @@ control_db_error = ""
 control_db_lock = threading.RLock()
 
 def _control_db_connect():
-    if not DATABASE_URL or psycopg2 is None:
+    if not _db_pool_init():
         return None
-    return psycopg2.connect(DATABASE_URL, connect_timeout=8, sslmode="require")
+    return _pool_conn(control_db_pool)
+
+def _control_db_release(conn, broken=False):
+    _pool_put(control_db_pool, conn, broken)
 
 def init_control_db():
     global control_db_ready, control_db_error
     if not DATABASE_URL:
-        control_db_error = "DATABASE_URL is not configured"
-        return False
+        control_db_error = "DATABASE_URL is not configured"; control_db_ready = False; return False
     if psycopg2 is None:
-        control_db_error = "psycopg2-binary is not installed"
-        return False
+        control_db_error = "psycopg2-binary is not installed"; control_db_ready = False; return False
+    conn=None
     try:
         with control_db_lock:
-            conn = _control_db_connect()
-            if not conn:
-                return False
+            _db_pool_init(); conn=_control_db_connect()
+            if not conn: raise RuntimeError("PostgreSQL connection pool unavailable")
             with conn:
                 with conn.cursor() as cur:
-                    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_config (
-                        config_key TEXT PRIMARY KEY,
-                        config_value JSONB NOT NULL,
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )""")
-                    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_control_audit (
-                        id BIGSERIAL PRIMARY KEY,
-                        actor_user_id BIGINT NOT NULL,
-                        action TEXT NOT NULL,
-                        target TEXT NOT NULL DEFAULT '',
-                        details JSONB NOT NULL DEFAULT '{}'::jsonb,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-                    )""")
-            control_db_ready = True
-            control_db_error = ""
-            return True
+                    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_config (config_key TEXT PRIMARY KEY, config_value JSONB NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+                    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_control_audit (id BIGSERIAL PRIMARY KEY, actor_user_id BIGINT NOT NULL, action TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', details JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+            control_db_ready=True; control_db_error=""; return True
     except Exception as e:
-        control_db_ready = False
-        control_db_error = str(e)
-        print(f"Control DB init error: {e}")
-        return False
+        control_db_ready=False; control_db_error=str(e); print(f"Control DB init error: {e}"); return False
+    finally:
+        _control_db_release(conn)
 
 def control_db_get(key, default=None):
-    if not control_db_ready:
-        return default
+    if not control_db_ready: return default
+    conn=None
     try:
         with control_db_lock:
-            conn = _control_db_connect()
-            if not conn: return default
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT config_value FROM ai_for_config WHERE config_key=%s", (str(key),))
-                    row=cur.fetchone()
-                    return row[0] if row else default
+            conn=_control_db_connect()
+            if not conn:return default
+            with conn.cursor() as cur:
+                cur.execute("SELECT config_value FROM ai_for_config WHERE config_key=%s",(str(key),))
+                row=cur.fetchone(); return row[0] if row else default
     except Exception as e:
-        print(f"Control DB get error: {e}")
-        return default
+        print(f"Control DB get error: {e}"); return default
+    finally:
+        _control_db_release(conn)
 
 def control_db_set(key, value):
-    if not control_db_ready:
-        return False
+    if not control_db_ready:return False
+    conn=None
     try:
         with control_db_lock:
             conn=_control_db_connect()
-            if not conn: return False
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("""INSERT INTO ai_for_config(config_key,config_value,updated_at) VALUES(%s,%s,NOW())
-                                   ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,updated_at=NOW()""", (str(key), json.dumps(value, ensure_ascii=False)))
-            return True
+            if not conn:return False
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO ai_for_config(config_key,config_value,updated_at) VALUES(%s,%s,NOW()) ON CONFLICT(config_key) DO UPDATE SET config_value=EXCLUDED.config_value,updated_at=NOW()""",(str(key),json.dumps(value,ensure_ascii=False)))
+            conn.commit(); return True
     except Exception as e:
-        print(f"Control DB set error: {e}")
-        return False
+        print(f"Control DB set error: {e}"); return False
+    finally:
+        _control_db_release(conn)
 
 def control_audit(actor_user_id, action, target="", details=None):
-    if not control_db_ready:
-        return False
+    if not control_db_ready:return False
+    conn=None
     try:
         with control_db_lock:
             conn=_control_db_connect()
-            if not conn: return False
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute("INSERT INTO ai_for_control_audit(actor_user_id,action,target,details) VALUES(%s,%s,%s,%s)", (int(actor_user_id),str(action)[:120],str(target)[:240],json.dumps(details or {}, ensure_ascii=False)))
-            return True
+            if not conn:return False
+            with conn.cursor() as cur:
+                cur.execute("INSERT INTO ai_for_control_audit(actor_user_id,action,target,details) VALUES(%s,%s,%s,%s)",(int(actor_user_id),str(action)[:120],str(target)[:240],json.dumps(details or {},ensure_ascii=False)))
+            conn.commit(); return True
     except Exception as e:
-        print(f"Control audit error: {e}")
-        return False
+        print(f"Control audit error: {e}"); return False
+    finally:
+        _control_db_release(conn)
 
 def persist_runtime_config():
     if not control_db_ready:
@@ -410,6 +518,7 @@ def persist_runtime_config():
         "theme": AI_FOR_THEME if isinstance(globals().get("AI_FOR_THEME",{}),dict) else {},
         "emergency_mode": bool(settings.get("emergency_mode",False)),
         "emergency_reason": str(settings.get("emergency_reason", "")),
+        "active_group_chat_id": active_group_chat_id,
     }
     return control_db_set("runtime", payload)
 
@@ -426,23 +535,10 @@ def load_runtime_config_from_db():
             pass
     if "emergency_mode" in data: settings["emergency_mode"]=bool(data["emergency_mode"])
     if "emergency_reason" in data: settings["emergency_reason"]=str(data["emergency_reason"] or "")
+    if data.get("active_group_chat_id"):
+        globals()["active_group_chat_id"] = data["active_group_chat_id"]
     return True
 
-
-def save_users_to_file():
-    with file_lock:
-        atomic_save(USERS_FILE, {
-            "active_group_chat_id": active_group_chat_id,
-            "users": known_users
-        })
-
-def load_users_from_file():
-    global known_users, active_group_chat_id
-    data = load_json(USERS_FILE, {})
-    if isinstance(data, dict):
-        known_users = data.get("users", {}) if isinstance(data.get("users", {}), dict) else {}
-        if data.get("active_group_chat_id"):
-            active_group_chat_id = str(data["active_group_chat_id"])
 
 def load_settings():
     data = load_json(SETTINGS_FILE, {})
@@ -494,12 +590,10 @@ def save_moderation_log():
     with file_lock:
         atomic_save(MOD_LOG_FILE, moderation_log[-500:])
 
-USER_PHOTOS_DIR = os.path.join(os.path.dirname(USERS_FILE), "user_photos")
+USER_PHOTOS_DIR = os.path.join(BASE_DIR, "user_photos")
 os.makedirs(USER_PHOTOS_DIR, exist_ok=True)
 
-load_users_from_file()
 init_membership_db()
-migrate_local_users_to_db()
 init_control_db()
 
 ZYNMART_PROMPT = """أنت مساعد AI موثوق داخل ZYNMART وبيئة Pi Network.
@@ -594,24 +688,16 @@ def is_moderator(chat_id, user_id):
 
 def remember_user(msg):
     global known_users
-    u = msg.get("from", {})
-    uid = u.get("id")
-    if not uid:
-        return
-    key = str(uid)
-    old = known_users.get(key, {})
-    known_users[key] = {
-        "id": uid,
-        "username": u.get("username", old.get("username", "")),
-        "first_name": u.get("first_name", old.get("first_name", "")),
-        "last_name": u.get("last_name", old.get("last_name", "")),
-        "last_chat_id": msg.get("chat", {}).get("id", old.get("last_chat_id")),
-        "last_private_chat_id": (msg.get("chat", {}).get("id") if msg.get("chat", {}).get("type") == "private" else old.get("last_private_chat_id")),
-        "last_seen": datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
-    }
-    # Keep users.json as a legacy/local cache only. It is NOT the authoritative
-    # membership store because Render's filesystem is ephemeral.
-    save_users_to_file()
+    u=msg.get("from",{}); uid=u.get("id")
+    if not uid:return
+    key=str(uid); old=known_users.get(key,{})
+    chat=msg.get("chat",{}); chat_id=chat.get("id"); chat_type=chat.get("type")
+    known_users[key]={"id":uid,"username":u.get("username",old.get("username","")),"first_name":u.get("first_name",old.get("first_name","")),"last_name":u.get("last_name",old.get("last_name","")),"last_chat_id":chat_id or old.get("last_chat_id"),"last_private_chat_id":chat_id if chat_type=="private" else old.get("last_private_chat_id"),"last_seen":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}
+    # PostgreSQL is the sole authoritative membership store.
+    if chat_type=="private":
+        ok,_=register_platform_member(u,source="telegram_private",chat_id=chat_id)
+        if not ok and MEMBERSHIP_DB_REQUIRED:
+            print(f"Durable member registration unavailable for Telegram user {uid}")
 
 def search_official(query):
     """Search with source scoping for sensitive/current Pi and ZYNMART facts.
@@ -1119,13 +1205,18 @@ def extract_target(text):
     return m.group(1) if m else None
 
 def find_user_by_username(username):
-    if not username:
-        return None
-    wanted = username.lower().lstrip("@")
-    for uid, u in known_users.items():
-        if str(u.get("username", "")).lower().lstrip("@") == wanted:
-            return int(uid)
-    return None
+    wanted=str(username or "").lower().lstrip("@")
+    if not wanted or not membership_db_ready:return None
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn.cursor() as cur:
+            cur.execute("SELECT user_id FROM ai_for_members WHERE lower(username)=lower(%s) AND membership_status <> 'banned' ORDER BY last_seen DESC LIMIT 1",(wanted,))
+            row=cur.fetchone(); return int(row[0]) if row else None
+    except Exception as e:
+        print(f"Membership DB username lookup error: {e}"); return None
+    finally:_membership_db_release(conn)
 
 def log_action(chat_id, admin_id, action, target_id=None, details=""):
     moderation_log.append({
@@ -1316,7 +1407,7 @@ def handle_auto_moderation(msg):
     # Never moderate messages sent on behalf of a channel/group.
     if msg.get("sender_chat"):
         return False
-    # Telegram is authoritative for admin immunity; users.json is only auxiliary memory.
+    # Telegram is authoritative for admin immunity; PostgreSQL stores platform identity.
     if user_id in ADMIN_IDS or is_moderator(chat_id, user_id) or is_chat_admin(chat_id, user_id) or user_id in manual_exceptions:
         return False
 
@@ -1577,12 +1668,17 @@ def daily_item_text(name):
     return f"{labels.get(name,name)}\nالوقت: {item.get('time','')}\nالنص: {item.get('text','')}"
 
 def _broadcast_recipients():
-    ids = set()
-    for item in known_users.values():
+    ids=set()
+    if membership_db_ready:
+        conn=None
         try:
-            cid = item.get("last_private_chat_id")
-            if cid: ids.add(int(cid))
-        except Exception: pass
+            conn=_membership_db_connect()
+            if conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT last_private_chat_id FROM ai_for_members WHERE membership_status='active' AND last_private_chat_id IS NOT NULL")
+                    ids.update(int(r[0]) for r in cur.fetchall() if r and r[0])
+        except Exception as e: print(f"Broadcast member query error: {e}")
+        finally:_membership_db_release(conn)
     with _webapp_access_lock:
         ids.update(int(v) for v in _webapp_allowed_ids.values() if v)
     return sorted(ids)
@@ -1679,7 +1775,7 @@ def process_admin_text(chat_id, user_id, text):
         username = text.strip().lstrip("@")
         target_id = find_user_by_username(username)
         if not target_id:
-            send_message(chat_id, "⚠️ المستخدم غير موجود في users.json. لن أخمّن هويته.")
+            send_message(chat_id, "⚠️ المستخدم غير موجود في قاعدة بيانات الأعضاء. لن أخمّن هويته.")
         else:
             manual_exceptions.add(target_id)
             settings["manual_exceptions"] = sorted(manual_exceptions)
@@ -1697,7 +1793,7 @@ def process_admin_text(chat_id, user_id, text):
             save_settings()
             send_message(chat_id, f"✅ تمت إزالة @{username} من الاستثناءات.")
         else:
-            send_message(chat_id, "⚠️ المستخدم غير موجود في users.json.")
+            send_message(chat_id, "⚠️ المستخدم غير موجود في قاعدة بيانات الأعضاء.")
         admin_modes.pop(user_id, None)
         return True
 
@@ -1733,7 +1829,7 @@ def execute_moderation_command(chat_id, admin_id, text):
     username = groups[0]
     target_id = find_user_by_username(username)
     if not target_id:
-        send_message(chat_id, "⚠️ لم أجد هذا المستخدم في users.json. لن أخمّن هويته.")
+        send_message(chat_id, "⚠️ لم أجد هذا المستخدم في قاعدة بيانات الأعضاء. لن أخمّن هويته.")
         return True
     if target_is_protected(chat_id, target_id):
         send_message(chat_id, "⚠️ لا يمكن تنفيذ إجراء يدوي على أدمن أو مشرف.")
@@ -2027,9 +2123,9 @@ def _webapp_auth():
     user = _webapp_data_check(init_data)
     if not user:
         return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
+    ok, is_new = register_platform_member(user, source="webapp")
     if not _webapp_has_access(user):
         return None, jsonify({"ok": False, "error": "access_denied"}), 403
-    ok, is_new = register_platform_member(user, source="webapp")
     if MEMBERSHIP_DB_REQUIRED and not ok:
         return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
     user["platform_member"] = bool(ok)
@@ -2157,8 +2253,8 @@ async function toolCall(body){return api('/api/app/tools',{method:'POST',body:JS
 async function calcRun(){let r=document.getElementById('calcResult');try{let d=await toolCall({op:'calculator',expression:document.getElementById('calc').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'تعذر الحساب')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحساب.</div>'}}
 async function timeRun(){let r=document.getElementById('timeResult');try{let d=await toolCall({op:'time'});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' · '+esc(d.timezone||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر قراءة الوقت.</div>'}}
 async function translateRun(){let r=document.getElementById('transResult');try{let d=await toolCall({op:'translate',text:document.getElementById('transText').value,target:document.getElementById('targetLang').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذرت الترجمة.</div>'}}
-function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية. هذه مساحة مستقبلية فقط.</p></div></section>'}
-async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري الرفع...</div>';let fd=new FormData();fd.append('photo',f);try{let x=await fetch('/api/app/account/photo',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await x.json();r.innerHTML='<div class="statusBox">'+(d.ok?'✅ تم رفع الصورة.':'⚠️ تعذر رفع الصورة.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر رفع الصورة.</div>'}}
+function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-Telegram-Init-Data':tg?.initData||''}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
+async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري الرفع...</div>';let fd=new FormData();fd.append('photo',f);try{let x=await fetch('/api/app/account/photo',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await x.json();r.innerHTML='<div class="statusBox">'+(d.ok?'✅ تم حفظ الصورة في قاعدة البيانات الدائمة.':'⚠️ تعذر حفظ الصورة: '+esc(d.error||'unknown'))+'</div>';if(d.ok)setTimeout(accountBox,300)}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر رفع الصورة.</div>'}}
 async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<section class="hero"><h1>🔔 الإشعارات</h1><p>تحديثات النظام والميزات والإشعارات الخاصة بك.</p></section><div id="notes" class="detail"><div class="statusBox">⏳ جاري التحميل...</div></div>';try{let d=await api('/api/app/notifications');document.getElementById('notes').innerHTML=(d.notifications||[]).slice().reverse().map(n=>'<div class="statusBox"><b>'+esc(n.title||'إشعار')+'</b><div class="row">'+esc(n.text||'')+'</div><div class="small">'+esc(n.time||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد إشعارات.</div>';document.getElementById('notifyBadge').textContent=d.unread?'🔔 '+d.unread:'الإشعارات';if(d.unread)await api('/api/app/notifications',{method:'POST',body:JSON.stringify({action:'read_all'})})}catch(e){document.getElementById('notes').innerHTML='<div class="statusBox">⚠️ تعذر تحميل الإشعارات.</div>'}}
 function securityBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">Telegram initData: <span class="ok">تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
 function supportBox(){document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'support\')">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم وحالة النظام</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">Telegram WebApp: <span class="ok">متصل</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?'<span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div></section>'}
@@ -2175,18 +2271,21 @@ try{
  let appRows=ordered.filter(k=>byKey[k]).map(k=>{let s=byKey[k],isOpen=!!d.open_sections?.includes(k);return '<div class="ownerSettingRow"><div class="ownerSettingInfo"><div class="ownerSettingTitle">'+esc(s.icon+' '+s.title)+'</div><div class="small">'+esc(s.description||'')+'</div><span class="ownerState '+(isOpen?'ownerOpen':'ownerLocked')+'">'+(isOpen?'🟢 مفتوح للعامة':'🔒 مغلق للعامة')+'</span></div><button class="mini ownerToggle" onclick="togglePublic(\''+esc(k)+'\','+(!isOpen)+')">'+(isOpen?'🔒 قفل':'🔓 فتح')+'</button></div>'}).join('');
  document.getElementById('ownerPanel').innerHTML=
  '<div class="statusBox"><div class="ownerSectionHead">1️⃣ التطبيقات والميزات — فتح / قفل</div><p class="small">فتح التطبيق يجعله عامًا. قفله يمنع الوصول العام، مع بقائه دائمًا داخل إعدادات المالك.</p>'+appRows+'</div>'+
- '<div class="statusBox"><div class="ownerSectionHead">2️⃣ الأعضاء والوصول</div><p class="small">عضوية المنصة محفوظة في PostgreSQL. يمكن استيراد users.json القديم مرة واحدة دون تغيير Telegram User ID.</p><input id="legacyMembersFile" type="file" accept="application/json,.json" style="width:100%;margin-top:10px"><button class="action green" onclick="migrateLegacyMembers()">👥 استيراد الأعضاء القدامى</button><div id="migrationResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead" style="font-size:16px">الوصول المسموح يدويًا</div><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">➕ إضافة مستخدم</button><div class="small">الإضافة لا تمنح الإدارة ولا تغيّر هوية Telegram User ID.</div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">2️⃣ الأعضاء والوصول</div><p class="small">PostgreSQL هو المصدر الدائم والوحيد لعضوية AI for. كل مستخدم يبدأ/يتفاعل مع البوت يُسجّل بمعرّف Telegram الثابت.</p><button class="action green" onclick="loadMembers()">👥 معاينة أعضاء PostgreSQL</button><div id="membersResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead" style="font-size:16px">الوصول المسموح يدويًا</div><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">➕ إضافة مستخدم</button><div class="small">الإضافة لا تمنح الإدارة ولا تغيّر هوية Telegram User ID.</div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">3️⃣ المظهر والوضوح</div><p class="small">ألوان النصوص والعناوين والأزرار وحالات الفتح والقفل تُدار من Theme System.</p><button class="action dark" onclick="ownerThemeStatus()">🎨 فحص المظهر</button><div id="themeStatus" class="small"></div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">4️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">4️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">5️⃣ الطوارئ</div><button class="action dark" onclick="emergency()">🛡️ حالة الطوارئ</button></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">6️⃣ Feature Test Center</div><button class="action" onclick="ownerTests()">🧪 تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">7️⃣ سجل التدقيق</div><p class="small">عمليات المالك الحساسة تسجل في قاعدة التدقيق.</p></div>';
 }catch(e){document.getElementById('ownerPanel').innerHTML='<div class="statusBox">⚠️ تعذر تحميل مركز المالك.</div>'}}
 async function togglePublic(key,open){try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'section',key:key,open:!!open})});if(!d.ok)throw new Error(d.error||'toggle_failed');state=await api('/api/app/bootstrap');applyTheme();await ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة الميزة: '+(e.message||''))}}
-async function migrateLegacyMembers(){let f=document.getElementById('legacyMembersFile')?.files?.[0],r=document.getElementById('migrationResult');if(!f)return;r.textContent='⏳ جاري استيراد الأعضاء بأمان...';let fd=new FormData();fd.append('users_file',f);try{let res=await fetch('/api/app/owner',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await res.json();r.textContent=d.ok?'✅ تم الاستيراد: '+(d.imported||0)+' جديد، '+(d.existing||0)+' موجود، '+(d.invalid||0)+' غير صالح.':'⚠️ '+(d.error||'تعذر الاستيراد.')}catch(e){r.textContent='⚠️ تعذر الاستيراد.'}}
 async function ownerThemeStatus(){let r=document.getElementById('themeStatus');if(!r)return;r.textContent='🎨 Theme loaded: '+(state.theme?'نعم':'لا')+' — سيتم فحص التباين ضمن الاختبارات.'}
 
 async function allowUser(){let x=document.getElementById('allowUser')?.value.trim();if(!x)return;try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'allow_user',username:x})});ownerArea()}catch(e){alert('⚠️ تعذر إضافة المستخدم.')}}
+async function loadMembers(){let r=document.getElementById('membersResult');if(!r)return;r.textContent='⏳ جاري قراءة PostgreSQL...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'members',limit:100})});r.innerHTML=(d.members||[]).map(m=>`<div class="statusBox"><b>${esc((m.first_name||'')+' '+(m.last_name||''))}</b><div class="small">ID: ${esc(m.user_id)} · ${esc(m.username?'@'+m.username:'بدون username')} · ${esc(m.membership_status)} · ${esc(m.role)}</div><div class="toolbar"><button class="mini" onclick="memberStatus(${Number(m.user_id)},'active')">🟢 تفعيل</button><button class="mini" onclick="memberStatus(${Number(m.user_id)},'banned')">🚫 حظر</button><button class="mini" onclick="memberRole(${Number(m.user_id)},'member')">👤 عضو</button><button class="mini" onclick="memberRole(${Number(m.user_id)},'admin')">🛡️ Admin</button></div></div>`).join('')||'<div>لا يوجد أعضاء.</div>'}catch(e){r.textContent='⚠️ تعذر قراءة قاعدة الأعضاء: '+e.message}}
+async function memberStatus(id,status){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'member_status',user_id:id,status})});loadMembers()}catch(e){alert('⚠️ '+e.message)}}
+async function memberRole(id,role){try{await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'member_role',user_id:id,role})});loadMembers()}catch(e){alert('⚠️ '+e.message)}}
+async function dbHealth(){let r=document.getElementById('dbHealthResult');if(!r)return;r.textContent='⏳ فحص الاتصال والجداول...';try{let d=await api('/api/app/db/health');r.innerHTML=(d.ok?'✅ PostgreSQL يعمل بشكل سليم.':'⚠️ قاعدة البيانات تحتاج مراجعة.')+'<br>'+esc(JSON.stringify({ping:d.ping,schema:d.membership?.schema_version,pool:d.membership?.pool_max,last_ok:d.membership?.last_ok_at,error:d.membership?.error||d.control?.error||''}))}catch(e){r.textContent='❌ '+e.message}}
 function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='tg://resolve?domain=zynmart_ai_bot&start=admin'}catch(e){}},50)}
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
 async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري الاختبار...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});r.innerHTML=(d.tests||[]).map(x=>'<div>'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات.'}}
@@ -2345,19 +2444,38 @@ def webapp_account_photo():
     raw=uploaded.read(2_000_000); mime=(uploaded.mimetype or "image/jpeg").lower()
     if not raw: return jsonify({"ok":False,"error":"empty_photo"}),400
     if mime not in ("image/jpeg","image/png","image/webp"): return jsonify({"ok":False,"error":"unsupported_image"}),400
-    uid=str(int(user.get("id"))); path=os.path.join(USER_PHOTOS_DIR,uid+".img")
-    with open(path,"wb") as f: f.write(raw)
-    settings.setdefault("user_photos",{})[uid]={"mime":mime,"path":path}; save_settings()
-    return jsonify({"ok":True})
+    if not save_profile_photo(user.get("id"),raw,mime):
+        return jsonify({"ok":False,"error":"photo_persistence_unavailable"}),503
+    return jsonify({"ok":True,"photo_url":"/api/app/account/photo"})
 
 @app.route("/api/app/account/photo", methods=["GET"])
 def webapp_account_photo_get():
     user, err, code=_webapp_auth()
     if err: return err, code
-    item=settings.get("user_photos",{}).get(str(int(user.get("id"))),{}); path=item.get("path")
-    if not path or not os.path.exists(path): return jsonify({"ok":False,"error":"photo_not_found"}),404
+    row=get_profile_photo(user.get("id"))
+    if not row: return jsonify({"ok":False,"error":"photo_not_found"}),404
     from flask import send_file
-    return send_file(path,mimetype=item.get("mime","image/jpeg"),max_age=0)
+    return send_file(io.BytesIO(bytes(row[0])),mimetype=row[1] or "image/jpeg",max_age=0,download_name="profile")
+
+@app.route("/api/app/db/health", methods=["GET"])
+def webapp_db_health():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
+    ok=ensure_database_ready()
+    conn=None; ping=False; error=membership_db_error
+    try:
+        conn=_membership_db_connect()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT NOW(), current_database(), current_user")
+                row=cur.fetchone(); ping=bool(row)
+                dbinfo={"server_time":row[0].isoformat() if row else None,"database":row[1] if row else None,"user":row[2] if row else None}
+        else: dbinfo={}
+    except Exception as e:
+        error=str(e); dbinfo={}
+    finally: _membership_db_release(conn)
+    return jsonify({"ok":bool(ok and ping),"membership":membership_service_status(),"control":{"persistent":bool(control_db_ready),"error":control_db_error},"ping":ping,"db":dbinfo,"checked_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()})
 
 @app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
@@ -2367,7 +2485,7 @@ def webapp_owner_private():
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
     if request.method == "GET":
         control_status = {"persistent": bool(control_db_ready), "required": bool(CONTROL_DB_REQUIRED), "error": "" if control_db_ready else control_db_error}
-        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","legacy_member_migration","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
+        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
     body=request.get_json(silent=True) or {}; action=str(body.get("action","" )).strip().lower()
     if action == "section":
         key=str(body.get("key","")).strip()
@@ -2381,19 +2499,6 @@ def webapp_owner_private():
         save_settings()
         control_audit(user["id"],"section_toggle",key,{"open":opened,"open_sections":sorted(current)})
         return jsonify({"ok":True,"key":key,"open":opened,"open_sections":sorted(current)})
-    if action == "migrate_legacy_members":
-        upload=request.files.get("users_file")
-        if not upload: return jsonify({"ok":False,"error":"users_file_required"}),400
-        raw=upload.read(2_500_000)
-        if not raw: return jsonify({"ok":False,"error":"empty_users_file"}),400
-        try:
-            payload=json.loads(raw.decode("utf-8-sig"))
-        except Exception:
-            return jsonify({"ok":False,"error":"invalid_users_json"}),400
-        result=import_legacy_members_payload(payload)
-        if result.get("ok"):
-            control_audit(user["id"],"legacy_member_migration","users.json",result)
-        return jsonify(result), (200 if result.get("ok") else 503)
     if action in ("allow_user","remove_user"):
         username=str(body.get("username","")).strip().lstrip("@").lower()
         if not re.fullmatch(r"[A-Za-z0-9_]{3,32}",username): return jsonify({"ok":False,"error":"invalid_username"}),400
@@ -2415,6 +2520,21 @@ def webapp_owner_private():
         return jsonify({"ok":True,"enabled":enabled})
     if action == "status":
         return jsonify({"ok":True,"control_db":{"persistent":control_db_ready,"required":CONTROL_DB_REQUIRED,"error":control_db_error},"membership_db":membership_service_status(),"emergency":emergency_active()})
+    if action == "members":
+        members=list_platform_members(limit=body.get("limit",100),offset=body.get("offset",0),search=str(body.get("search","")).strip())
+        return jsonify({"ok":True,"members":[dict(x) for x in members],"membership":membership_service_status()})
+    if action == "member_status":
+        target=int(body.get("user_id")); status=str(body.get("status","active"))
+        ok=set_platform_member_status(target,status)
+        if ok: control_audit(user["id"],"member_status",str(target),{"status":status})
+        return jsonify({"ok":ok,"user_id":target,"status":status})
+    if action == "member_role":
+        target=int(body.get("user_id")); role=str(body.get("role","member"))
+        ok=set_platform_member_role(target,role)
+        if ok: control_audit(user["id"],"member_role",str(target),{"role":role})
+        return jsonify({"ok":ok,"user_id":target,"role":role})
+    if action == "db_health":
+        return webapp_db_health()
     if action == "test":
         result=owner_feature_tests(user)
         control_audit(user["id"],"feature_tests","owner",result)
@@ -2428,12 +2548,14 @@ def owner_feature_tests(user):
     add("owner_identity", is_owner(user.get("id")), "Verified Telegram User ID matches owner")
     add("admin_exclusion", 6283667477 in ADMIN_IDS and 6283667477 != OWNER_ID, "Admin 2 remains distinct from owner")
     add("owner_route_guard", True, "Route returns not_found for non-owner after initData validation")
-    add("membership_db", membership_db_ready or not MEMBERSHIP_DB_REQUIRED, membership_service_status())
+    add("membership_db", membership_db_ready and bool(get_platform_member(user.get("id"))) or (not MEMBERSHIP_DB_REQUIRED), membership_service_status())
+    add("database_schema", db_schema_version == DB_SCHEMA_VERSION, f"schema={db_schema_version}/{DB_SCHEMA_VERSION}")
+    add("database_pool", membership_db_pool is not None, f"pool_max={DB_POOL_MAX}")
     add("control_db", control_db_ready or not CONTROL_DB_REQUIRED, {"persistent":control_db_ready,"required":CONTROL_DB_REQUIRED,"error":control_db_error})
     public_set=_webapp_public_open_set()
     add("public_firewall", all(k in PLATFORM_SECTION_META for k in public_set), "Public sections are checked server-side")
     add("public_state_separation", all(_webapp_section_publicly_open(k) == (k in public_set) for k in PLATFORM_SECTION_META), "Owner/admin inspection does not override public open/lock state")
-    add("legacy_member_import_path", callable(globals().get("import_legacy_members_payload")), "Owner-only legacy users.json import path exists")
+    add("legacy_member_store_removed", "import_legacy_members_payload" not in globals(), "Legacy local member store is not part of the runtime path")
     add("broadcast_matrix", callable(globals().get("process_admin_text")), "Broadcast command processor is registered; live matrix requires an actual Telegram command test")
     add("ai_endpoint", callable(globals().get("get_ai_response")), "AI response function exists")
     add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
@@ -2688,7 +2810,7 @@ def handle_callback(data):
     elif action == "admin_exceptions":
         ex = []
         for uid in sorted(manual_exceptions):
-            u = known_users.get(str(uid), {})
+            u = get_platform_member(uid) or {}
             ex.append("@" + u.get("username","") if u.get("username") else str(uid))
         send_message(chat_id, "🧩 الاستثناءات الحالية:\n" + ("\n".join(ex) if ex else "لا توجد."),
                      reply_markup={"inline_keyboard": [
@@ -2753,7 +2875,7 @@ def webhook():
         remember_user(msg)
         if active_group_chat_id != chat_id:
             active_group_chat_id = chat_id
-            save_users_to_file()
+            persist_runtime_config()
 
         # Any group member's direct reply cancels the pending AI answer.
         reply_to = msg.get("reply_to_message", {})

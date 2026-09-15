@@ -17,6 +17,10 @@ except Exception:
 
 app = Flask(__name__)
 
+# Pi Ecosystem Edition: this deployment is intentionally Pi-authentication-only.
+# The external/Web edition will be derived separately from the universal-identity source.
+PI_EDITION_ONLY = True
+
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 HERMES_API_KEY = os.environ.get("HERMES_API_KEY", "")
 GROQ_API_KEYS = []
@@ -787,7 +791,27 @@ def get_web_account(token):
     except Exception as e: print(f"Web account lookup error: {e}"); return None
     finally:_membership_db_release(conn)
 
-def _get_web_account_from_request():return get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE,""))
+def _get_web_account_from_request():
+    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE,""))
+    if not account:
+        return None
+    if PI_EDITION_ONLY:
+        conn=None
+        try:
+            conn=_membership_db_connect()
+            if not conn:
+                return None
+            with conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT 1 FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' AND verified=TRUE LIMIT 1", (str(account["account_id"]),))
+                    if not cur.fetchone():
+                        return None
+        except Exception:
+            return None
+        finally:
+            _membership_db_release(conn)
+    return account
+
 
 def _verified_pi_user(access_token):
     token=str(access_token or "").strip()
@@ -2697,20 +2721,15 @@ def _webapp_file_analysis(name, content, kind=""):
     return {"type":"text", "name":name, "characters":len(text), "lines":len(lines), "words":len(words), "preview":text[:6000]}
 
 def _webapp_auth():
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    user = _webapp_data_check(init_data)
-    if user:
-        ok, is_new = register_platform_member(user, source="webapp")
-        if MEMBERSHIP_DB_REQUIRED and not ok:
-            return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
-        user["platform_member"] = bool(ok)
-        user["platform_member_new"] = bool(is_new)
-        user["auth_type"] = "telegram"
-        return user, None, None
-    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE, ""))
+    # Pi Edition deliberately accepts only a verified Pi-linked web session.
+    # Telegram WebApp initData is not an authentication path in this deployment.
+    account = _get_web_account_from_request()
     if account:
-        return _web_account_user(account), None, None
-    return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
+        user = _web_account_user(account)
+        user["auth_type"] = "pi"
+        user["pi_edition"] = True
+        return user, None, None
+    return None, jsonify({"ok": False, "error": "pi_auth_required"}), 401
 
 def _webapp_set_menu_button():
     global webapp_menu_configured
@@ -3190,14 +3209,14 @@ async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attem
 '''
 
 PLATFORM_HTML = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.GOOGLE_CLIENT_ID="__AI_FOR_GOOGLE_CLIENT_ID__";window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_REDIRECT_URI__";window.TELEGRAM_BOT_USERNAME="zynmart_ai_bot";</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><script src="https://telegram.org/js/telegram-widget.js?22" async></script><title>AI for — Web3 Platform</title>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
 <style>
 :root{--bg:#071018;--panel:#0d1822;--line:#1e3443;--text:#f4f8fb;--muted:#a9bac7;--accent:#49e6a1}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0%,#123026 0,#071018 42%,#050a0f 100%);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}.brand{font-size:25px;font-weight:800}.badge{font-size:12px;border:1px solid #285543;color:var(--accent);padding:7px 10px;border-radius:999px;background:#0b1d17}.hero{padding:48px 0 28px}.hero h1{font-size:clamp(34px,7vw,68px);line-height:1.05;margin:0 0 18px}.hero h1 span{color:var(--accent)}.hero p{font-size:18px;line-height:1.8;color:var(--muted);max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;color:#04110b;background:var(--accent);padding:13px 18px;border-radius:13px;font-weight:800}.btn.alt{color:var(--text);background:#102131;border:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{background:rgba(13,24,34,.88);border:1px solid var(--line);border-radius:18px;padding:20px}.icon{font-size:28px}.card h3{margin:10px 0 7px}.card p{margin:0;color:var(--muted);line-height:1.7}.section{margin-top:34px}.section h2{font-size:25px}.road{display:grid;gap:10px}.step{display:flex;gap:12px;align-items:flex-start;background:#0b151e;border:1px solid var(--line);padding:14px;border-radius:14px}.num{min-width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#123529;color:var(--accent);font-weight:800}.foot{padding:30px 0;color:#8195a3;font-size:13px}
-</style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Web3 Platform Foundation</div></header>
-<section class="hero"><h1>AI for <span>Web3</span></h1><p>هوية واحدة عبر Pi وGoogle وEmail وTelegram. المتصفح لا يصنع هوية جديدة لمجرد تغيّر الجهاز أو المتصفح؛ الحساب مرتبط بهوية موثقة ومزوّدي تسجيل الدخول.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>هوية AI for</h3><p>اختر طريقة الدخول. إذا كانت الهوية مرتبطة بحساب سابق سيتم فتح نفس الحساب، وليس إنشاء حساب ثانٍ.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button><button class="btn alt" onclick="loginTelegram()">✈️ الدخول عبر Telegram</button><button class="btn alt" onclick="showEmailAuth()">✉️ Email</button><button class="btn alt" onclick="loginGoogle()">🔵 Google</button></div><div id="emailBox" style="display:none;margin-top:14px"><input id="authEmail" type="email" placeholder="البريد الإلكتروني" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><input id="authPassword" type="password" placeholder="كلمة المرور — 8 أحرف على الأقل" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><input id="authName" placeholder="الاسم عند إنشاء حساب جديد" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><div class="actions"><button class="btn" onclick="emailAuth('login')">دخول</button><button class="btn alt" onclick="emailAuth('register')">إنشاء</button></div></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
+</style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Pi Ecosystem Edition</div></header>
+<section class="hero"><h1>AI for <span>Pi</span></h1><p>نسخة AI for المخصصة لمنظومة Pi. تسجيل الدخول في هذه النسخة يتم عبر Pi Authentication فقط، ولا توجد حسابات أو طرق دخول بديلة.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>🟣 Pi Authentication</h3><p>هذه النسخة مخصصة لـPi Ecosystem Listing. تسجيل الدخول الوحيد هو Pi Authentication.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
 <section class="grid"><div class="card"><div class="icon">🧠</div><h3>AI Center</h3><p>محرك الذكاء والخدمات مع قابلية إضافة مزايا وأدوات جديدة.</p></div><div class="card"><div class="icon">🔐</div><h3>Identity & Access</h3><p>هوية وصلاحيات منفصلة عن الواجهة العامة مع حماية منطقة المالك.</p></div><div class="card"><div class="icon">🗄️</div><h3>Persistent Core</h3><p>الإعدادات والعضويات والبيانات الحساسة مصممة لتكون محفوظة في PostgreSQL.</p></div><div class="card"><div class="icon">⛓️</div><h3>Web3 Ready</h3><p>طبقة قابلة لإضافة الهوية والمحافظ والخدمات اللامركزية لاحقًا دون كسر الأساس.</p></div></section>
 <section class="section" id="architecture"><h2>البنية</h2><div class="road"><div class="step"><div class="num">1</div><div><b>Web3 Platform</b><br><span style="color:var(--muted)">الموقع والحساب ولوحة التحكم والإعدادات والخدمات.</span></div></div><div class="step"><div class="num">2</div><div><b>Core & PostgreSQL</b><br><span style="color:var(--muted)">مصدر دائم للإعدادات والعضويات والصلاحيات والسجل.</span></div></div><div class="step"><div class="num">3</div><div><b>Telegram Bot</b><br><span style="color:var(--muted)">مسار مستقل يحافظ على سلوكه ووظائفه الحالية.</span></div></div><div class="step"><div class="num">4</div><div><b>AI for Local</b><br><span style="color:var(--muted)">الطبقة القادمة لـ SoloHost وTermux بعد تثبيت المنصة.</span></div></div></div></section>
-<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for — هوية موحدة مع ربط آمن بين مزوّدي الدخول.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';fetch('/api/platform/me').then(r=>{if(r.ok)location.href='/app'}).catch(()=>{})}function showEmailAuth(){document.getElementById('emailBox').style.display='block'}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من الهوية...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');authMsg('✅ تم التحقق وفتح حسابك الموحد.');setTimeout(()=>location.href='/app',300)}catch(e){authMsg('⚠️ '+e.message)}}async function emailAuth(mode){let email=document.getElementById('authEmail').value,password=document.getElementById('authPassword').value,name=document.getElementById('authName').value;if(mode==='verify'){let code=prompt('أدخل رمز التحقق الذي وصلك إلى البريد الإلكتروني:');if(!code)return;await postAuth('/api/platform/email/verify',{email,code});return}let r=await fetch(mode==='login'?'/api/platform/email/login':'/api/platform/email/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,display_name:name})});let d=await r.json();if(d.ok){if(d.verification_required){authMsg('📧 تم إنشاء الحساب. تحقق من بريدك ثم أدخل رمز التحقق.');let b=document.querySelector('#emailBox .actions');if(!document.getElementById('emailVerifyBtn')){let v=document.createElement('button');v.id='emailVerifyBtn';v.className='btn';v.textContent='تحقق من البريد';v.onclick=()=>emailAuth('verify');b.appendChild(v)}}else{location.href='/app'}}else{authMsg('⚠️ '+(d.error||'auth_failed'))}}async function loginPi(){if(window.Pi&&typeof window.Pi.authenticate==='function'){try{const a=await window.Pi.authenticate(['username'],()=>{});await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ تعذر الدخول عبر Pi: '+(e?.message||e))}return}if(!window.PI_CLIENT_ID){authMsg('⚠️ Pi Sign-in يحتاج PI_CLIENT_ID في إعدادات المنصة.');return}const state=crypto.randomUUID();sessionStorage.setItem('ai_for_pi_state',state);const redirect=window.PI_SIGNIN_REDIRECT_URI||location.origin+'/platform';if(window.Pi&&typeof window.Pi.signIn==='function'){window.Pi.signIn({clientId:window.PI_CLIENT_ID,redirectUri:redirect,scopes:['username'],state});}else{location.href='https://accounts.pinet.com/oauth/authorize?response_type=token&client_id='+encodeURIComponent(window.PI_CLIENT_ID)+'&redirect_uri='+encodeURIComponent(redirect)+'&scope=username&state='+encodeURIComponent(state)}}async function loginGoogle(){if(!window.GOOGLE_CLIENT_ID){authMsg('⚠️ Google يحتاج GOOGLE_CLIENT_ID في إعدادات المنصة.');return}if(!window.google?.accounts?.id){await new Promise((resolve,reject)=>{let x=document.createElement('script');x.src='https://accounts.google.com/gsi/client';x.onload=resolve;x.onerror=reject;document.head.appendChild(x)}).catch(()=>{})}if(!window.google?.accounts?.id){authMsg('⚠️ تعذر تحميل Google Identity Services.');return}window.google.accounts.id.initialize({client_id:window.GOOGLE_CLIENT_ID,callback:r=>postAuth('/api/platform/google/login',{id_token:r.credential})});window.google.accounts.id.prompt()}function loginTelegram(){if(!window.TELEGRAM_BOT_USERNAME){authMsg('⚠️ Telegram Login غير مضبوط.');return}window.onTelegramAuth=u=>{if(u)postAuth('/api/platform/telegram/login',u);else authMsg('⚠️ لم تتم مصادقة Telegram.')};let box=document.getElementById('tgLoginWidget');if(box)box.remove();box=document.createElement('div');box.id='tgLoginWidget';let sc=document.createElement('script');sc.async=true;sc.src='https://telegram.org/js/telegram-widget.js?22';sc.dataset.telegramLogin=window.TELEGRAM_BOT_USERNAME;sc.dataset.size='large';sc.dataset.userpic='false';sc.dataset.requestAccess='write';sc.dataset.onauth='onTelegramAuth(user)';box.appendChild(sc);document.getElementById('authBox').appendChild(box);authMsg('⏳ أكمل تسجيل الدخول من Telegram.')}async function handlePiCallback(){const p=new URLSearchParams(location.hash.slice(1));const token=p.get('access_token'),st=p.get('state');if(!token)return;const expected=sessionStorage.getItem('ai_for_pi_state');const linking=sessionStorage.getItem('ai_for_pi_linking')==='1';sessionStorage.removeItem('ai_for_pi_state');sessionStorage.removeItem('ai_for_pi_linking');history.replaceState(null,'',location.pathname);if(!expected||st!==expected){authMsg('⚠️ فشل التحقق من حالة Pi.');return}if(linking){let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'pi',access_token:token})}).then(r=>r.json());authMsg(d.ok?'✅ تم ربط حساب Pi بالهوية الحالية.':'⚠️ '+(d.error||'link_failed'));if(d.ok)setTimeout(()=>location.href='/app',500)}else{await postAuth('/api/platform/pi/login',{access_token:token})}}showAuth();handlePiCallback();</script></body></html>"""
+<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';fetch('/api/platform/me').then(r=>{if(r.ok)location.href='/app'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');authMsg('✅ تم التحقق عبر Pi وفتح AI for.');setTimeout(()=>location.href='/app',300)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){if(window.Pi&&typeof window.Pi.authenticate==='function'){try{const a=await window.Pi.authenticate(['username'],()=>{});await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ تعذر الدخول عبر Pi: '+(e?.message||e))}return}authMsg('⚠️ يجب فتح AI for Pi داخل بيئة Pi التي توفر Pi SDK.')}async function handlePiCallback(){const p=new URLSearchParams(location.hash.slice(1));const token=p.get('access_token'),st=p.get('state');if(!token)return;const expected=sessionStorage.getItem('ai_for_pi_state');sessionStorage.removeItem('ai_for_pi_state');history.replaceState(null,'',location.pathname);if(!expected||st!==expected){authMsg('⚠️ فشل التحقق من حالة Pi.');return}await postAuth('/api/platform/pi/login',{access_token:token})}showAuth();handlePiCallback();</script></body></html>"""
 
 @app.route("/api/platform/pi/login", methods=["POST"])
 def platform_pi_login():
@@ -3209,6 +3228,8 @@ def platform_pi_login():
 
 @app.route("/api/platform/google/login", methods=["POST"])
 def platform_google_login():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     verified,err=_verified_google_user((request.get_json(silent=True) or {}).get("id_token"))
     if err:return jsonify({"ok":False,"error":err}),401 if err.startswith("invalid_") or err in ("google_email_not_verified","google_identity_missing","google_audience_mismatch","google_issuer_mismatch") else 503
     result,err=_provider_login("google",verified["sub"],"",verified["email"],verified["name"],True,False)
@@ -3217,6 +3238,8 @@ def platform_google_login():
 
 @app.route("/api/platform/telegram/login", methods=["POST"])
 def platform_telegram_login():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     verified,err=_verify_telegram_login(request.get_json(silent=True) or {})
     if err:return jsonify({"ok":False,"error":err}),401 if err.startswith("telegram_auth") or err=="telegram_identity_missing" else 503
     result,err=_provider_login("telegram",verified["id"],verified["username"],"",verified["first_name"] or "Telegram user",True,bool(verified["username"]))
@@ -3225,6 +3248,8 @@ def platform_telegram_login():
 
 @app.route("/api/platform/email/register", methods=["POST"])
 def platform_email_register():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
     if not _email_verification_ready():return jsonify({"ok":False,"error":"email_delivery_not_configured"}),503
     b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); password=str(b.get("password") or ""); display_name=str(b.get("display_name","") or email.split("@")[0]).strip()[:80]
@@ -3236,6 +3261,8 @@ def platform_email_register():
 
 @app.route("/api/platform/email/verify", methods=["POST"])
 def platform_email_verify():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
     b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); code=str(b.get("code") or "").strip(); account_id=_account_id_by_email(email,verified_only=False)
     if not account_id:return jsonify({"ok":False,"error":"account_not_found"}),404
@@ -3247,6 +3274,8 @@ def platform_email_verify():
 
 @app.route("/api/platform/email/resend", methods=["POST"])
 def platform_email_resend():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
     b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); account_id=_account_id_by_email(email,verified_only=False)
     if not account_id:return jsonify({"ok":False,"error":"account_not_found"}),404
@@ -3258,6 +3287,8 @@ def platform_email_resend():
 
 @app.route("/api/platform/email/login", methods=["POST"])
 def platform_email_login():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
     b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); password=str(b.get("password") or ""); conn=None
     try:
@@ -3276,6 +3307,10 @@ def platform_email_login():
 @app.route("/api/platform/identity/link", methods=["POST"])
 def platform_identity_link():
     account=_get_web_account_from_request()
+    if PI_EDITION_ONLY:
+        b=request.get_json(silent=True) or {}
+        if str(b.get("provider") or "").lower() != "pi":
+            return jsonify({"ok":False,"error":"pi_auth_only"}),403
     if not account:return jsonify({"ok":False,"error":"not_authenticated"}),401
     b=request.get_json(silent=True) or {}; provider=str(b.get("provider") or "").lower()
     if provider=="pi": v,err=_verified_pi_user(b.get("access_token")); subject=v.get("uid") if v else ""; pu=v.get("username") if v else ""; email=""; force=True
@@ -3312,6 +3347,8 @@ def platform_profile_update():
 
 @app.route("/api/platform/register", methods=["POST"])
 def platform_register():
+    if PI_EDITION_ONLY:
+        return jsonify({"ok":False,"error":"pi_auth_only"}),403
     body=request.get_json(silent=True) or {}
     account,error=create_web_account(body.get("display_name",""),body.get("username",""),body.get("email",""),body.get("password",""))
     if error:
@@ -3321,23 +3358,10 @@ def platform_register():
 
 @app.route("/api/platform/me", methods=["GET"])
 def platform_me():
-    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE, ""))
+    account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "not_authenticated"}), 401
     return jsonify({"ok": True, "account": _web_account_public(account)})
-
-@app.route("/validation-key.txt", methods=["GET"])
-def pi_validation_key():
-    """Serve Pi Developer Portal domain-validation key from the deployed project root."""
-    key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "validation-key.txt")
-    try:
-        with open(key_path, "r", encoding="utf-8") as fh:
-            key = fh.read().strip()
-    except OSError:
-        return "Not Found", 404
-    if not key:
-        return "Not Found", 404
-    return key + "\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/", methods=["GET"])
 def public_home():
@@ -3364,7 +3388,7 @@ def platform_manifest():
 def platform_home():
     ensure_background_services()
     redirect_uri = PI_SIGNIN_REDIRECT_URI or (request.url_root.rstrip("/") + "/platform")
-    html = PLATFORM_HTML.replace("__AI_FOR_GOOGLE_CLIENT_ID__", json.dumps(GOOGLE_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1]).replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+    html = PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])
@@ -3897,6 +3921,9 @@ def owner_feature_tests(user):
     add("email_verification_schema", "ai_for_email_verifications" in globals() or callable(globals().get("_verify_email_code")), "Verification-code persistence helpers are present")
     add("telegram_widget_dom_loader", "createElement('script')" in open(__file__, encoding="utf-8").read(), "Telegram widget is inserted as a real DOM script element, not innerHTML")
     add("pi_browser_detection", "&&/Pi Browser/i.test(navigator.userAgent)" not in (globals().get("PLATFORM_HTML", "") or ""), "Pi SDK authentication is based on window.Pi capability, not brittle UA matching")
+    add("pi_edition_only", bool(PI_EDITION_ONLY), "This deployment accepts only verified Pi-linked web sessions")
+    add("pi_only_auth_ui", "loginGoogle" not in (globals().get("PLATFORM_HTML", "") or "") and "loginTelegram" not in (globals().get("PLATFORM_HTML", "") or "") and "emailAuth" not in (globals().get("PLATFORM_HTML", "") or ""), "Pi Edition UI exposes Pi authentication only")
+    add("pi_only_webapp_auth", "pi_auth_required" in (globals().get("PLATFORM_HTML", "") or "") or callable(globals().get("_webapp_auth")), "WebApp authentication is server-gated to Pi-linked sessions")
     passed=sum(1 for x in tests if x["ok"])
     failed=len(tests)-passed
     return {"ok":failed==0,"summary":{"total":len(tests),"passed":passed,"failed":failed},"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}

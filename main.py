@@ -152,9 +152,23 @@ DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
 # database remains durable and requests fail fast instead of looking like data loss.
 DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_STATEMENT_TIMEOUT_MS", "10000"))
 DB_LOCK_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_LOCK_TIMEOUT_MS", "5000"))
-DB_SCHEMA_VERSION = 7
+DB_SCHEMA_VERSION = 9
 WEB_IDENTITY_COOKIE = "ai_for_sid"
 WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+PI_CLIENT_ID = os.environ.get("PI_CLIENT_ID", "").strip()
+PI_SIGNIN_REDIRECT_URI = os.environ.get("PI_SIGNIN_REDIRECT_URI", "").strip()
+PI_SANDBOX = os.environ.get("PI_SANDBOX", "false").strip().lower() in ("1", "true", "yes")
+EMAIL_AUTH_ENABLED = os.environ.get("AI_FOR_EMAIL_AUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
+AUTH_LINK_MAX_AGE = int(os.environ.get("AI_FOR_AUTH_LINK_MAX_AGE", "86400"))
+SMTP_HOST = os.environ.get("AI_FOR_SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("AI_FOR_SMTP_PORT", "587"))
+SMTP_USER = os.environ.get("AI_FOR_SMTP_USER", "").strip()
+SMTP_PASSWORD = os.environ.get("AI_FOR_SMTP_PASSWORD", "")
+SMTP_FROM = os.environ.get("AI_FOR_SMTP_FROM", SMTP_USER).strip()
+SMTP_TLS = os.environ.get("AI_FOR_SMTP_TLS", "true").strip().lower() not in ("0", "false", "no")
+EMAIL_VERIFICATION_TTL = int(os.environ.get("AI_FOR_EMAIL_VERIFICATION_TTL", "900"))
+EMAIL_VERIFICATION_RESEND_SECONDS = int(os.environ.get("AI_FOR_EMAIL_VERIFICATION_RESEND_SECONDS", "60"))
 
 
 def _db_connect_direct():
@@ -242,9 +256,37 @@ def _ensure_db_schema(cur):
             profile_photo BYTEA,
             profile_photo_mime TEXT,
             photo_updated_at TIMESTAMPTZ,
+            email TEXT NOT NULL DEFAULT '',
+            email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+            password_hash TEXT NOT NULL DEFAULT '',
             metadata JSONB NOT NULL DEFAULT '{}'::jsonb
         )
     """)
+    for stmt in [
+        "ALTER TABLE ai_for_web_accounts ADD COLUMN IF NOT EXISTS email TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE ai_for_web_accounts ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE ai_for_web_accounts ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT ''",
+    ]:
+        cur.execute(stmt)
+    cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_for_web_accounts_email_verified ON ai_for_web_accounts (lower(email)) WHERE email <> '' AND email_verified = TRUE")
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_identity_links (
+            identity_id UUID PRIMARY KEY,
+            account_id UUID NOT NULL REFERENCES ai_for_web_accounts(account_id) ON DELETE CASCADE,
+            provider TEXT NOT NULL,
+            provider_subject TEXT NOT NULL,
+            provider_username TEXT NOT NULL DEFAULT '',
+            email TEXT NOT NULL DEFAULT '',
+            verified BOOLEAN NOT NULL DEFAULT FALSE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(provider, provider_subject),
+            UNIQUE(account_id, provider)
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_identity_links_account ON ai_for_identity_links(account_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_identity_links_email ON ai_for_identity_links(lower(email)) WHERE email <> ''")
+    cur.execute("CREATE TABLE IF NOT EXISTS ai_for_email_verifications (account_id UUID PRIMARY KEY REFERENCES ai_for_web_accounts(account_id) ON DELETE CASCADE, code_hash TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, last_sent_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), attempts INTEGER NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_web_accounts_username ON ai_for_web_accounts (lower(username))")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_web_accounts_status ON ai_for_web_accounts (status)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_web_accounts_created_at ON ai_for_web_accounts (created_at)")
@@ -537,56 +579,299 @@ def _web_account_numeric_id(account_id):
     value = int.from_bytes(raw, "big") & ((1 << 62) - 1)
     return value or 1
 
-def create_web_account(display_name="", username=""):
-    if not membership_db_ready and not init_membership_db():
-        return None, "database_unavailable"
-    token = secrets.token_urlsafe(48)
-    account_id = str(uuid.uuid4())
-    display_name = str(display_name or "").strip()[:80]
-    username = str(username or "").strip().lstrip("@").lower()[:32]
-    if username and not re.fullmatch(r"[a-z0-9_]{3,32}", username):
-        return None, "invalid_username"
-    conn = None
+def _normalize_web_email(email):
+    return str(email or "").strip().lower()[:254]
+
+def _normalize_web_username(username):
+    return str(username or "").strip().lstrip("@").lower()[:32]
+
+def _web_password_hash(password, salt=None):
+    password=str(password or ""); salt=salt or secrets.token_hex(16)
+    digest=hashlib.pbkdf2_hmac("sha256",password.encode(),salt.encode(),310000)
+    return f"pbkdf2_sha256$310000${salt}${digest.hex()}"
+
+def _web_password_verify(password, encoded):
     try:
-        conn = _membership_db_connect()
-        if not conn:
-            return None, "database_unavailable"
+        scheme,rounds,salt,expected=str(encoded or "").split("$",3)
+        if scheme!="pbkdf2_sha256": return False
+        actual=hashlib.pbkdf2_hmac("sha256",str(password or "").encode(),salt.encode(),int(rounds)).hex()
+        return hmac.compare_digest(actual,expected)
+    except Exception:return False
+
+def _web_issue_session(account_id):
+    token=secrets.token_urlsafe(48); conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_for_web_accounts SET session_token_hash=%s,last_seen=NOW() WHERE account_id=%s AND status='active'",(_web_token_hash(token),str(account_id)))
+                return token if cur.rowcount==1 else None
+    except Exception as e: print(f"Web session issue error: {e}"); return None
+    finally:_membership_db_release(conn)
+
+def _get_web_account_by_id(account_id):
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT account_id,display_name,username,email,email_verified,created_at,last_seen,status,role,metadata FROM ai_for_web_accounts WHERE account_id=%s AND status='active' LIMIT 1",(str(account_id),))
+                return cur.fetchone()
+    except Exception as e: print(f"Web account by id error: {e}"); return None
+    finally:_membership_db_release(conn)
+
+def _find_identity_link(provider,subject):
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT identity_id,account_id,provider,provider_subject,provider_username,email,verified FROM ai_for_identity_links WHERE provider=%s AND provider_subject=%s LIMIT 1",(str(provider),str(subject)))
+                row=cur.fetchone()
+                if row:cur.execute("UPDATE ai_for_identity_links SET last_seen=NOW() WHERE identity_id=%s",(row["identity_id"],))
+                return row
+    except Exception as e: print(f"Identity link lookup error: {e}"); return None
+    finally:_membership_db_release(conn)
+
+def _link_identity(account_id,provider,subject,provider_username="",email="",verified=True):
+    provider=str(provider or "").lower(); subject=str(subject or "").strip()
+    if provider not in ("pi","google","telegram","email") or not subject:return False,"invalid_identity"
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False,"database_unavailable"
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT account_id FROM ai_for_identity_links WHERE provider=%s AND provider_subject=%s LIMIT 1",(provider,subject)); existing=cur.fetchone()
+                if existing and str(existing["account_id"])!=str(account_id):return False,"identity_already_linked"
+                cur.execute("SELECT account_id FROM ai_for_identity_links WHERE account_id=%s AND provider=%s LIMIT 1",(str(account_id),provider)); ep=cur.fetchone()
+                if ep:
+                    cur.execute("UPDATE ai_for_identity_links SET provider_username=%s,email=%s,verified=%s,last_seen=NOW() WHERE account_id=%s AND provider=%s",(str(provider_username or "")[:80],_normalize_web_email(email),bool(verified),str(account_id),provider))
+                else:
+                    cur.execute("INSERT INTO ai_for_identity_links(identity_id,account_id,provider,provider_subject,provider_username,email,verified) VALUES(%s,%s,%s,%s,%s,%s,%s)",(str(uuid.uuid4()),str(account_id),provider,subject,str(provider_username or "")[:80],_normalize_web_email(email),bool(verified)))
+        return True,None
+    except Exception as e: print(f"Identity link error: {e}"); return False,"database_error"
+    finally:_membership_db_release(conn)
+
+def _account_id_by_email(email, verified_only=False):
+    email=_normalize_web_email(email); conn=None
+    if not email:return None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None
+        with conn:
+            with conn.cursor() as cur:
+                if verified_only:
+                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(email)=lower(%s) AND email_verified=TRUE AND status='active' LIMIT 1",(email,))
+                else:
+                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(email)=lower(%s) AND status='active' LIMIT 1",(email,))
+                row=cur.fetchone(); return str(row[0]) if row else None
+    except Exception:return None
+    finally:_membership_db_release(conn)
+
+def _set_web_cookie(resp,token):
+    resp.set_cookie(WEB_IDENTITY_COOKIE,token,max_age=WEB_IDENTITY_MAX_AGE,httponly=True,secure=True,samesite="Lax"); return resp
+
+def _web_account_public(account):
+    if not account:return None
+    return {"account_id":str(account["account_id"]),"display_name":str(account.get("display_name") or ""),"username":str(account.get("username") or ""),"email":str(account.get("email") or ""),"email_verified":bool(account.get("email_verified")),"role":str(account.get("role") or "member")}
+
+def _email_verification_ready():
+    return bool(SMTP_HOST and SMTP_FROM and EMAIL_AUTH_ENABLED)
+
+def _email_verification_code_hash(code):
+    return hashlib.sha256(str(code).encode("utf-8")).hexdigest()
+
+def _send_email_verification(email, display_name, code):
+    if not _email_verification_ready():
+        return False, "email_delivery_not_configured"
+    msg=EmailMessage()
+    msg["Subject"]="AI for — رمز تأكيد البريد الإلكتروني"
+    msg["From"]=SMTP_FROM
+    msg["To"]=email
+    msg.set_content(f"مرحبًا {display_name or 'عضو AI for'}،\n\nرمز تأكيد بريدك الإلكتروني في AI for هو: {code}\n\nصلاحية الرمز {max(1, EMAIL_VERIFICATION_TTL//60)} دقيقة. إذا لم تطلب هذا الرمز فتجاهل الرسالة.\n")
+    try:
+        if SMTP_TLS:
+            with smtplib.SMTP(SMTP_HOST,SMTP_PORT,timeout=12) as smtp:
+                smtp.starttls()
+                if SMTP_USER:smtp.login(SMTP_USER,SMTP_PASSWORD)
+                smtp.send_message(msg)
+        else:
+            with smtplib.SMTP(SMTP_HOST,SMTP_PORT,timeout=12) as smtp:
+                if SMTP_USER:smtp.login(SMTP_USER,SMTP_PASSWORD)
+                smtp.send_message(msg)
+        return True,None
+    except Exception as e:
+        print(f"Email verification delivery error: {e}")
+        return False,"email_delivery_failed"
+
+def _issue_email_verification(account_id, email, display_name):
+    if not _email_verification_ready(): return False,"email_delivery_not_configured"
+    code=f"{secrets.randbelow(1000000):06d}"
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False,"database_unavailable"
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT last_sent_at FROM ai_for_email_verifications WHERE account_id=%s LIMIT 1",(str(account_id),)); row=cur.fetchone()
+                if row and (datetime.now(ZoneInfo("UTC"))-row["last_sent_at"].replace(tzinfo=ZoneInfo("UTC"))).total_seconds() < EMAIL_VERIFICATION_RESEND_SECONDS:
+                    return False,"verification_rate_limited"
+                cur.execute("INSERT INTO ai_for_email_verifications(account_id,code_hash,expires_at,last_sent_at,attempts) VALUES(%s,%s,NOW()+(%s * INTERVAL '1 second'),NOW(),0) ON CONFLICT(account_id) DO UPDATE SET code_hash=EXCLUDED.code_hash,expires_at=EXCLUDED.expires_at,last_sent_at=NOW(),attempts=0",(str(account_id),_email_verification_code_hash(code),EMAIL_VERIFICATION_TTL))
+        return _send_email_verification(email,display_name,code)
+    except Exception as e:
+        print(f"Email verification issue error: {e}"); return False,"database_error"
+    finally:_membership_db_release(conn)
+
+def _verify_email_code(account_id, code):
+    code=str(code or "").strip()
+    if not re.fullmatch(r"\d{6}",code):return False,"invalid_verification_code"
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return False,"database_unavailable"
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT code_hash,expires_at,attempts FROM ai_for_email_verifications WHERE account_id=%s LIMIT 1",(str(account_id),)); row=cur.fetchone()
+                if not row:return False,"verification_not_requested"
+                if row["attempts"] >= 5:return False,"verification_locked"
+                if row["expires_at"] <= datetime.now(ZoneInfo("UTC")):return False,"verification_expired"
+                if not secrets.compare_digest(str(row["code_hash"]),_email_verification_code_hash(code)):
+                    cur.execute("UPDATE ai_for_email_verifications SET attempts=attempts+1 WHERE account_id=%s",(str(account_id),)); return False,"invalid_verification_code"
+                cur.execute("UPDATE ai_for_web_accounts SET email_verified=TRUE WHERE account_id=%s",(str(account_id),))
+                cur.execute("UPDATE ai_for_identity_links SET verified=TRUE,last_seen=NOW() WHERE account_id=%s AND provider='email'",(str(account_id),))
+                cur.execute("DELETE FROM ai_for_email_verifications WHERE account_id=%s",(str(account_id),))
+        return True,None
+    except Exception as e:
+        print(f"Email verification check error: {e}"); return False,"database_error"
+    finally:_membership_db_release(conn)
+
+def create_web_account(display_name="",username="",email="",password=""):
+    if not membership_db_ready and not init_membership_db():return None,"database_unavailable"
+    token=secrets.token_urlsafe(48); account_id=str(uuid.uuid4()); display_name=str(display_name or "").strip()[:80]; username=_normalize_web_username(username); email=_normalize_web_email(email)
+    if username and not re.fullmatch(r"[a-z0-9_]{3,32}",username):return None,"invalid_username"
+    if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):return None,"invalid_email"
+    if password and len(str(password))<8:return None,"weak_password"
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None,"database_unavailable"
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 if username:
-                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1", (username,))
-                    if cur.fetchone():
-                        return None, "username_taken"
-                cur.execute("""INSERT INTO ai_for_web_accounts
-                    (account_id,display_name,username,session_token_hash)
-                    VALUES (%s,%s,%s,%s)""", (account_id,display_name,username,_web_token_hash(token)))
-        return {"account_id": account_id, "display_name": display_name, "username": username, "role": "member", "token": token}, None
-    except Exception as e:
-        print(f"Web account create error: {e}")
-        return None, "database_error"
-    finally:
-        _membership_db_release(conn)
+                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1",(username,))
+                    if cur.fetchone():return None,"username_taken"
+                if email:
+                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(email)=lower(%s) AND status='active' LIMIT 1",(email,))
+                    if cur.fetchone():return None,"email_taken"
+                cur.execute("INSERT INTO ai_for_web_accounts(account_id,display_name,username,email,email_verified,password_hash,session_token_hash) VALUES(%s,%s,%s,%s,%s,%s,%s)",(account_id,display_name,username,email,False,_web_password_hash(password) if password else "",_web_token_hash(token)))
+        if email:_link_identity(account_id,"email",email,email=email,verified=False)
+        return {"account_id":account_id,"display_name":display_name,"username":username,"email":email,"email_verified":False,"role":"member","token":token},None
+    except Exception as e: print(f"Web account create error: {e}"); return None,"database_error"
+    finally:_membership_db_release(conn)
 
 def get_web_account(token):
-    if not token or not membership_db_ready:
-        return None
-    conn = None
+    if not token or not membership_db_ready:return None
+    conn=None
     try:
-        conn = _membership_db_connect()
-        if not conn: return None
+        conn=_membership_db_connect()
+        if not conn:return None
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""SELECT account_id,display_name,username,created_at,last_seen,status,role
-                              FROM ai_for_web_accounts WHERE session_token_hash=%s LIMIT 1""", (_web_token_hash(token),))
-                row = cur.fetchone()
-                if not row or row["status"] != "active": return None
-                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s", (row["account_id"],))
-                return row
-    except Exception as e:
-        print(f"Web account lookup error: {e}")
-        return None
-    finally:
-        _membership_db_release(conn)
+                cur.execute("SELECT account_id,display_name,username,email,email_verified,created_at,last_seen,status,role,metadata FROM ai_for_web_accounts WHERE session_token_hash=%s LIMIT 1",(_web_token_hash(token),)); row=cur.fetchone()
+                if not row or row["status"]!="active":return None
+                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s",(row["account_id"],)); return row
+    except Exception as e: print(f"Web account lookup error: {e}"); return None
+    finally:_membership_db_release(conn)
+
+def _get_web_account_from_request():return get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE,""))
+
+def _verified_pi_user(access_token):
+    token=str(access_token or "").strip()
+    if not token:return None,"missing_access_token"
+    try:
+        r=requests.get("https://api.minepi.com/v2/me",headers={"Authorization":f"Bearer {token}"},timeout=8)
+        if r.status_code!=200:return None,"invalid_pi_token"
+        d=r.json() or {}; u=d.get("user") if isinstance(d.get("user"),dict) else d; uid=str(u.get("uid") or "").strip(); username=str(u.get("username") or "").strip()
+        return ({"uid":uid,"username":username},None) if uid else (None,"pi_identity_missing")
+    except Exception as e: print(f"Pi identity verification error: {e}"); return None,"pi_verification_unavailable"
+
+def _verified_google_user(id_token):
+    token=str(id_token or "").strip()
+    if not token or not GOOGLE_CLIENT_ID:return None,"google_not_configured"
+    try:
+        r=requests.get("https://oauth2.googleapis.com/tokeninfo",params={"id_token":token},timeout=8)
+        if r.status_code!=200:return None,"invalid_google_token"
+        d=r.json() or {}
+        if str(d.get("aud") or "")!=GOOGLE_CLIENT_ID:return None,"google_audience_mismatch"
+        if str(d.get("iss") or "") not in ("accounts.google.com","https://accounts.google.com"):return None,"google_issuer_mismatch"
+        if str(d.get("email_verified") or "").lower()!="true":return None,"google_email_not_verified"
+        sub=str(d.get("sub") or "").strip(); email=_normalize_web_email(d.get("email"))
+        if not sub or not email:return None,"google_identity_missing"
+        return {"sub":sub,"email":email,"name":str(d.get("name") or email.split("@")[0])[:80]},None
+    except Exception as e: print(f"Google identity verification error: {e}"); return None,"google_verification_unavailable"
+
+def _verify_telegram_login(payload):
+    if not BOT_TOKEN:return None,"telegram_not_configured"
+    try:
+        payload=payload or {}; received=str(payload.get("hash") or ""); data={str(k):str(v) for k,v in payload.items() if k!="hash"}; auth_date=int(data.get("auth_date") or 0)
+        if not received or not auth_date or time.time()-auth_date>AUTH_LINK_MAX_AGE:return None,"telegram_auth_expired"
+        check="\n".join(f"{k}={data[k]}" for k in sorted(data)); secret=hashlib.sha256(BOT_TOKEN.encode()).digest(); expected=hmac.new(secret,check.encode(),hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(expected,received):return None,"telegram_auth_invalid"
+        uid=str(data.get("id") or "").strip(); return ({"id":uid,"username":str(data.get("username") or ""),"first_name":str(data.get("first_name") or ""),"last_name":str(data.get("last_name") or "")},None) if uid else (None,"telegram_identity_missing")
+    except Exception:return None,"telegram_auth_invalid"
+
+def _provider_login(provider,subject,provider_username="",email="",display_name="",verified=True,force_username=False):
+    link=_find_identity_link(provider,subject)
+    if link:
+        account=_get_web_account_by_id(link["account_id"])
+        if not account:return None,"account_not_found"
+        if force_username and provider_username:
+            update_web_profile(account["account_id"],username=provider_username)
+            account=_get_web_account_by_id(account["account_id"])
+        return (account,_web_issue_session(account["account_id"])),None
+    account_id=_account_id_by_email(email,verified_only=False) if email and verified else None
+    if account_id:
+        ok,err=_link_identity(account_id,provider,subject,provider_username,email,verified)
+        if not ok:return None,err
+        if force_username and provider_username:
+            update_web_profile(account_id,username=provider_username)
+        return (_get_web_account_by_id(account_id),_web_issue_session(account_id)),None
+    account,err=create_web_account(display_name or provider_username or (email.split("@")[0] if email else "AI for user"),provider_username if force_username else "",email,"")
+    if err:return None,err
+    ok,err=_link_identity(account["account_id"],provider,subject,provider_username,email,verified)
+    if not ok:return None,err
+    if force_username and provider_username:
+        update_web_profile(account["account_id"],username=provider_username)
+    return (_get_web_account_by_id(account["account_id"]),account["token"]),None
+
+def update_web_profile(account_id,display_name=None,username=None):
+    account=_get_web_account_by_id(account_id)
+    if not account:return None,"not_authenticated"
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return None,"database_unavailable"
+        with conn:
+            with conn.cursor() as cur:
+                if username is not None:
+                    username=_normalize_web_username(username)
+                    cur.execute("SELECT provider FROM ai_for_identity_links WHERE account_id=%s AND provider IN ('pi','telegram') AND verified=TRUE LIMIT 1",(str(account_id),))
+                    if cur.fetchone():return None,"username_locked_by_provider"
+                    if username and not re.fullmatch(r"[a-z0-9_]{3,32}",username):return None,"invalid_username"
+                    cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND account_id<>%s AND status='active' LIMIT 1",(username,str(account_id)))
+                    if cur.fetchone():return None,"username_taken"
+                fields=[];params=[]
+                if display_name is not None:fields.append("display_name=%s");params.append(str(display_name).strip()[:80])
+                if username is not None:fields.append("username=%s");params.append(username)
+                if not fields:return account,None
+                fields.append("last_seen=NOW()");params.append(str(account_id));cur.execute("UPDATE ai_for_web_accounts SET "+",".join(fields)+" WHERE account_id=%s AND status='active'",params)
+        return _get_web_account_by_id(account_id),None
+    except Exception as e:print(f"Web profile update error: {e}");return None,"database_error"
+    finally:_membership_db_release(conn)
 
 def save_web_profile_photo(account_id, raw, mime):
     if not membership_db_ready or not account_id or not raw: return False
@@ -2852,11 +3137,13 @@ async function sendPlatformMessage(){let to=document.getElementById('msgTo').val
 function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
 function funBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الترفيه</button><section class="detail"><div class="sectionTitle">🎮 اختبار سريع</div><div class="statusBox"><b>سؤال اليوم</b><p>ما هو اختصار HTTP؟</p><button class="mini" onclick="quiz('a')">HyperText Transfer Process</button><button class="mini" onclick="quiz('b')">HyperText Transfer Protocol</button></div><div id="quizResult"></div></section>`}
 async function quiz(option){try{let d=await platformSvc('quiz_answer',{question_key:'http-001',option});let correct=Number(d.awarded||0)>0;document.getElementById('quizResult').innerHTML='<div class="statusBox">'+(correct?'✅ إجابة صحيحة — +10 نقاط':'❌ إجابة غير صحيحة — +0')+'<br>الرصيد: '+esc(d.points||0)+'</div>'}catch(e){document.getElementById('quizResult').textContent='⚠️ تعذر تسجيل المحاولة.'}}
-function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';loadFavorites();let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-Telegram-Init-Data':tg?.initData||''}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
-async function addFavorite(){let title=document.getElementById('favTitle')?.value.trim(),url=document.getElementById('favUrl')?.value.trim();if(!title)return;try{await platformSvc('favorite_add',{item_type:'user',item_key:url||title,title,url});document.getElementById('favResult').textContent='✅ تم الحفظ.';loadFavorites()}catch(e){document.getElementById('favResult').textContent='⚠️ تعذر الحفظ.'}}
-async function loadFavorites(){let el=document.getElementById('favList');if(!el)return;try{let d=await platformSvc('favorites');el.innerHTML=(d.favorites||[]).map(f=>'<div class="row">❤️ '+esc(f.title)+' '+(f.url?'<a href="'+esc(f.url)+'" target="_blank" rel="noopener">فتح</a>':'')+'</div>').join('')||'لا توجد عناصر محفوظة.'}catch(e){el.textContent='⚠️ تعذر تحميل المفضلة.'}}
-async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري الرفع...</div>';let fd=new FormData();fd.append('photo',f);try{let x=await fetch('/api/app/account/photo',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await x.json();r.innerHTML='<div class="statusBox">'+(d.ok?'✅ تم حفظ الصورة في قاعدة البيانات الدائمة.':'⚠️ تعذر حفظ الصورة: '+esc(d.error||'unknown'))+'</div>';if(d.ok)setTimeout(accountBox,300)}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر رفع الصورة.</div>'}}
-async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<section class="hero"><h1>🔔 الإشعارات</h1><p>تحديثات النظام والميزات والإشعارات الخاصة بك.</p></section><div id="notes" class="detail"><div class="statusBox">⏳ جاري التحميل...</div></div>';try{let d=await api('/api/app/notifications');document.getElementById('notes').innerHTML=(d.notifications||[]).slice().reverse().map(n=>'<div class="statusBox"><b>'+esc(n.title||'إشعار')+'</b><div class="row">'+esc(n.text||'')+'</div><div class="small">'+esc(n.time||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد إشعارات.</div>';document.getElementById('notifyBadge').textContent=d.unread?'🔔 '+d.unread:'الإشعارات';if(d.unread)await api('/api/app/notifications',{method:'POST',body:JSON.stringify({action:'read_all'})})}catch(e){document.getElementById('notes').innerHTML='<div class="statusBox">⚠️ تعذر تحميل الإشعارات.</div>'}}
+function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';loadFavorites();loadIdentityStatus();let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-Telegram-Init-Data':tg?.initData||''}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
+async function loadIdentityStatus(){try{let d=await fetch('/api/platform/identity/status').then(r=>r.json());if(!d.ok)throw new Error(d.error);let ids=d.identities||[];document.getElementById('identityStatus').textContent='🔐 مزودو الدخول: '+(ids.map(x=>x.provider).join(' · ')||'لم يتم الربط بعد');document.getElementById('identityLinks').innerHTML=ids.length?ids.map(x=>'<div class="row">✓ '+esc(x.provider)+(x.provider_username?' — '+esc(x.provider_username):'')+'</div>').join(''):'<div>لم يتم ربط مزود إضافي بعد.</div>'}catch(e){document.getElementById('identityLinks').textContent='⚠️ تعذر قراءة حالة الربط.'}}
+async function updateProfile(){let r=document.getElementById('profileEditResult');r.textContent='⏳';try{let d=await fetch('/api/platform/profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:document.getElementById('editDisplayName').value,username:document.getElementById('editUsername').value})}).then(x=>x.json());if(!d.ok)throw new Error(d.error||'update_failed');r.innerHTML='<div class="statusBox">✅ تم حفظ التعديل.</div>';state.user.first_name=d.account.display_name;state.user.username=d.account.username;document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'')}catch(e){r.innerHTML='<div class="statusBox">⚠️ '+esc(e.message)+'</div>'}}
+async function linkPi(){if(window.Pi?.authenticate&&/Pi Browser/i.test(navigator.userAgent)){try{let a=await window.Pi.authenticate(['username'],()=>{});let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'pi',access_token:a.accessToken})}).then(r=>r.json());if(!d.ok)throw new Error(d.error);document.getElementById('linkResult').textContent='✅ تم ربط Pi: @'+(d.account.username||'');accountBox()}catch(e){document.getElementById('linkResult').textContent='⚠️ '+e.message}return}if(!window.PI_CLIENT_ID){document.getElementById('linkResult').textContent='⚠️ Pi Sign-in غير مفعّل.';return}const state=crypto.randomUUID();sessionStorage.setItem('ai_for_pi_state',state);sessionStorage.setItem('ai_for_pi_linking','1');const redirect=window.PI_SIGNIN_REDIRECT_URI||location.origin+'/platform';if(window.Pi?.signIn)window.Pi.signIn({clientId:window.PI_CLIENT_ID,redirectUri:redirect,scopes:['username'],state});else location.href='https://accounts.pinet.com/oauth/authorize?response_type=token&client_id='+encodeURIComponent(window.PI_CLIENT_ID)+'&redirect_uri='+encodeURIComponent(redirect)+'&scope=username&state='+encodeURIComponent(state)}
+async function linkGoogle(){if(!window.google?.accounts?.id){let s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';document.head.appendChild(s);await new Promise(r=>setTimeout(r,700))}if(!window.GOOGLE_CLIENT_ID||!window.google?.accounts?.id){document.getElementById('linkResult').textContent='⚠️ Google غير مفعّل.';return}window.google.accounts.id.initialize({client_id:window.GOOGLE_CLIENT_ID,callback:async r=>{let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'google',id_token:r.credential})}).then(x=>x.json());document.getElementById('linkResult').textContent=d.ok?'✅ تم ربط Google.':'⚠️ '+(d.error||'link_failed');if(d.ok)accountBox()}});window.google.accounts.id.prompt()}
+async function linkTelegram(){window.onTelegramAuth=async u=>{let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({provider:'telegram'},u||{}))}).then(x=>x.json());document.getElementById('linkResult').textContent=d.ok?'✅ تم ربط Telegram.':'⚠️ '+(d.error||'link_failed');if(d.ok)accountBox()};let b=document.getElementById('tgLinkWidget');if(b)b.remove();b=document.createElement('div');b.id='tgLinkWidget';let sc=document.createElement('script');sc.async=true;sc.src='https://telegram.org/js/telegram-widget.js?22';sc.dataset.telegramLogin=window.TELEGRAM_BOT_USERNAME;sc.dataset.size='large';sc.dataset.userpic='false';sc.dataset.requestAccess='write';sc.dataset.onauth='onTelegramAuth(user)';b.appendChild(sc);document.getElementById('linkResult').appendChild(b)}
+
 function securityBox(){let auth=state?.user?.auth_type==='web'?'حساب Web + جلسة آمنة':'Telegram initData';document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">المصادقة: <span class="ok">'+esc(auth)+' — تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
 function supportBox(){let channel=state?.user?.auth_type==='web'?'متصفح Web / Pi Browser':'Telegram WebApp';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">قناة الدخول: <span class="ok">'+esc(channel)+'</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?' <span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div><div class="filebox"><b>🐞 بلاغ جديد</b><input id="ticketSubject" placeholder="العنوان" style="width:100%;padding:12px;background:#0a1018;color:white"><textarea id="ticketMessage" placeholder="اشرح المشكلة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;padding:12px"></textarea><button class="action" onclick="createTicket()">إرسال البلاغ</button><div id="ticketMsg"></div></div><div id="ticketList"></div></section>';loadTickets()}
 async function createTicket(){try{let d=await platformSvc('support_create',{subject:document.getElementById('ticketSubject').value,message:document.getElementById('ticketMessage').value});document.getElementById('ticketMsg').textContent=d.ok?'✅ تم حفظ البلاغ.':'⚠️ تعذر حفظ البلاغ.';loadTickets()}catch(e){document.getElementById('ticketMsg').textContent='⚠️ تعذر حفظ البلاغ.'}}
@@ -2903,35 +3190,154 @@ async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attem
 '''
 
 PLATFORM_HTML = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><title>AI for — Web3 Platform</title>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.GOOGLE_CLIENT_ID="__AI_FOR_GOOGLE_CLIENT_ID__";window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_REDIRECT_URI__";window.TELEGRAM_BOT_USERNAME="zynmart_ai_bot";</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><script src="https://telegram.org/js/telegram-widget.js?22" async></script><title>AI for — Web3 Platform</title>
 <style>
 :root{--bg:#071018;--panel:#0d1822;--line:#1e3443;--text:#f4f8fb;--muted:#a9bac7;--accent:#49e6a1}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0%,#123026 0,#071018 42%,#050a0f 100%);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}.brand{font-size:25px;font-weight:800}.badge{font-size:12px;border:1px solid #285543;color:var(--accent);padding:7px 10px;border-radius:999px;background:#0b1d17}.hero{padding:48px 0 28px}.hero h1{font-size:clamp(34px,7vw,68px);line-height:1.05;margin:0 0 18px}.hero h1 span{color:var(--accent)}.hero p{font-size:18px;line-height:1.8;color:var(--muted);max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;color:#04110b;background:var(--accent);padding:13px 18px;border-radius:13px;font-weight:800}.btn.alt{color:var(--text);background:#102131;border:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{background:rgba(13,24,34,.88);border:1px solid var(--line);border-radius:18px;padding:20px}.icon{font-size:28px}.card h3{margin:10px 0 7px}.card p{margin:0;color:var(--muted);line-height:1.7}.section{margin-top:34px}.section h2{font-size:25px}.road{display:grid;gap:10px}.step{display:flex;gap:12px;align-items:flex-start;background:#0b151e;border:1px solid var(--line);padding:14px;border-radius:14px}.num{min-width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#123529;color:var(--accent);font-weight:800}.foot{padding:30px 0;color:#8195a3;font-size:13px}
 </style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Web3 Platform Foundation</div></header>
-<section class="hero"><h1>AI for <span>Web3</span></h1><p>منصة مستقلة قابلة للتوسع تجمع الذكاء الاصطناعي والخدمات الرقمية والهوية والمنظومة المحلية في بنية واحدة. هذه طبقة المنصة، بينما يبقى بوت Telegram وخدماته الأساسية مستقلًا.</p><div class="actions"><button class="btn" onclick="showRegister()">إنشاء حساب AI for</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="registerBox" class="card" style="display:none;margin-top:18px;max-width:620px"><h3>إنشاء حساب المنصة</h3><p>سجّل حسابك في AI for. تسجيل الحساب لا يعني فتح الخدمات؛ الوصول العام يبقى مغلقًا حتى يفتحه المالك.</p><input id="displayName" placeholder="الاسم المعروض" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><input id="webUsername" placeholder="اسم مستخدم اختياري" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><button class="btn" onclick="registerWeb()">تسجيل الحساب</button><div id="regMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
+<section class="hero"><h1>AI for <span>Web3</span></h1><p>هوية واحدة عبر Pi وGoogle وEmail وTelegram. المتصفح لا يصنع هوية جديدة لمجرد تغيّر الجهاز أو المتصفح؛ الحساب مرتبط بهوية موثقة ومزوّدي تسجيل الدخول.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>هوية AI for</h3><p>اختر طريقة الدخول. إذا كانت الهوية مرتبطة بحساب سابق سيتم فتح نفس الحساب، وليس إنشاء حساب ثانٍ.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button><button class="btn alt" onclick="loginTelegram()">✈️ الدخول عبر Telegram</button><button class="btn alt" onclick="showEmailAuth()">✉️ Email</button><button class="btn alt" onclick="loginGoogle()">🔵 Google</button></div><div id="emailBox" style="display:none;margin-top:14px"><input id="authEmail" type="email" placeholder="البريد الإلكتروني" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><input id="authPassword" type="password" placeholder="كلمة المرور — 8 أحرف على الأقل" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><input id="authName" placeholder="الاسم عند إنشاء حساب جديد" style="width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#071018;color:white;margin:6px 0"><div class="actions"><button class="btn" onclick="emailAuth('login')">دخول</button><button class="btn alt" onclick="emailAuth('register')">إنشاء</button></div></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
 <section class="grid"><div class="card"><div class="icon">🧠</div><h3>AI Center</h3><p>محرك الذكاء والخدمات مع قابلية إضافة مزايا وأدوات جديدة.</p></div><div class="card"><div class="icon">🔐</div><h3>Identity & Access</h3><p>هوية وصلاحيات منفصلة عن الواجهة العامة مع حماية منطقة المالك.</p></div><div class="card"><div class="icon">🗄️</div><h3>Persistent Core</h3><p>الإعدادات والعضويات والبيانات الحساسة مصممة لتكون محفوظة في PostgreSQL.</p></div><div class="card"><div class="icon">⛓️</div><h3>Web3 Ready</h3><p>طبقة قابلة لإضافة الهوية والمحافظ والخدمات اللامركزية لاحقًا دون كسر الأساس.</p></div></section>
 <section class="section" id="architecture"><h2>البنية</h2><div class="road"><div class="step"><div class="num">1</div><div><b>Web3 Platform</b><br><span style="color:var(--muted)">الموقع والحساب ولوحة التحكم والإعدادات والخدمات.</span></div></div><div class="step"><div class="num">2</div><div><b>Core & PostgreSQL</b><br><span style="color:var(--muted)">مصدر دائم للإعدادات والعضويات والصلاحيات والسجل.</span></div></div><div class="step"><div class="num">3</div><div><b>Telegram Bot</b><br><span style="color:var(--muted)">مسار مستقل يحافظ على سلوكه ووظائفه الحالية.</span></div></div><div class="step"><div class="num">4</div><div><b>AI for Local</b><br><span style="color:var(--muted)">الطبقة القادمة لـ SoloHost وTermux بعد تثبيت المنصة.</span></div></div></div></section>
-<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for — البناء التدريجي مع الحفاظ على الخدمات الأساسية.</div></main><script>async function showRegister(){const m=document.getElementById("registerBox");m.style.display="block";try{const r=await fetch("/api/platform/me");if(r.ok){location.href="/app"}}catch(e){}}async function registerWeb(){const msg=document.getElementById("regMsg");msg.textContent="⏳ جاري إنشاء الحساب...";try{const r=await fetch("/api/platform/register",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({display_name:document.getElementById("displayName").value,username:document.getElementById("webUsername").value})});const d=await r.json();if(!r.ok)throw new Error(d.error||"register_failed");msg.textContent="✅ تم تسجيل الحساب. الوصول إلى الخدمات يبقى مغلقًا حتى يفتحها المالك.";setTimeout(()=>location.href="/app",500)}catch(e){msg.textContent="⚠️ تعذر إنشاء الحساب: "+e.message}}</script></body></html>"""
+<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for — هوية موحدة مع ربط آمن بين مزوّدي الدخول.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';fetch('/api/platform/me').then(r=>{if(r.ok)location.href='/app'}).catch(()=>{})}function showEmailAuth(){document.getElementById('emailBox').style.display='block'}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من الهوية...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');authMsg('✅ تم التحقق وفتح حسابك الموحد.');setTimeout(()=>location.href='/app',300)}catch(e){authMsg('⚠️ '+e.message)}}async function emailAuth(mode){let email=document.getElementById('authEmail').value,password=document.getElementById('authPassword').value,name=document.getElementById('authName').value;if(mode==='verify'){let code=prompt('أدخل رمز التحقق الذي وصلك إلى البريد الإلكتروني:');if(!code)return;await postAuth('/api/platform/email/verify',{email,code});return}let r=await fetch(mode==='login'?'/api/platform/email/login':'/api/platform/email/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email,password,display_name:name})});let d=await r.json();if(d.ok){if(d.verification_required){authMsg('📧 تم إنشاء الحساب. تحقق من بريدك ثم أدخل رمز التحقق.');let b=document.querySelector('#emailBox .actions');if(!document.getElementById('emailVerifyBtn')){let v=document.createElement('button');v.id='emailVerifyBtn';v.className='btn';v.textContent='تحقق من البريد';v.onclick=()=>emailAuth('verify');b.appendChild(v)}}else{location.href='/app'}}else{authMsg('⚠️ '+(d.error||'auth_failed'))}}async function loginPi(){if(window.Pi&&typeof window.Pi.authenticate==='function'){try{const a=await window.Pi.authenticate(['username'],()=>{});await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ تعذر الدخول عبر Pi: '+(e?.message||e))}return}if(!window.PI_CLIENT_ID){authMsg('⚠️ Pi Sign-in يحتاج PI_CLIENT_ID في إعدادات المنصة.');return}const state=crypto.randomUUID();sessionStorage.setItem('ai_for_pi_state',state);const redirect=window.PI_SIGNIN_REDIRECT_URI||location.origin+'/platform';if(window.Pi&&typeof window.Pi.signIn==='function'){window.Pi.signIn({clientId:window.PI_CLIENT_ID,redirectUri:redirect,scopes:['username'],state});}else{location.href='https://accounts.pinet.com/oauth/authorize?response_type=token&client_id='+encodeURIComponent(window.PI_CLIENT_ID)+'&redirect_uri='+encodeURIComponent(redirect)+'&scope=username&state='+encodeURIComponent(state)}}async function loginGoogle(){if(!window.GOOGLE_CLIENT_ID){authMsg('⚠️ Google يحتاج GOOGLE_CLIENT_ID في إعدادات المنصة.');return}if(!window.google?.accounts?.id){await new Promise((resolve,reject)=>{let x=document.createElement('script');x.src='https://accounts.google.com/gsi/client';x.onload=resolve;x.onerror=reject;document.head.appendChild(x)}).catch(()=>{})}if(!window.google?.accounts?.id){authMsg('⚠️ تعذر تحميل Google Identity Services.');return}window.google.accounts.id.initialize({client_id:window.GOOGLE_CLIENT_ID,callback:r=>postAuth('/api/platform/google/login',{id_token:r.credential})});window.google.accounts.id.prompt()}function loginTelegram(){if(!window.TELEGRAM_BOT_USERNAME){authMsg('⚠️ Telegram Login غير مضبوط.');return}window.onTelegramAuth=u=>{if(u)postAuth('/api/platform/telegram/login',u);else authMsg('⚠️ لم تتم مصادقة Telegram.')};let box=document.getElementById('tgLoginWidget');if(box)box.remove();box=document.createElement('div');box.id='tgLoginWidget';let sc=document.createElement('script');sc.async=true;sc.src='https://telegram.org/js/telegram-widget.js?22';sc.dataset.telegramLogin=window.TELEGRAM_BOT_USERNAME;sc.dataset.size='large';sc.dataset.userpic='false';sc.dataset.requestAccess='write';sc.dataset.onauth='onTelegramAuth(user)';box.appendChild(sc);document.getElementById('authBox').appendChild(box);authMsg('⏳ أكمل تسجيل الدخول من Telegram.')}async function handlePiCallback(){const p=new URLSearchParams(location.hash.slice(1));const token=p.get('access_token'),st=p.get('state');if(!token)return;const expected=sessionStorage.getItem('ai_for_pi_state');const linking=sessionStorage.getItem('ai_for_pi_linking')==='1';sessionStorage.removeItem('ai_for_pi_state');sessionStorage.removeItem('ai_for_pi_linking');history.replaceState(null,'',location.pathname);if(!expected||st!==expected){authMsg('⚠️ فشل التحقق من حالة Pi.');return}if(linking){let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'pi',access_token:token})}).then(r=>r.json());authMsg(d.ok?'✅ تم ربط حساب Pi بالهوية الحالية.':'⚠️ '+(d.error||'link_failed'));if(d.ok)setTimeout(()=>location.href='/app',500)}else{await postAuth('/api/platform/pi/login',{access_token:token})}}showAuth();handlePiCallback();</script></body></html>"""
+
+@app.route("/api/platform/pi/login", methods=["POST"])
+def platform_pi_login():
+    verified,err=_verified_pi_user((request.get_json(silent=True) or {}).get("access_token"))
+    if err:return jsonify({"ok":False,"error":err}),401 if err.startswith("invalid_") or err in ("missing_access_token","pi_identity_missing") else 503
+    result,err=_provider_login("pi",verified["uid"],verified["username"],"",verified["username"] or "AI for Pioneer",True,True)
+    if err:return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 503
+    account,token=result; return _set_web_cookie(jsonify({"ok":True,"provider":"pi","account":_web_account_public(account)}),token)
+
+@app.route("/api/platform/google/login", methods=["POST"])
+def platform_google_login():
+    verified,err=_verified_google_user((request.get_json(silent=True) or {}).get("id_token"))
+    if err:return jsonify({"ok":False,"error":err}),401 if err.startswith("invalid_") or err in ("google_email_not_verified","google_identity_missing","google_audience_mismatch","google_issuer_mismatch") else 503
+    result,err=_provider_login("google",verified["sub"],"",verified["email"],verified["name"],True,False)
+    if err:return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 503
+    account,token=result; return _set_web_cookie(jsonify({"ok":True,"provider":"google","account":_web_account_public(account)}),token)
+
+@app.route("/api/platform/telegram/login", methods=["POST"])
+def platform_telegram_login():
+    verified,err=_verify_telegram_login(request.get_json(silent=True) or {})
+    if err:return jsonify({"ok":False,"error":err}),401 if err.startswith("telegram_auth") or err=="telegram_identity_missing" else 503
+    result,err=_provider_login("telegram",verified["id"],verified["username"],"",verified["first_name"] or "Telegram user",True,bool(verified["username"]))
+    if err:return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 503
+    account,token=result; return _set_web_cookie(jsonify({"ok":True,"provider":"telegram","account":_web_account_public(account)}),token)
+
+@app.route("/api/platform/email/register", methods=["POST"])
+def platform_email_register():
+    if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
+    if not _email_verification_ready():return jsonify({"ok":False,"error":"email_delivery_not_configured"}),503
+    b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); password=str(b.get("password") or ""); display_name=str(b.get("display_name","") or email.split("@")[0]).strip()[:80]
+    account,err=create_web_account(display_name,email.split("@")[0],email,password)
+    if err:return jsonify({"ok":False,"error":err}),409 if err in ("username_taken","email_taken") else 400
+    sent,serr=_issue_email_verification(account["account_id"],email,display_name)
+    if not sent:return jsonify({"ok":False,"error":serr or "verification_send_failed"}),503
+    return jsonify({"ok":True,"provider":"email","verification_required":True,"account":_web_account_public(account),"message":"تم إنشاء الحساب. أرسلنا رمز التحقق إلى بريدك الإلكتروني."}),202
+
+@app.route("/api/platform/email/verify", methods=["POST"])
+def platform_email_verify():
+    if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
+    b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); code=str(b.get("code") or "").strip(); account_id=_account_id_by_email(email,verified_only=False)
+    if not account_id:return jsonify({"ok":False,"error":"account_not_found"}),404
+    ok,err=_verify_email_code(account_id,code)
+    if not ok:return jsonify({"ok":False,"error":err}),400 if err not in ("database_unavailable",) else 503
+    account=_get_web_account_by_id(account_id); token=_web_issue_session(account_id)
+    if not account or not token:return jsonify({"ok":False,"error":"session_issue_failed"}),503
+    return _set_web_cookie(jsonify({"ok":True,"provider":"email","account":_web_account_public(account)}),token)
+
+@app.route("/api/platform/email/resend", methods=["POST"])
+def platform_email_resend():
+    if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
+    b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); account_id=_account_id_by_email(email,verified_only=False)
+    if not account_id:return jsonify({"ok":False,"error":"account_not_found"}),404
+    account=_get_web_account_by_id(account_id)
+    if not account:return jsonify({"ok":False,"error":"account_not_found"}),404
+    if bool(account.get("email_verified")):return jsonify({"ok":False,"error":"email_already_verified"}),409
+    sent,err=_issue_email_verification(account_id,email,account.get("display_name") or email.split("@")[0])
+    return jsonify({"ok":sent,"error":None if sent else err}),200 if sent else 503
+
+@app.route("/api/platform/email/login", methods=["POST"])
+def platform_email_login():
+    if not EMAIL_AUTH_ENABLED:return jsonify({"ok":False,"error":"email_auth_disabled"}),503
+    b=request.get_json(silent=True) or {}; email=_normalize_web_email(b.get("email")); password=str(b.get("password") or ""); conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return jsonify({"ok":False,"error":"database_unavailable"}),503
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT account_id,display_name,username,email,email_verified,role,status,password_hash FROM ai_for_web_accounts WHERE lower(email)=lower(%s) AND status='active' LIMIT 1",(email,)); account=cur.fetchone()
+                if not account or not _web_password_verify(password,account.get("password_hash")):return jsonify({"ok":False,"error":"invalid_email_or_password"}),401
+                if not bool(account.get("email_verified")):return jsonify({"ok":False,"error":"email_not_verified"}),403
+        token=_web_issue_session(account["account_id"])
+        if not token:return jsonify({"ok":False,"error":"session_issue_failed"}),503
+        return _set_web_cookie(jsonify({"ok":True,"provider":"email","account":_web_account_public(account)}),token)
+    finally:_membership_db_release(conn)
+
+@app.route("/api/platform/identity/link", methods=["POST"])
+def platform_identity_link():
+    account=_get_web_account_from_request()
+    if not account:return jsonify({"ok":False,"error":"not_authenticated"}),401
+    b=request.get_json(silent=True) or {}; provider=str(b.get("provider") or "").lower()
+    if provider=="pi": v,err=_verified_pi_user(b.get("access_token")); subject=v.get("uid") if v else ""; pu=v.get("username") if v else ""; email=""; force=True
+    elif provider=="google": v,err=_verified_google_user(b.get("id_token")); subject=v.get("sub") if v else ""; pu=""; email=v.get("email") if v else ""; force=False
+    elif provider=="telegram": v,err=_verify_telegram_login(b); subject=v.get("id") if v else ""; pu=v.get("username") if v else ""; email=""; force=bool(pu)
+    else:return jsonify({"ok":False,"error":"unsupported_provider"}),400
+    if err:return jsonify({"ok":False,"error":err}),401
+    ok,err=_link_identity(account["account_id"],provider,subject,pu,email,True)
+    if not ok:return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 400
+    if force and pu:update_web_profile(account["account_id"],username=pu)
+    return jsonify({"ok":True,"provider":provider,"account":_web_account_public(_get_web_account_by_id(account["account_id"]))})
+
+@app.route("/api/platform/identity/status", methods=["GET"])
+def platform_identity_status():
+    account=_get_web_account_from_request()
+    if not account:return jsonify({"ok":False,"error":"not_authenticated"}),401
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return jsonify({"ok":False,"error":"database_unavailable"}),503
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT provider,provider_username,email,verified,created_at,last_seen FROM ai_for_identity_links WHERE account_id=%s ORDER BY provider",(str(account["account_id"]),))
+                return jsonify({"ok":True,"account":_web_account_public(account),"identities":[dict(x) for x in cur.fetchall()]})
+    finally:_membership_db_release(conn)
+
+@app.route("/api/platform/profile", methods=["PATCH","POST"])
+def platform_profile_update():
+    account=_get_web_account_from_request()
+    if not account:return jsonify({"ok":False,"error":"not_authenticated"}),401
+    b=request.get_json(silent=True) or {}; updated,err=update_web_profile(account["account_id"],b.get("display_name"),b.get("username") if "username" in b else None)
+    if err:return jsonify({"ok":False,"error":err}),409 if err in ("username_taken","username_locked_by_provider") else 400
+    return jsonify({"ok":True,"account":_web_account_public(updated)})
 
 @app.route("/api/platform/register", methods=["POST"])
 def platform_register():
-    """Create a direct Web account. This is separate from Telegram identity."""
-    body = request.get_json(silent=True) or {}
-    display_name = str(body.get("display_name", "")).strip()
-    username = str(body.get("username", "")).strip()
-    account, error = create_web_account(display_name, username)
+    body=request.get_json(silent=True) or {}
+    account,error=create_web_account(body.get("display_name",""),body.get("username",""),body.get("email",""),body.get("password",""))
     if error:
-        status = 503 if error == "database_unavailable" else 409 if error == "username_taken" else 400
-        return jsonify({"ok": False, "error": error}), status
-    resp = make_response(jsonify({"ok": True, "account": {k: account[k] for k in ("account_id","display_name","username","role")}}), 201)
-    resp.set_cookie(WEB_IDENTITY_COOKIE, account["token"], max_age=WEB_IDENTITY_MAX_AGE, httponly=True, secure=True, samesite="Lax")
-    return resp
+        status=503 if error=="database_unavailable" else 409 if error in ("username_taken","email_taken") else 400
+        return jsonify({"ok":False,"error":error}),status
+    return _set_web_cookie(jsonify({"ok":True,"account":_web_account_public(account)}),account["token"])
 
 @app.route("/api/platform/me", methods=["GET"])
 def platform_me():
     account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE, ""))
     if not account:
         return jsonify({"ok": False, "error": "not_authenticated"}), 401
-    return jsonify({"ok": True, "account": {"account_id": str(account["account_id"]), "display_name": account["display_name"], "username": account["username"], "role": account["role"]}})
+    return jsonify({"ok": True, "account": _web_account_public(account)})
+
+@app.route("/validation-key.txt", methods=["GET"])
+def pi_validation_key():
+    """Serve Pi Developer Portal domain-validation key from the deployed project root."""
+    key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "validation-key.txt")
+    try:
+        with open(key_path, "r", encoding="utf-8") as fh:
+            key = fh.read().strip()
+    except OSError:
+        return "Not Found", 404
+    if not key:
+        return "Not Found", 404
+    return key + "\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/", methods=["GET"])
 def public_home():
@@ -2957,7 +3363,9 @@ def platform_manifest():
 @app.route("/platform", methods=["GET"])
 def platform_home():
     ensure_background_services()
-    return PLATFORM_HTML, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+    redirect_uri = PI_SIGNIN_REDIRECT_URI or (request.url_root.rstrip("/") + "/platform")
+    html = PLATFORM_HTML.replace("__AI_FOR_GOOGLE_CLIENT_ID__", json.dumps(GOOGLE_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1]).replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])
 def webapp():
@@ -3457,6 +3865,15 @@ def owner_feature_tests(user):
     required_routes={
         "webapp_platform_register":"/api/platform/register",
         "webapp_platform_me":"/api/platform/me",
+        "webapp_platform_pi_login":"/api/platform/pi/login",
+        "webapp_platform_google_login":"/api/platform/google/login",
+        "webapp_platform_telegram_login":"/api/platform/telegram/login",
+        "webapp_platform_email_login":"/api/platform/email/login",
+        "platform_email_verify":"/api/platform/email/verify",
+        "platform_email_resend":"/api/platform/email/resend",
+        "webapp_platform_identity_link":"/api/platform/identity/link",
+        "webapp_platform_identity_status":"/api/platform/identity/status",
+        "webapp_platform_profile":"/api/platform/profile",
         "webapp_bootstrap":"/api/app/bootstrap",
         "webapp_ai":"/api/app/ai",
         "webapp_search":"/api/app/search",
@@ -3476,6 +3893,10 @@ def owner_feature_tests(user):
     add("conversation_persistence", callable(globals().get("_webapp_save_history")) and callable(globals().get("_webapp_history")), "Persistent conversation helpers are present")
     add("durable_persistence_architecture", bool(DATABASE_URL) and callable(globals().get("_persistence_probe")), "Critical platform persistence has a PostgreSQL path and a cross-deploy probe; Render filesystem is not used for the probe")
     add("nft_studio_architecture", callable(globals().get("_nft_project_create")) and callable(globals().get("_nft_projects_list")) and "webapp_nft_projects" in app.view_functions, "NFT Studio drafts have a PostgreSQL-backed project path; minting/market transactions remain future")
+    add("email_verification_routes", all(x in app.view_functions for x in ("platform_email_verify","platform_email_resend")), "Email registration requires server-side verification code before session issuance")
+    add("email_verification_schema", "ai_for_email_verifications" in globals() or callable(globals().get("_verify_email_code")), "Verification-code persistence helpers are present")
+    add("telegram_widget_dom_loader", "createElement('script')" in open(__file__, encoding="utf-8").read(), "Telegram widget is inserted as a real DOM script element, not innerHTML")
+    add("pi_browser_detection", "&&/Pi Browser/i.test(navigator.userAgent)" not in (globals().get("PLATFORM_HTML", "") or ""), "Pi SDK authentication is based on window.Pi capability, not brittle UA matching")
     passed=sum(1 for x in tests if x["ok"])
     failed=len(tests)-passed
     return {"ok":failed==0,"summary":{"total":len(tests),"passed":passed,"failed":failed},"tests":tests,"executed_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()}

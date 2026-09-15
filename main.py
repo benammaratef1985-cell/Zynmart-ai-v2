@@ -152,7 +152,7 @@ DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
 # database remains durable and requests fail fast instead of looking like data loss.
 DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_STATEMENT_TIMEOUT_MS", "10000"))
 DB_LOCK_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_LOCK_TIMEOUT_MS", "5000"))
-DB_SCHEMA_VERSION = 6
+DB_SCHEMA_VERSION = 7
 WEB_IDENTITY_COOKIE = "ai_for_sid"
 WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
 
@@ -323,6 +323,48 @@ def _ensure_db_schema(cur):
             PRIMARY KEY (app_id, visitor_key)
         )
     """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_support_tickets (
+            ticket_id UUID PRIMARY KEY, identity_key TEXT NOT NULL, subject TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_favorites (
+            identity_key TEXT NOT NULL, item_type TEXT NOT NULL, item_key TEXT NOT NULL,
+            title TEXT NOT NULL DEFAULT '', url TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), PRIMARY KEY(identity_key,item_type,item_key)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_community_posts (
+            post_id UUID PRIMARY KEY, author_identity TEXT NOT NULL, body TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), likes BIGINT NOT NULL DEFAULT 0
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_messages (
+            message_id UUID PRIMARY KEY, sender_identity TEXT NOT NULL, recipient_identity TEXT NOT NULL,
+            body TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), read_at TIMESTAMPTZ
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_rewards (
+            identity_key TEXT PRIMARY KEY, points BIGINT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_quiz_attempts (
+            attempt_id UUID PRIMARY KEY, identity_key TEXT NOT NULL, question_key TEXT NOT NULL,
+            correct BOOLEAN NOT NULL, points BIGINT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_support_identity ON ai_for_support_tickets(identity_key, updated_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_recent ON ai_for_community_posts(created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_pair ON ai_for_messages(sender_identity, recipient_identity, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_recipient ON ai_for_messages(recipient_identity, created_at DESC)")
     cur.execute("""INSERT INTO ai_for_db_meta(key,value) VALUES('schema_version',%s)
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
     db_schema_version = DB_SCHEMA_VERSION
@@ -2205,26 +2247,26 @@ PLATFORM_STATUS = {
     "search": {"active": ["بحث الويب", "بحث المصادر", "الأخبار عند توفر المصدر", "بحث Pi"], "soon": ["بحث المنتجات والمتاجر المدمج"]},
     "market": {"active": [], "soon": ["البحث عن المنتجات", "السلة", "العروض", "إضافة منتج", "إنشاء متجر", "المعاملات"]},
     "stores": {"active": [], "soon": ["البحث", "المتاجر المميزة", "التجار الموثقون", "لوحة التاجر"]},
-    "community": {"active": [], "soon": ["المنشورات", "المجموعات", "القنوات", "المتابعة", "الإشعارات"]},
-    "messages": {"active": [], "soon": ["الرسائل", "محادثات العملاء", "محادثات التجار"]},
+    "community": {"active": ["منشورات المجتمع", "إنشاء منشور", "عرض المنشورات"], "soon": ["المجموعات", "القنوات", "المتابعة المتقدمة"]},
+    "messages": {"active": ["رسائل المستخدمين داخل AI for", "صندوق الرسائل الأساسي"], "soon": ["محادثات العملاء", "محادثات التجار"]},
     "news": {"active": ["بحث الأخبار عبر المصادر"], "soon": ["الأكثر قراءة", "خلاصة أخبار مخصصة"]},
     "pi": {"active": ["Pi Network", "أسعار المصادر العامة", "مقارنة المصادر", "أخبار Pi", "تحليل بالأدلة"], "soon": ["بيانات سوق داخلية متقدمة"]},
     "content": {"active": ["إنشاء المحتوى النصي", "File Intelligence للنص وCSV وJSON", "تحليل المدخلات"], "soon": ["توليد الصور", "الفيديو", "الصوت"]},
     "analytics": {"active": ["تحليل البيانات المقدمة", "الحسابات والمقارنات عبر AI", "تقارير نصية"], "soon": ["لوحات بيانات متقدمة"]},
-    "tools": {"active": ["حاسبة فعلية", "ترجمة فعلية", "التاريخ والوقت", "أدوات الروابط الأساسية"], "soon": ["ملفات متقدمة", "بيانات عملات مباشرة مخصصة"]},
-    "fun": {"active": [], "soon": ["الألعاب", "التحديات", "الترتيب", "المكافآت"]},
+    "tools": {"active": ["حاسبة فعلية", "ترجمة فعلية", "التاريخ والوقت", "تحويل العملات المباشر", "أدوات الروابط الأساسية", "تحليل PDF/DOCX/XLSX/CSV/JSON"], "soon": ["تحليل XLS القديم"]},
+    "fun": {"active": ["اختبارات قصيرة بنقاط حقيقية", "تسجيل المحاولات"], "soon": ["ألعاب متعددة", "بطولات"]},
     "plus": {"active": [], "soon": ["العضوية", "مزايا AI متقدمة", "عروض خاصة"]},
     "ads": {"active": [], "soon": ["إنشاء إعلان", "حملات", "النتائج", "الميزانية"]},
-    "rewards": {"active": [], "soon": ["المكافآت", "النشاط", "الترتيب", "المهام", "الإحالات", "النقاط"]},
-    "account": {"active": ["هوية Telegram الحالية", "حالة الوصول"], "soon": ["الملف داخل المنصة", "المفضلة", "المشتريات", "المتجر"]},
+    "rewards": {"active": ["النقاط", "سجل النشاط الأساسي"], "soon": ["المكافآت القابلة للاستبدال", "الإحالات", "المهام المتقدمة", "الترتيب العام"]},
+    "account": {"active": ["هوية Telegram الحالية", "حالة الوصول", "الملف والصورة", "المفضلة"], "soon": ["المشتريات", "المتجر"]},
     "security": {"active": ["حالة الحماية", "مكافحة المحتوى المشبوه", "المراقبة الأمنية الحالية"], "soon": ["التحقق من التجار", "التقييمات", "مركز النزاعات"]},
     "knowledge": {"active": ["الموسوعة والبحث عبر AI/ويب", "الأدلة والأسئلة الشائعة"], "soon": ["الدورات التعليمية"]},
-    "support": {"active": ["المساعدة", "حالة النظام", "فحص الاتصال الأساسي"], "soon": ["بلاغات داخل التطبيق", "مركز تواصل متكامل"]},
+    "support": {"active": ["المساعدة", "حالة النظام", "فحص الاتصال الأساسي", "بلاغات الدعم وحفظها في PostgreSQL"], "soon": ["مركز تواصل متكامل"]},
     "lab": {"active": ["AI", "Search", "Pi", "Moderation", "Daily", "Broadcast", "Mini App"], "soon": ["Marketplace", "Stores", "Community", "Messaging", "Media", "Membership", "Rewards"]},
     "autocore": {"active": ["واجهة مستقلة داخل AI for", "فصل الكود والصلاحيات", "تشغيل مستقل عن واجهة AI for", "Kill Switch / سجل تدقيق مخطط"], "soon": ["ربط الخدمة المستقلة", "التنفيذ التجاري الفعلي", "طبقة التسوية الآمنة"]},
     "revenue": {"active": ["Revenue Safety Gate", "منع المقامرة والـspam والنقرات الوهمية", "إخفاء البيانات المالية الشخصية", "تمييز المحتوى المدفوع بوضوح"], "soon": ["ZYNMART+", "شبكات الإعلانات", "Rewarded Ads وفق سياسات المزود", "Promoted Products/Stores", "خطط Business", "الفوترة والتسوية الآمنة"]},
     "external_apps": {"active": ["إضافة تطبيق خارجي بالرابط", "استخراج الاسم والهوية البصرية عند توفرها", "فتح مباشر للتطبيق", "تتبع زيارات الوصول داخل AI for"], "soon": ["برامج إحالة واتفاقيات Revenue Share", "Featured Apps", "خطط Business للتطبيقات"]},
-    "nft": {"active": [], "soon": ["مصمم NFT", "إنشاء مجموعات", "بيانات وMetadata", "بوابة عرض عالمية", "البيع/المعاملات", "تكاملات Web3"]}
+    "nft": {"active": ["مسودات المشاريع", "إنشاء Metadata JSON", "إدارة المشاريع"], "soon": ["مصمم بصري كامل", "بوابة عرض عالمية", "Minting", "البيع/المعاملات", "تكاملات Web3"]}
 }
 
 def _webapp_data_check(init_data):
@@ -2365,8 +2407,6 @@ def _webapp_file_analysis(name, content, kind=""):
             return {"type":"json", "name":name, "kind":"object" if isinstance(obj,dict) else "array" if isinstance(obj,list) else type(obj).__name__, "keys":list(obj.keys())[:50] if isinstance(obj,dict) else [], "preview":json.dumps(obj, ensure_ascii=False)[:6000]}
         except Exception:
             return {"type":"text", "name":name, "error":"invalid_json", "preview":text[:6000]}
-    if name.lower().endswith((".pdf",".docx",".xlsx",".xls")) or kind in ("application/pdf","application/vnd.openxmlformats-officedocument.wordprocessingml.document","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
-        return {"type":"soon", "name":name, "message":"هذا النوع محفوظ للتكامل المتقدم قريبًا. الملفات النصية وCSV وJSON قابلة للتحليل الآن."}
     lines=text.splitlines()
     words=text.split()
     return {"type":"text", "name":name, "characters":len(text), "lines":len(lines), "words":len(words), "preview":text[:6000]}
@@ -2764,7 +2804,7 @@ function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_op
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
-function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;let privileged=(state.role==='owner'||state.role==='admin');if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
+function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;let privileged=(state.role==='owner'||state.role==='admin');if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}if(key==='tools'){toolsBox();return}if(key==='account'){accountBox();return}if(key==='support'){supportBox();return}if(key==='community'){communityBox();return}if(key==='messages'){messagesBox();return}if(key==='rewards'){rewardsBox();return}if(key==='fun'){funBox();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
 function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.map(card).join('')}</div>`}
 async function renderExternalApps(){
  document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔗 التطبيقات الخارجية</div><p class="small">تطبيقات مستقلة يمكن فتحها مباشرة. هوية التطبيق تُستخرج من بياناته العامة عند الإضافة عندما تكون متاحة.</p><div id="externalAppsView" class="grid"></div></section>`;
@@ -2773,8 +2813,9 @@ async function renderExternalApps(){
  r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
 }
 async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
-function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">مساحة مخصصة لبناء وتصميم مشاريع NFT، تمهيدًا لبوابة عالمية حقيقية. هذه المرحلة تحفظ مسودات المشاريع فقط؛ الإنشاء الفعلي والـMint والسوق والتكاملات تبقى 🚧 قريبًا.</p><div class="statusBox"><div class="row">🎨 مصمم NFT — 🚧 قريبًا</div><div class="row">🗂️ إنشاء مجموعات — 🚧 قريبًا</div><div class="row">🧾 Metadata — 🚧 قريبًا</div><div class="row">🌐 بوابة عرض عالمية — 🚧 قريبًا</div><div class="row">⛓️ Web3 / Minting — 🚧 قريبًا</div><div class="row">💱 البيع والمعاملات — 🚧 قريبًا</div></div><div class="statusBox"><b>مسودة مشروع</b><input id="nftName" placeholder="اسم المشروع" style="width:100%;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"><input id="nftCollection" placeholder="اسم المجموعة (اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"><textarea id="nftDescription" placeholder="وصف المشروع" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"></textarea><button class="action green" onclick="createNFTProject()">💾 حفظ المسودة</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects()}
+function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">مساحة مخصصة لبناء وتصميم مشاريع NFT، تمهيدًا لبوابة عالمية حقيقية. هذه المرحلة تحفظ مسودات المشاريع فقط؛ الإنشاء الفعلي والـMint والسوق والتكاملات تبقى 🚧 قريبًا.</p><div class="statusBox"><div class="row">🎨 مصمم NFT — 🚧 قريبًا</div><div class="row">🗂️ إنشاء مجموعات — 🚧 قريبًا</div><div class="row">🧾 Metadata — 🚧 قريبًا</div><div class="row">🌐 بوابة عرض عالمية — 🚧 قريبًا</div><div class="row">⛓️ Web3 / Minting — 🚧 قريبًا</div><div class="row">💱 البيع والمعاملات — 🚧 قريبًا</div></div><div class="statusBox"><b>مسودة مشروع</b><input id="nftName" placeholder="اسم المشروع" style="width:100%;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"><input id="nftCollection" placeholder="اسم المجموعة (اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"><textarea id="nftDescription" placeholder="وصف المشروع" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px;background:#071018;color:white;border:1px solid #1e3443"></textarea><button class="action green" onclick="createNFTProject()">💾 حفظ المسودة</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects()}
 async function loadNFTProjects(){let r=document.getElementById('nftProjects');if(!r)return;try{let d=await api('/api/app/nft/projects');if(!d.ok)throw new Error(d.error||'load_failed');r.innerHTML=(d.projects||[]).length?(d.projects||[]).map(p=>`<div class="row">🖼️ <b>${esc(p.name||'بدون اسم')}</b> · ${esc(p.collection_name||'بدون مجموعة')} · ${esc(p.status)}</div>`).join(''):'<span class="small">لا توجد مسودات بعد.</span>'}catch(e){r.textContent='⚠️ '+(e.message||'')}}
+async function generateNFTMetadata(){let name=document.getElementById('nftName')?.value.trim()||'AI for NFT',description=document.getElementById('nftDescription')?.value.trim()||'',collection=document.getElementById('nftCollection')?.value.trim()||'';try{let d=await platformSvc('nft_metadata',{name,description,collection});document.getElementById('nftMsg').innerHTML='<div class="statusBox"><pre style="white-space:pre-wrap">'+esc(JSON.stringify(d.metadata,null,2))+'</pre></div>'}catch(e){document.getElementById('nftMsg').textContent='⚠️ تعذر إنشاء Metadata.'}}
 async function createNFTProject(){let m=document.getElementById('nftMsg');if(!m)return;m.textContent='⏳ جاري حفظ المسودة...';try{let d=await api('/api/app/nft/projects',{method:'POST',body:JSON.stringify({name:document.getElementById('nftName').value,collection_name:document.getElementById('nftCollection').value,description:document.getElementById('nftDescription').value})});if(!d.ok)throw new Error(d.error||'save_failed');m.textContent='✅ تم حفظ مسودة NFT في PostgreSQL.';loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'')}}
 function renderAutoCore(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🚀 AUTO CORE</div><p class="small">Autonomous Business Agent — واجهة احترافية داخل AI for مع بقاء محرك Auto Core مستقلًا.</p><div class="statusBox autocore"><div class="metricGrid"><div class="metric">الحالة<b class="ok">ARCHITECTURE READY</b></div><div class="metric">الاستقلال<b class="info">SEPARATE CORE</b></div><div class="metric">التشغيل<b>AUTONOMOUS</b></div><div class="metric">الأمان<b class="ok">ISOLATED</b></div></div></div><div class="statusBox"><div class="row">🔎 Scout — البحث عن الفرص والعملاء</div><div class="row">🤝 Negotiate — فهم الطلب والتفاوض</div><div class="row">⚙️ Execute — تنفيذ المهمة كاملة</div><div class="row">📦 Deliver — التسليم</div><div class="row">💳 Settle — التسوية عبر طبقة دفع آمنة</div><div class="row">📜 Audit — سجل تدقيق</div></div><button class="action green" onclick="openAutoCore()">🚀 فتح Auto Core المستقل</button><p class="small">لا يتم تشغيل الوكيل من هذه الواجهة. تشغيله المستقل يظل خارج AI for؛ هذه البطاقة هي بوابة الوصول فقط.</p></section>`}
 function renderRevenue(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">💰 مركز الدخل</div><p class="small">منظومة ربح مبنية على خدمات حقيقية، مع حواجز تمنع المقامرة والخداع والـspam والنقرات الوهمية.</p><div class="statusBox safe"><div class="row">🛡️ Revenue Safety Gate — <span class="ok">مفعّل</span></div><div class="row">🎰 مقامرة/رهان مالي — <span class="danger">ممنوع</span></div><div class="row">🤖 نقرات إعلانية مصطنعة — <span class="danger">ممنوع</span></div><div class="row">📢 إعلان مدفوع مخفي — <span class="danger">ممنوع</span></div><div class="row">🔐 كشف بيانات الدفع الشخصية — <span class="danger">ممنوع</span></div></div><div class="statusBox"><div class="row">⭐ ZYNMART+ — 🚧 قريبًا</div><div class="row">📣 Advertising Network — 🚧 قريبًا وفق شروط المزود</div><div class="row">🎁 Rewarded Ads — 🚧 قريبًا وفق شروط المزود</div><div class="row">🏪 Promoted Stores/Products — 🚧 قريبًا</div><div class="row">🏢 Business Plans — 🚧 قريبًا</div></div></section>`}
@@ -2790,21 +2831,36 @@ function regenerateLast(){askAI(true)}
 async function newConversation(){conversationId='c_'+Date.now()+'_'+Math.random().toString(36).slice(2);localStorage.setItem('ai_for_conversation_id',conversationId);try{await api('/api/app/ai/new',{method:'POST',body:JSON.stringify({conversation_id:conversationId})})}catch(e){}renderChatShell()}
 function taskBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="aiBox()">← AI Workspace</button><section class="detail"><div class="sectionTitle">🎯 Task Mode</div><p class="small">حوّل الهدف إلى خطة ثم نفّذ ما يمكن إنجازه الآن.</p><textarea id="goal" placeholder="مثال: أريد خطة لإطلاق خدمة رقمية..." style="width:100%;min-height:120px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="runTask()">🚀 ابدأ المهمة</button><div id="taskResult"></div></section>`}
 async function runTask(){let g=document.getElementById('goal')?.value.trim(),r=document.getElementById('taskResult');if(!g)return;r.innerHTML='<div class="statusBox">⏳ تحليل الهدف وبناء المهمة...</div>';try{let d=await api('/api/app/task',{method:'POST',body:JSON.stringify({goal:g})});r.innerHTML='<div class="statusBox"><b>الخطة</b><div class="row">'+esc(d.plan||'')+'</div><div class="row">'+esc(d.text||'')+'</div></div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر تنفيذ المهمة الآن.</div>'}}
-function contentBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('content')">← المحتوى</button><section class="detail"><div class="sectionTitle">🎨 Content Studio</div><div class="filebox"><b>📁 File Intelligence</b><p class="small">حلّل النصوص وCSV وJSON الآن. الأنواع المتقدمة ستضاف لاحقًا.</p><input id="fileInput" type="file" accept=".txt,.csv,.json,text/plain,text/csv,application/json" style="width:100%;margin-top:10px"><button class="action" onclick="analyzeFile()">🔍 تحليل الملف</button><div id="fileResult"></div></div><div class="filebox"><b>✍️ إنشاء محتوى</b><textarea id="contentPrompt" placeholder="اكتب المطلوب..." style="width:100%;min-height:100px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="contentAI()">✨ إنشاء</button><div id="contentResult"></div></div></section>`}
+function contentBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('content')">← المحتوى</button><section class="detail"><div class="sectionTitle">🎨 Content Studio</div><div class="filebox"><b>📁 File Intelligence</b><p class="small">حلّل النصوص وCSV وJSON وPDF وDOCX وXLSX الآن.</p><input id="fileInput" type="file" accept=".txt,.csv,.json,.pdf,.docx,.xlsx,text/plain,text/csv,application/json,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" style="width:100%;margin-top:10px"><button class="action" onclick="analyzeFile()">🔍 تحليل الملف</button><div id="fileResult"></div></div><div class="filebox"><b>✍️ إنشاء محتوى</b><textarea id="contentPrompt" placeholder="اكتب المطلوب..." style="width:100%;min-height:100px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="contentAI()">✨ إنشاء</button><div id="contentResult"></div></div></section>`}
 async function analyzeFile(){let f=document.getElementById('fileInput')?.files?.[0],r=document.getElementById('fileResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري التحليل...</div>';let fd=new FormData();fd.append('file',f);try{let d=await fetch('/api/app/files/analyze',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let x=await d.json();r.innerHTML='<div class="statusBox">'+esc(JSON.stringify(x.result||x,null,2))+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر تحليل الملف.</div>'}}
 async function contentAI(){let q=document.getElementById('contentPrompt')?.value.trim(),r=document.getElementById('contentResult');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري الإنشاء...</div>';try{let d=await api('/api/app/ai',{method:'POST',body:JSON.stringify({question:'أنشئ محتوى احترافيًا حسب الطلب التالي:\n'+q,conversation_id:'content_'+conversationId})});r.innerHTML='<div class="statusBox">'+esc(d.text||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر إنشاء المحتوى.</div>'}}
 function analyticsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('analytics')">← التحليلات</button><section class="detail"><div class="sectionTitle">📊 Analytics</div><p class="small">أدخل أرقامًا أو بيانات، ثم اطلب حسابًا أو مقارنة أو تحليلًا.</p><textarea id="dataPrompt" placeholder="مثال: المبيعات: 120, 150, 180. احسب المتوسط والنمو..." style="width:100%;min-height:120px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="analyzeData()">📈 تحليل البيانات</button><div id="dataResult"></div></section>`}
 async function analyzeData(){let q=document.getElementById('dataPrompt')?.value.trim(),r=document.getElementById('dataResult');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جارٍ التحليل...</div>';try{let d=await api('/api/app/ai',{method:'POST',body:JSON.stringify({question:'حلل البيانات التالية بدقة، احسب ما يمكن حسابه، واذكر الافتراضات بوضوح:\n'+q,conversation_id:'analytics_'+conversationId})});r.innerHTML='<div class="statusBox">'+esc(d.text||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر تحليل البيانات.</div>'}}
-function toolsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('tools')">← الأدوات</button><section class="detail"><div class="sectionTitle">🧰 أدوات حقيقية</div><div class="filebox"><b>🧮 حاسبة</b><input id="calc" placeholder="مثال: (25*4)+10" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="calcRun()">احسب</button><div id="calcResult"></div></div><div class="filebox"><b>🕒 وقت تونس</b><button class="action dark" onclick="timeRun()">عرض الوقت الحالي</button><div id="timeResult"></div></div><div class="filebox"><b>🌐 ترجمة</b><input id="targetLang" value="العربية" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><textarea id="transText" placeholder="النص..." style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px;font:inherit"></textarea><button class="action" onclick="translateRun()">ترجم</button><div id="transResult"></div></div></section>`}
+function toolsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="openSection('tools')">← الأدوات</button><section class="detail"><div class="sectionTitle">🧰 أدوات حقيقية</div><div class="filebox"><b>🧮 حاسبة</b><input id="calc" placeholder="مثال: (25*4)+10" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="calcRun()">احسب</button><div id="calcResult"></div></div><div class="filebox"><b>🕒 وقت تونس</b><button class="action dark" onclick="timeRun()">عرض الوقت الحالي</button><div id="timeResult"></div></div><div class="filebox"><b>💱 عملات مباشرة</b><div class="toolbar"><input id="curAmount" value="1" style="flex:1;padding:10px;background:#0a1018;color:white"><input id="curBase" value="EUR" maxlength="3" style="width:70px;padding:10px;background:#0a1018;color:white"><input id="curTarget" value="USD" maxlength="3" style="width:70px;padding:10px;background:#0a1018;color:white"></div><button class="action dark" onclick="currencyRun()">تحويل الآن</button><div id="currencyResult"></div></div><div class="filebox"><b>🌐 ترجمة</b><input id="targetLang" value="العربية" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><textarea id="transText" placeholder="النص..." style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px;font:inherit"></textarea><button class="action" onclick="translateRun()">ترجم</button><div id="transResult"></div></div></section>`}
 async function toolCall(body){return api('/api/app/tools',{method:'POST',body:JSON.stringify(body)})}
 async function calcRun(){let r=document.getElementById('calcResult');try{let d=await toolCall({op:'calculator',expression:document.getElementById('calc').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'تعذر الحساب')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحساب.</div>'}}
 async function timeRun(){let r=document.getElementById('timeResult');try{let d=await toolCall({op:'time'});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' · '+esc(d.timezone||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر قراءة الوقت.</div>'}}
+async function currencyRun(){let r=document.getElementById('currencyResult');try{let d=await toolCall({op:'currency',amount:Number(document.getElementById('curAmount').value),base:document.getElementById('curBase').value,target:document.getElementById('curTarget').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' '+esc(d.target||'')+'<div class="small">المصدر: '+esc(d.source||'')+' · '+esc(d.date||'')+'</div></div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحصول على سعر العملة.</div>'}}
 async function translateRun(){let r=document.getElementById('transResult');try{let d=await toolCall({op:'translate',text:document.getElementById('transText').value,target:document.getElementById('targetLang').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذرت الترجمة.</div>'}}
-function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-Telegram-Init-Data':tg?.initData||''}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
+async function platformSvc(op,body={}){return api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op,...body})})}
+function communityBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المجتمع</button><section class="detail"><div class="sectionTitle">👥 مجتمع AI for</div><div class="filebox"><textarea id="postBody" placeholder="اكتب منشورًا محترمًا..." style="width:100%;min-height:90px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="createPost()">نشر</button><div id="postMsg"></div></div><div id="posts">⏳ جاري تحميل المنشورات...</div></section>`;loadPosts()}
+async function loadPosts(){try{let d=await platformSvc('community_list');document.getElementById('posts').innerHTML=(d.posts||[]).map(p=>'<div class="statusBox"><b>👤 عضو AI for</b><div class="row">'+esc(p.body)+'</div><div class="small">'+esc(p.created_at||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد منشورات بعد.</div>'}catch(e){document.getElementById('posts').textContent='⚠️ تعذر تحميل المجتمع.'}}
+async function createPost(){let b=document.getElementById('postBody').value.trim();if(!b)return;try{await platformSvc('community_post',{body:b});document.getElementById('postBody').value='';loadPosts()}catch(e){document.getElementById('postMsg').textContent='⚠️ تعذر النشر.'}}
+function messagesBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الرسائل</button><section class="detail"><div class="sectionTitle">💬 رسائل AI for</div><input id="msgTo" placeholder="معرّف الحساب المستلم" style="width:100%;padding:12px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px"><textarea id="msgBody" placeholder="الرسالة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"></textarea><button class="action" onclick="sendPlatformMessage()">إرسال</button><div id="msgs" class="statusBox">⏳</div></section>`;loadMessages()}
+async function loadMessages(){try{let d=await platformSvc('messages');document.getElementById('msgs').innerHTML=(d.messages||[]).map(m=>'<div class="row"><b>'+esc(m.sender_identity)+'</b> → '+esc(m.recipient_identity)+'<br>'+esc(m.body)+'<div class="small">'+esc(m.created_at||'')+'</div></div>').join('')||'لا توجد رسائل.'}catch(e){document.getElementById('msgs').textContent='⚠️ تعذر تحميل الرسائل.'}}
+async function sendPlatformMessage(){let to=document.getElementById('msgTo').value.trim(),body=document.getElementById('msgBody').value.trim();if(!to||!body)return;try{await platformSvc('message_send',{recipient:to,body});document.getElementById('msgBody').value='';loadMessages()}catch(e){alert('⚠️ تعذر إرسال الرسالة.')}}
+function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
+function funBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الترفيه</button><section class="detail"><div class="sectionTitle">🎮 اختبار سريع</div><div class="statusBox"><b>سؤال اليوم</b><p>ما هو اختصار HTTP؟</p><button class="mini" onclick="quiz('a')">HyperText Transfer Process</button><button class="mini" onclick="quiz('b')">HyperText Transfer Protocol</button></div><div id="quizResult"></div></section>`}
+async function quiz(option){try{let d=await platformSvc('quiz_answer',{question_key:'http-001',option});let correct=Number(d.awarded||0)>0;document.getElementById('quizResult').innerHTML='<div class="statusBox">'+(correct?'✅ إجابة صحيحة — +10 نقاط':'❌ إجابة غير صحيحة — +0')+'<br>الرصيد: '+esc(d.points||0)+'</div>'}catch(e){document.getElementById('quizResult').textContent='⚠️ تعذر تسجيل المحاولة.'}}
+function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';loadFavorites();let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-Telegram-Init-Data':tg?.initData||''}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
+async function addFavorite(){let title=document.getElementById('favTitle')?.value.trim(),url=document.getElementById('favUrl')?.value.trim();if(!title)return;try{await platformSvc('favorite_add',{item_type:'user',item_key:url||title,title,url});document.getElementById('favResult').textContent='✅ تم الحفظ.';loadFavorites()}catch(e){document.getElementById('favResult').textContent='⚠️ تعذر الحفظ.'}}
+async function loadFavorites(){let el=document.getElementById('favList');if(!el)return;try{let d=await platformSvc('favorites');el.innerHTML=(d.favorites||[]).map(f=>'<div class="row">❤️ '+esc(f.title)+' '+(f.url?'<a href="'+esc(f.url)+'" target="_blank" rel="noopener">فتح</a>':'')+'</div>').join('')||'لا توجد عناصر محفوظة.'}catch(e){el.textContent='⚠️ تعذر تحميل المفضلة.'}}
 async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f)return;r.innerHTML='<div class="small">⏳ جاري الرفع...</div>';let fd=new FormData();fd.append('photo',f);try{let x=await fetch('/api/app/account/photo',{method:'POST',headers:{'X-Telegram-Init-Data':tg?.initData||''},body:fd});let d=await x.json();r.innerHTML='<div class="statusBox">'+(d.ok?'✅ تم حفظ الصورة في قاعدة البيانات الدائمة.':'⚠️ تعذر حفظ الصورة: '+esc(d.error||'unknown'))+'</div>';if(d.ok)setTimeout(accountBox,300)}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر رفع الصورة.</div>'}}
 async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<section class="hero"><h1>🔔 الإشعارات</h1><p>تحديثات النظام والميزات والإشعارات الخاصة بك.</p></section><div id="notes" class="detail"><div class="statusBox">⏳ جاري التحميل...</div></div>';try{let d=await api('/api/app/notifications');document.getElementById('notes').innerHTML=(d.notifications||[]).slice().reverse().map(n=>'<div class="statusBox"><b>'+esc(n.title||'إشعار')+'</b><div class="row">'+esc(n.text||'')+'</div><div class="small">'+esc(n.time||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد إشعارات.</div>';document.getElementById('notifyBadge').textContent=d.unread?'🔔 '+d.unread:'الإشعارات';if(d.unread)await api('/api/app/notifications',{method:'POST',body:JSON.stringify({action:'read_all'})})}catch(e){document.getElementById('notes').innerHTML='<div class="statusBox">⚠️ تعذر تحميل الإشعارات.</div>'}}
 function securityBox(){let auth=state?.user?.auth_type==='web'?'حساب Web + جلسة آمنة':'Telegram initData';document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'security\')">← الأمان</button><section class="detail"><div class="sectionTitle">🛡️ فحص الأمان</div><div class="statusBox"><div class="row">المصادقة: <span class="ok">'+esc(auth)+' — تم التحقق قبل الوصول</span></div><div class="row">صلاحيات الدور: <span class="ok">مفروضة على الخادم</span></div><div class="row">القسم المقفول: <span class="ok">يُرفض من API</span></div><div class="row">كشف بيانات الدفع الشخصية: <span class="ok">ممنوع</span></div></div></section>'}
-function supportBox(){let channel=state?.user?.auth_type==='web'?'متصفح Web / Pi Browser':'Telegram WebApp';document.getElementById('view').innerHTML='<button class="back" onclick="openSection(\'support\')">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم وحالة النظام</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">قناة الدخول: <span class="ok">'+esc(channel)+'</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?' <span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div></section>'}
+function supportBox(){let channel=state?.user?.auth_type==='web'?'متصفح Web / Pi Browser':'Telegram WebApp';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الدعم</button><section class="detail"><div class="sectionTitle">🆘 الدعم</div><div class="statusBox"><div class="row">واجهة المنصة: <span class="ok">متصلة</span></div><div class="row">قناة الدخول: <span class="ok">'+esc(channel)+'</span></div><div class="row">المصادقة: <span class="ok">مفعلة</span></div><div class="row">وضع الطوارئ: '+(state.emergency?' <span class="danger">مفعّل</span>':'<span class="ok">غير مفعّل</span>')+'</div></div><div class="filebox"><b>🐞 بلاغ جديد</b><input id="ticketSubject" placeholder="العنوان" style="width:100%;padding:12px;background:#0a1018;color:white"><textarea id="ticketMessage" placeholder="اشرح المشكلة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;padding:12px"></textarea><button class="action" onclick="createTicket()">إرسال البلاغ</button><div id="ticketMsg"></div></div><div id="ticketList"></div></section>';loadTickets()}
+async function createTicket(){try{let d=await platformSvc('support_create',{subject:document.getElementById('ticketSubject').value,message:document.getElementById('ticketMessage').value});document.getElementById('ticketMsg').textContent=d.ok?'✅ تم حفظ البلاغ.':'⚠️ تعذر حفظ البلاغ.';loadTickets()}catch(e){document.getElementById('ticketMsg').textContent='⚠️ تعذر حفظ البلاغ.'}}
+async function loadTickets(){try{let d=await platformSvc('support_list');document.getElementById('ticketList').innerHTML=(d.tickets||[]).map(t=>'<div class="statusBox"><b>'+esc(t.subject)+'</b><div>'+esc(t.message)+'</div><div class="small">'+esc(t.status)+' · '+esc(t.created_at||'')+'</div></div>').join('')||'<div class="statusBox">لا توجد بلاغات.</div>'}catch(e){}}
 function searchBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">🔎 بحث موثوق</div><textarea id="sq" placeholder="اكتب ما تريد البحث عنه..." style="width:100%;min-height:95px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="doSearch()">بحث</button><div id="sr"></div></section>`}
 async function doSearch(){let q=document.getElementById('sq').value.trim(),r=document.getElementById('sr');if(!q)return;r.innerHTML='<div class="statusBox">⏳ جاري التحقق من المصادر...</div>';try{let d=await api('/api/app/search',{method:'POST',body:JSON.stringify({query:q})});r.innerHTML='<div class="statusBox">'+esc(d.text||'⚠️ لا توجد نتائج موثوقة متاحة الآن.')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر التحقق من المصادر الآن.</div>'}}
 function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
@@ -2822,7 +2878,7 @@ let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
  '<div class="statusBox"><div class="ownerSectionHead">1️⃣ التطبيقات والميزات — فتح / قفل</div><p class="small">فتح التطبيق يجعله عامًا. قفله يمنع الوصول العام، مع بقائه دائمًا داخل إعدادات المالك.</p>'+appRows+'</div>'+
  '<div class="statusBox"><div class="ownerSectionHead">2️⃣ الأعضاء والوصول</div><p class="small">PostgreSQL هو المصدر الدائم والوحيد لعضوية AI for. كل مستخدم يبدأ/يتفاعل مع البوت يُسجّل بمعرّف Telegram الثابت.</p><button class="action green" onclick="loadMembers()">👥 معاينة أعضاء PostgreSQL</button><div id="membersResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead" style="font-size:16px">الوصول المسموح يدويًا</div><input id="allowUser" placeholder="@username" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action" onclick="allowUser()">➕ إضافة مستخدم</button><div class="small">الإضافة لا تمنح الإدارة ولا تغيّر هوية Telegram User ID.</div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">3️⃣ التطبيقات الخارجية</div><p class="small">أدخل رابط التطبيق فقط. AI for يحاول استخراج الاسم والهوية البصرية من البيانات العامة، ثم يحفظ التطبيق في PostgreSQL. التطبيق يبقى مغلقًا حتى تفتحه أنت.</p><input id="externalAppUrl" placeholder="https://example.pinet.com" style="width:100%;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"><button class="action green" onclick="addExternalApp()">➕ إضافة تطبيق بالرابط</button><div id="externalAppsOwnerResult" class="small"></div></div>'+ '<div class="statusBox"><div class="ownerSectionHead">4️⃣ المظهر والوضوح</div><p class="small">ألوان النصوص والعناوين والأزرار وحالات الفتح والقفل تُدار من Theme System.</p><button class="action dark" onclick="ownerThemeStatus()">🎨 فحص المظهر</button><div id="themeStatus" class="small"></div></div>'+
- '<div class="statusBox"><div class="ownerSectionHead">5️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead">🧪 اختبار بقاء البيانات بعد Deploy</div><p class="small">أنشئ علامة اختبار داخل PostgreSQL قبل Deploy، ثم بعد Deploy نفّذ التحقق. إذا ظهرت نفس العلامة، ثبت أن الذاكرة الدائمة مستقلة عن ملفات Render.</p><div class="toolbar"><button class="mini" onclick="persistenceProbe("prepare")">1️⃣ تجهيز الاختبار</button><button class="mini" onclick="persistenceProbe("verify")">2️⃣ تحقق بعد Deploy</button></div><div id="persistenceProbeResult" class="small"></div></div>'+
+ '<div class="statusBox"><div class="ownerSectionHead">5️⃣ النظام والاستمرارية</div><div class="row">قاعدة التحكم: '+(d.control_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">قاعدة العضوية: '+(d.membership_db?.persistent?'🟢 متصلة':'🔴 غير متصلة')+'</div><div class="row">هوية العضو: Telegram User ID</div><button class="action dark" onclick="dbHealth()">🩺 فحص PostgreSQL الحقيقي</button><div id="dbHealthResult" class="small"></div><hr style="border:0;border-top:1px solid #3d321b;margin:14px 0"><div class="ownerSectionHead">🧪 اختبار بقاء البيانات بعد Deploy</div><p class="small">أنشئ علامة اختبار داخل PostgreSQL قبل Deploy، ثم بعد Deploy نفّذ التحقق. إذا ظهرت نفس العلامة، ثبت أن الذاكرة الدائمة مستقلة عن ملفات Render.</p><div class="toolbar"><button class="mini" onclick="persistenceProbe(&quot;prepare&quot;)">1️⃣ تجهيز الاختبار</button><button class="mini" onclick="persistenceProbe(&quot;verify&quot;)">2️⃣ تحقق بعد Deploy</button></div><div id="persistenceProbeResult" class="small"></div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">6️⃣ الطوارئ</div><button class="action dark" onclick="emergency()">🛡️ حالة الطوارئ</button></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">7️⃣ Feature Test Center</div><button class="action" onclick="ownerTests()">🧪 تشغيل الاختبارات</button><div id="ownerTestsResult" class="small"></div></div>'+
  '<div class="statusBox"><div class="ownerSectionHead">8️⃣ سجل التدقيق</div><p class="small">عمليات المالك الحساسة تسجل في قاعدة التدقيق.</p></div>';
@@ -3031,6 +3087,21 @@ def webapp_tools():
         if not text or len(text)>4000: return jsonify({"ok":False,"error":"invalid_text"}),400
         reply=get_ai_response(f"ترجم النص التالي إلى {target} فقط، دون شرح إضافي:\n{text}", user.get("first_name",""))
         return jsonify({"ok":bool(reply),"result":reply or AI_PRIVATE_FAILURE_MESSAGE})
+    if op == "currency":
+        try:
+            amount=float(body.get("amount",1))
+            base=str(body.get("base","EUR")).strip().upper()[:3]
+            target=str(body.get("target","USD")).strip().upper()[:3]
+            if not (amount == amount and abs(amount) < 1e15) or not re.fullmatch(r"[A-Z]{3}",base) or not re.fullmatch(r"[A-Z]{3}",target):
+                return jsonify({"ok":False,"error":"invalid_currency_request"}),400
+            if base == target:
+                return jsonify({"ok":True,"result":amount,"target":target,"source":"same_currency","date":datetime.now(ZoneInfo("Africa/Tunis")).date().isoformat()})
+            r=requests.get("https://api.frankfurter.app/latest",params={"amount":amount,"from":base,"to":target},timeout=8)
+            r.raise_for_status(); data=r.json(); rates=data.get("rates",{})
+            if target not in rates: return jsonify({"ok":False,"error":"currency_rate_unavailable"}),502
+            return jsonify({"ok":True,"result":rates[target],"target":target,"source":"Frankfurter/ECB","date":data.get("date","")})
+        except Exception as e:
+            return jsonify({"ok":False,"error":"currency_service_unavailable","message":str(e)[:120]}),502
     return jsonify({"ok":False,"error":"unknown_operation"}),400
 
 @app.route("/api/app/notifications", methods=["GET", "POST"])
@@ -3109,6 +3180,171 @@ def webapp_db_health():
         error=str(e); dbinfo={}
     finally: _membership_db_release(conn)
     return jsonify({"ok":bool(ok and ping),"membership":membership_service_status(),"control":{"persistent":bool(control_db_ready),"error":control_db_error},"ping":ping,"db":dbinfo,"checked_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()})
+
+def _platform_identity(user):
+    return _webapp_identity_key(user)
+
+def _platform_db_query(fn):
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn: return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                return fn(cur)
+    except Exception as e:
+        print(f"Platform DB error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
+
+def _reward_points(user, delta=0):
+    identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("INSERT INTO ai_for_rewards(identity_key,points) VALUES(%s,GREATEST(%s,0)) ON CONFLICT(identity_key) DO UPDATE SET points=GREATEST(0,ai_for_rewards.points+%s),updated_at=NOW() RETURNING points", (identity,max(0,int(delta)),int(delta)))
+        return int(cur.fetchone()["points"])
+    return _platform_db_query(q)
+
+def _platform_ticket_create(user, subject, message):
+    subject=str(subject or "").strip()[:200]
+    message=str(message or "").strip()[:5000]
+    if not subject or not message: return None
+    tid=str(uuid.uuid4()); identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("INSERT INTO ai_for_support_tickets(ticket_id,identity_key,subject,message) VALUES(%s,%s,%s,%s) RETURNING ticket_id,subject,message,status,created_at",(tid,identity,str(subject)[:200],str(message)[:5000]))
+        return dict(cur.fetchone())
+    return _platform_db_query(q)
+
+def _platform_ticket_list(user):
+    identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("SELECT ticket_id,subject,message,status,created_at,updated_at FROM ai_for_support_tickets WHERE identity_key=%s ORDER BY updated_at DESC LIMIT 50",(identity,))
+        return [dict(x) for x in cur.fetchall()]
+    return _platform_db_query(q) or []
+
+def _platform_favorite(user, item_type, item_key, title='', url='', metadata=None, remove=False):
+    item_type=str(item_type or "general").strip()[:50]
+    item_key=str(item_key or "").strip()[:300]
+    if not item_key: return False
+    identity=_platform_identity(user)
+    def q(cur):
+        if remove:
+            cur.execute("DELETE FROM ai_for_favorites WHERE identity_key=%s AND item_type=%s AND item_key=%s",(identity,item_type,item_key))
+            return True
+        cur.execute("INSERT INTO ai_for_favorites(identity_key,item_type,item_key,title,url,metadata) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(identity_key,item_type,item_key) DO UPDATE SET title=EXCLUDED.title,url=EXCLUDED.url,metadata=EXCLUDED.metadata",(identity,item_type,item_key,str(title)[:300],str(url)[:1000],json.dumps(metadata or {},ensure_ascii=False)))
+        return True
+    return bool(_platform_db_query(q))
+
+def _platform_favorites(user):
+    identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("SELECT item_type,item_key,title,url,metadata,created_at FROM ai_for_favorites WHERE identity_key=%s ORDER BY created_at DESC LIMIT 100",(identity,))
+        return [dict(x) for x in cur.fetchall()]
+    return _platform_db_query(q) or []
+
+def _platform_community_posts(limit=50):
+    def q(cur):
+        cur.execute("SELECT post_id,author_identity,body,created_at,likes FROM ai_for_community_posts ORDER BY created_at DESC LIMIT %s",(max(1,min(int(limit),100)),))
+        return [dict(x) for x in cur.fetchall()]
+    return _platform_db_query(q) or []
+
+def _platform_post_create(user, body):
+    body=str(body or "").strip()[:5000]
+    if not body: return None
+    identity=_platform_identity(user); pid=str(uuid.uuid4())
+    def q(cur):
+        cur.execute("INSERT INTO ai_for_community_posts(post_id,author_identity,body) VALUES(%s,%s,%s) RETURNING post_id,author_identity,body,created_at,likes",(pid,identity,str(body)[:5000]))
+        return dict(cur.fetchone())
+    return _platform_db_query(q)
+
+def _platform_message_send(user, recipient, body):
+    identity=_platform_identity(user); mid=str(uuid.uuid4())
+    recipient=str(recipient or "").strip().lstrip("@").lower()[:200]
+    body_text=str(body or "").strip()[:5000]
+    if not recipient or not body_text: return None
+    def q(cur):
+        resolved=None
+        if recipient.startswith("web:"):
+            cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE account_id=%s AND status='active' LIMIT 1",(recipient[4:],))
+            row=cur.fetchone(); resolved=recipient if row else None
+        elif recipient.startswith("tg:"):
+            try:
+                uid=int(recipient[3:])
+            except Exception:
+                uid=0
+            cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s LIMIT 1",(uid,))
+            row=cur.fetchone(); resolved=("tg:"+str(row["user_id"])) if row else None
+        elif recipient.isdigit():
+            cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s LIMIT 1",(int(recipient),))
+            row=cur.fetchone(); resolved=("tg:"+str(row["user_id"])) if row else None
+        else:
+            cur.execute("SELECT user_id FROM ai_for_members WHERE lower(username)=lower(%s) LIMIT 1",(recipient,))
+            row=cur.fetchone()
+            if row: resolved="tg:"+str(row["user_id"])
+            else:
+                cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1",(recipient,))
+                row=cur.fetchone(); resolved=("web:"+str(row["account_id"])) if row else None
+        if not resolved or resolved==identity: return None
+        cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,resolved,body_text))
+        return dict(cur.fetchone())
+    return _platform_db_query(q)
+
+def _platform_messages(user):
+    identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("SELECT message_id,sender_identity,recipient_identity,body,created_at,read_at FROM ai_for_messages WHERE sender_identity=%s OR recipient_identity=%s ORDER BY created_at DESC LIMIT 100",(identity,identity))
+        return [dict(x) for x in cur.fetchall()]
+    return _platform_db_query(q) or []
+
+@app.route("/api/app/platform-services", methods=["POST"])
+def webapp_platform_services():
+    user, err, code=_webapp_auth()
+    if err: return err, code
+    body=request.get_json(silent=True) or {}; op=str(body.get("op","")).strip().lower()
+    section_map={"community":"community","community_list":"community","community_post":"community","message":"messages","messages":"messages","message_send":"messages","rewards":"rewards","quiz":"fun","quiz_answer":"fun","favorite":"account","favorites":"account","favorite_add":"account","favorite_remove":"account","support":"support","support_create":"support","support_list":"support","nft":"nft","nft_metadata":"nft"}
+    sec=section_map.get(op)
+    if sec:
+        denied=_webapp_require_section(user,sec)
+        if denied[0]: return denied
+    if op=="support_create":
+        row=_platform_ticket_create(user,body.get("subject",""),body.get("message",""))
+        return jsonify({"ok":bool(row),"ticket":row})
+    if op=="support_list": return jsonify({"ok":True,"tickets":_platform_ticket_list(user)})
+    if op=="favorite_add":
+        ok=_platform_favorite(user,str(body.get("item_type","general"))[:50],str(body.get("item_key",""))[:300],body.get("title",""),body.get("url",""),body.get("metadata"))
+        return jsonify({"ok":ok})
+    if op=="favorite_remove":
+        ok=_platform_favorite(user,str(body.get("item_type","general"))[:50],str(body.get("item_key",""))[:300],remove=True)
+        return jsonify({"ok":ok})
+    if op=="favorites": return jsonify({"ok":True,"favorites":_platform_favorites(user)})
+    if op=="community_list": return jsonify({"ok":True,"posts":_platform_community_posts()})
+    if op=="community_post":
+        row=_platform_post_create(user,body.get("body","")); return jsonify({"ok":bool(row),"post":row})
+    if op=="message_send":
+        row=_platform_message_send(user,body.get("recipient"),body.get("body","")); return jsonify({"ok":bool(row),"message":row})
+    if op=="messages": return jsonify({"ok":True,"messages":_platform_messages(user)})
+    if op=="rewards":
+        pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0)})
+    if op=="quiz_answer":
+        key=str(body.get("question_key",""))[:100]; option=str(body.get("option",""))[:100]
+        answer_key={"http-001":"b"}.get(key)
+        if not answer_key: return jsonify({"ok":False,"error":"unknown_question"}),400
+        identity=_platform_identity(user); aid=str(uuid.uuid4())
+        def q(cur):
+            cur.execute("SELECT 1 FROM ai_for_quiz_attempts WHERE identity_key=%s AND question_key=%s LIMIT 1",(identity,key))
+            if cur.fetchone(): return {"already":True}
+            correct=bool(option==answer_key); pts=10 if correct else 0
+            cur.execute("INSERT INTO ai_for_quiz_attempts(attempt_id,identity_key,question_key,correct,points) VALUES(%s,%s,%s,%s,%s)",(aid,identity,key,correct,pts))
+            return {"already":False,"correct":correct,"points":pts}
+        result=_platform_db_query(q)
+        if not result: return jsonify({"ok":False,"error":"database_unavailable"}),503
+        if not result.get("already"): _reward_points(user,int(result.get("points",0)))
+        return jsonify({"ok":True,"awarded":0 if result.get("already") else int(result.get("points",0)),"already_answered":bool(result.get("already")),"points":int(_reward_points(user,0) or 0)})
+    if op=="nft_metadata":
+        name=str(body.get("name","AI for NFT"))[:160]; desc=str(body.get("description",""))[:2000]; collection=str(body.get("collection",""))[:160]
+        metadata={"name":name,"description":desc,"collection":collection,"attributes":body.get("attributes",[]),"generated_by":"AI for NFT Studio","schema":"ai-for-nft-v1"}
+        return jsonify({"ok":True,"metadata":metadata,"filename":re.sub(r"[^A-Za-z0-9_-]+","_",name)[:80]+".json"})
+    return jsonify({"ok":False,"error":"unknown_operation"}),400
 
 @app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
@@ -3307,10 +3543,29 @@ def webapp_file_analyze():
     if denied[0]: return denied
     uploaded = request.files.get("file")
     if uploaded:
-        raw = uploaded.read(120000)
-        try: content = raw.decode("utf-8", errors="replace")
-        except Exception: content = str(raw[:6000])
-        result = _webapp_file_analysis(uploaded.filename, content, uploaded.mimetype)
+        raw = uploaded.read(8_000_000)
+        name=str(uploaded.filename or "file")[:160]; mime=(uploaded.mimetype or "").lower()
+        try:
+            if name.lower().endswith(".pdf") or mime=="application/pdf":
+                from pypdf import PdfReader
+                reader=PdfReader(io.BytesIO(raw)); texts=[]
+                for pg in reader.pages[:30]: texts.append(pg.extract_text() or "")
+                joined="\n".join(texts)[:120000]
+                result={"type":"pdf","name":name,"pages":len(reader.pages),"extracted_pages":min(len(reader.pages),30),"characters":len(joined),"preview":joined[:12000]}
+            elif name.lower().endswith(".docx") or mime=="application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+                from docx import Document
+                doc=Document(io.BytesIO(raw)); paragraphs=[p.text for p in doc.paragraphs if p.text.strip()]; tables=[]
+                for t in doc.tables[:20]: tables.append([[c.text for c in row.cells] for row in t.rows[:50]])
+                result={"type":"docx","name":name,"paragraphs":len(paragraphs),"tables":len(tables),"preview":"\n".join(paragraphs)[:12000],"tables_preview":tables}
+            elif name.lower().endswith(".xlsx") or mime=="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+                from openpyxl import load_workbook
+                wb=load_workbook(io.BytesIO(raw),read_only=True,data_only=True); sheets={}
+                for ws in wb.worksheets[:20]: sheets[ws.title]=[list(r) for r in ws.iter_rows(min_row=1,max_row=50,values_only=True)]
+                result={"type":"spreadsheet","name":name,"sheets":list(wb.sheetnames),"preview":sheets}
+            else:
+                content=raw.decode("utf-8",errors="replace"); result=_webapp_file_analysis(name,content,mime)
+        except Exception as e:
+            result={"type":"file","name":name,"error":"analysis_failed","message":str(e)[:300]}
     else:
         body = request.get_json(silent=True) or {}
         result = _webapp_file_analysis(body.get("name"), body.get("content"), body.get("kind"))

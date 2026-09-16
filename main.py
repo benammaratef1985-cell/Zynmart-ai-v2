@@ -163,6 +163,11 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 PI_CLIENT_ID = os.environ.get("PI_CLIENT_ID", "").strip()
 PI_SIGNIN_REDIRECT_URI = os.environ.get("PI_SIGNIN_REDIRECT_URI", "").strip()
 PI_SANDBOX = os.environ.get("PI_SANDBOX", "false").strip().lower() in ("1", "true", "yes")
+PI_API_KEY = os.environ.get("PI_API_KEY", "").strip()
+PI_API_BASE_URL = os.environ.get("PI_API_BASE_URL", "https://api.minepi.com/v2").strip().rstrip("/")
+PI_PAYMENTS_ENABLED = os.environ.get("PI_PAYMENTS_ENABLED", "true" if PI_SANDBOX else "false").strip().lower() in ("1", "true", "yes")
+PI_PAYMENT_AMOUNT = float(os.environ.get("PI_PAYMENT_AMOUNT", "0.01"))
+PI_PAYMENT_MEMO = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()[:160]
 EMAIL_AUTH_ENABLED = os.environ.get("AI_FOR_EMAIL_AUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 AUTH_LINK_MAX_AGE = int(os.environ.get("AI_FOR_AUTH_LINK_MAX_AGE", "86400"))
 SMTP_HOST = os.environ.get("AI_FOR_SMTP_HOST", "").strip()
@@ -822,6 +827,88 @@ def _verified_pi_user(access_token):
         d=r.json() or {}; u=d.get("user") if isinstance(d.get("user"),dict) else d; uid=str(u.get("uid") or "").strip(); username=str(u.get("username") or "").strip()
         return ({"uid":uid,"username":username},None) if uid else (None,"pi_identity_missing")
     except Exception as e: print(f"Pi identity verification error: {e}"); return None,"pi_verification_unavailable"
+
+def _pi_api_request(method, path, payload=None):
+    """Server-only Pi Platform API wrapper. The Pi API key never reaches the browser."""
+    if not PI_API_KEY:
+        return None, "pi_api_key_missing"
+    url = PI_API_BASE_URL.rstrip("/") + "/" + str(path).lstrip("/")
+    headers = {"Authorization": f"Key {PI_API_KEY}", "Content-Type": "application/json"}
+    try:
+        r = requests.request(method.upper(), url, headers=headers, json=payload, timeout=12)
+        try:
+            data = r.json()
+        except Exception:
+            data = {"raw": r.text[:1000]}
+        if not (200 <= r.status_code < 300):
+            detail = data.get("error") if isinstance(data, dict) else None
+            return None, f"pi_api_{r.status_code}:{detail or 'request_failed'}"
+        return data, None
+    except Exception as e:
+        print(f"Pi API request error: {e}")
+        return None, "pi_api_unavailable"
+
+
+def _pi_identity_for_account(account_id):
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT provider_subject,provider_username FROM ai_for_identity_links "
+                    "WHERE account_id=%s AND provider='pi' AND verified=TRUE LIMIT 1",
+                    (str(account_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {"uid": str(row["provider_subject"]), "username": str(row.get("provider_username") or "")}
+    except Exception as e:
+        print(f"Pi identity lookup error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
+
+
+def _pi_payment_authorized_for_account(payment_id, account_id):
+    identity = _pi_identity_for_account(account_id)
+    if not identity:
+        return None, "pi_identity_required"
+    payment, err = _pi_api_request("GET", f"payments/{payment_id}")
+    if err:
+        return None, err
+    user_uid = str((payment or {}).get("user_uid") or "")
+    if not user_uid or user_uid != identity["uid"]:
+        return None, "payment_user_mismatch"
+    try:
+        amount = float((payment or {}).get("amount"))
+    except Exception:
+        return None, "payment_amount_invalid"
+    if abs(amount - float(PI_PAYMENT_AMOUNT)) > 1e-9:
+        return None, "payment_amount_mismatch"
+    if str((payment or {}).get("memo") or "").strip() != PI_PAYMENT_MEMO:
+        return None, "payment_memo_mismatch"
+    direction = str((payment or {}).get("direction") or "").lower()
+    if direction and direction not in ("user_to_app", "user-to-app"):
+        return None, "payment_direction_invalid"
+    return payment, None
+
+
+def _pi_payment_error_status(err):
+    if err in ("pi_api_key_missing", "pi_api_unavailable") or str(err).startswith("pi_api_5"):
+        return 503
+    if err in ("pi_identity_required",):
+        return 401
+    if err in ("payment_user_mismatch", "payment_direction_invalid"):
+        return 403
+    if err in ("payment_amount_invalid", "payment_amount_mismatch", "payment_memo_mismatch"):
+        return 400
+    if str(err).startswith("pi_api_4"):
+        return 400
+    return 400
 
 def _verified_google_user(id_token):
     token=str(id_token or "").strip()
@@ -3108,10 +3195,11 @@ WEBAPP_HTML = r'''<!doctype html>
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':channel==='telegram'?(tg?.initData||''):''},opts.headers||{});try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
+async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
-function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
+function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="card" style="margin:14px 0"><h3>💳 Pi Payments</h3><p class="small">${window.PI_PAYMENTS_ENABLED?'دفع Pi مفعّل على '+(window.PI_SANDBOX?'Testnet':'Mainnet')+' بمبلغ '+Number(window.PI_PAYMENT_AMOUNT).toFixed(4)+' Pi.':'دفع Pi غير مفعّل حاليًا.'}</p><div class="actions"><button class="action" onclick="testPiPayment()">💳 دفع Pi</button></div><div id="paymentMsg" class="small" style="margin-top:8px"></div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
 function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
@@ -3217,14 +3305,14 @@ async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attem
 '''
 
 PLATFORM_HTML = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_SIGNIN_REDIRECT_URI__";window.PI_PAYMENTS_ENABLED=__AI_FOR_PI_PAYMENTS_ENABLED__;window.PI_PAYMENT_AMOUNT=__AI_FOR_PI_PAYMENT_AMOUNT__;window.PI_PAYMENT_MEMO="__AI_FOR_PI_PAYMENT_MEMO__";window.PI_SANDBOX=__AI_FOR_PI_SANDBOX__;</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
 <style>
 :root{--bg:#071018;--panel:#0d1822;--line:#1e3443;--text:#f4f8fb;--muted:#a9bac7;--accent:#49e6a1}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0%,#123026 0,#071018 42%,#050a0f 100%);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}.brand{font-size:25px;font-weight:800}.badge{font-size:12px;border:1px solid #285543;color:var(--accent);padding:7px 10px;border-radius:999px;background:#0b1d17}.hero{padding:48px 0 28px}.hero h1{font-size:clamp(34px,7vw,68px);line-height:1.05;margin:0 0 18px}.hero h1 span{color:var(--accent)}.hero p{font-size:18px;line-height:1.8;color:var(--muted);max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;color:#04110b;background:var(--accent);padding:13px 18px;border-radius:13px;font-weight:800}.btn.alt{color:var(--text);background:#102131;border:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{background:rgba(13,24,34,.88);border:1px solid var(--line);border-radius:18px;padding:20px}.icon{font-size:28px}.card h3{margin:10px 0 7px}.card p{margin:0;color:var(--muted);line-height:1.7}.section{margin-top:34px}.section h2{font-size:25px}.road{display:grid;gap:10px}.step{display:flex;gap:12px;align-items:flex-start;background:#0b151e;border:1px solid var(--line);padding:14px;border-radius:14px}.num{min-width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#123529;color:var(--accent);font-weight:800}.foot{padding:30px 0;color:#8195a3;font-size:13px}
 </style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Pi Ecosystem Edition</div></header>
-<section class="hero"><h1>AI for <span>Pi</span></h1><p>نسخة AI for المخصصة لمنظومة Pi. تسجيل الدخول في هذه النسخة يتم عبر Pi Authentication فقط، ولا توجد حسابات أو طرق دخول بديلة.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>🟣 Pi Authentication</h3><p>هذه النسخة مخصصة لـPi Ecosystem Listing. تسجيل الدخول الوحيد هو Pi Authentication.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
+<section class="hero"><h1>AI for <span>Pi</span></h1><p>نسخة AI for المخصصة لمنظومة Pi. تسجيل الدخول في هذه النسخة يتم عبر Pi Authentication فقط، ولا توجد حسابات أو طرق دخول بديلة.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>🟣 Pi Authentication</h3><p>هذه النسخة مخصصة لـPi Ecosystem Listing. تسجيل الدخول الوحيد هو Pi Authentication.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div><div id="paymentBox" class="card" style="margin-top:18px;max-width:680px"><h3>💳 Pi Payment</h3><p>الدفع يعمل على Pi Testnet أثناء الاختبار، ويستخدم نفس التدفق على Mainnet عند تبديل إعدادات الشبكة والمفتاح.</p><div class="actions"><button class="btn alt" onclick="testPiPayment()">💳 اختبار الدفع</button></div><div id="paymentMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
 <section class="grid"><div class="card"><div class="icon">🧠</div><h3>AI Center</h3><p>محرك الذكاء والخدمات مع قابلية إضافة مزايا وأدوات جديدة.</p></div><div class="card"><div class="icon">🔐</div><h3>Identity & Access</h3><p>هوية وصلاحيات منفصلة عن الواجهة العامة مع حماية منطقة المالك.</p></div><div class="card"><div class="icon">🗄️</div><h3>Persistent Core</h3><p>الإعدادات والعضويات والبيانات الحساسة مصممة لتكون محفوظة في PostgreSQL.</p></div><div class="card"><div class="icon">⛓️</div><h3>Web3 Ready</h3><p>طبقة قابلة لإضافة الهوية والمحافظ والخدمات اللامركزية لاحقًا دون كسر الأساس.</p></div></section>
 <section class="section" id="architecture"><h2>البنية</h2><div class="road"><div class="step"><div class="num">1</div><div><b>Web3 Platform</b><br><span style="color:var(--muted)">الموقع والحساب ولوحة التحكم والإعدادات والخدمات.</span></div></div><div class="step"><div class="num">2</div><div><b>Core & PostgreSQL</b><br><span style="color:var(--muted)">مصدر دائم للإعدادات والعضويات والصلاحيات والسجل.</span></div></div><div class="step"><div class="num">3</div><div><b>Telegram Bot</b><br><span style="color:var(--muted)">مسار مستقل يحافظ على سلوكه ووظائفه الحالية.</span></div></div><div class="step"><div class="num">4</div><div><b>AI for Local</b><br><span style="color:var(--muted)">الطبقة القادمة لـ SoloHost وTermux بعد تثبيت المنصة.</span></div></div></div></section>
-<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';fetch('/api/platform/me').then(r=>{if(r.ok)location.href='/app'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');authMsg('✅ تم التحقق عبر Pi وفتح AI for.');setTimeout(()=>location.href='/app?channel=pi',300)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){if(window.Pi&&typeof window.Pi.authenticate==='function'){try{const a=await window.Pi.authenticate(['username'],()=>{});await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ تعذر الدخول عبر Pi: '+(e?.message||e))}return}authMsg('⚠️ يجب فتح AI for Pi داخل بيئة Pi التي توفر Pi SDK.')}async function handlePiCallback(){const p=new URLSearchParams(location.hash.slice(1));const token=p.get('access_token'),st=p.get('state');if(!token)return;const expected=sessionStorage.getItem('ai_for_pi_state');sessionStorage.removeItem('ai_for_pi_state');history.replaceState(null,'',location.pathname);if(!expected||st!==expected){authMsg('⚠️ فشل التحقق من حالة Pi.');return}await postAuth('/api/platform/pi/login',{access_token:token})}showAuth();handlePiCallback();</script></body></html>"""
+<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';fetch('/api/platform/me').then(r=>{if(r.ok)location.href='/app'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');authMsg('✅ تم التحقق عبر Pi وفتح AI for.');setTimeout(()=>location.href='/app?channel=pi',300)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){authMsg('⏳ جاري فتح تسجيل الدخول عبر Pi...');if(window.Pi&&typeof window.Pi.authenticate==='function'){try{const a=await window.Pi.authenticate(['username'],()=>{});if(a&&a.accessToken){await postAuth('/api/platform/pi/login',{access_token:a.accessToken});return}}catch(e){console.warn('Pi SDK authenticate unavailable here; using Pi Sign-in fallback',e)}}if(!window.PI_CLIENT_ID){authMsg('⚠️ Pi Sign-in غير مفعّل: PI_CLIENT_ID غير مضبوط على الخادم.');return}try{const state=(crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random());sessionStorage.setItem('ai_for_pi_state',state);const redirect=window.PI_SIGNIN_REDIRECT_URI||location.origin+'/platform';if(window.Pi&&typeof window.Pi.signIn==='function'){window.Pi.signIn({clientId:window.PI_CLIENT_ID,redirectUri:redirect,scopes:['username'],state});return}const u=new URL('https://accounts.pinet.com/oauth/authorize');u.searchParams.set('response_type','token');u.searchParams.set('client_id',window.PI_CLIENT_ID);u.searchParams.set('redirect_uri',redirect);u.searchParams.set('scope','username');u.searchParams.set('state',state);location.assign(u.toString())}catch(e){authMsg('⚠️ تعذر بدء تسجيل الدخول عبر Pi: '+(e?.message||e))}}async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}async function handlePiCallback(){const p=new URLSearchParams(location.hash.slice(1));const token=p.get('access_token'),st=p.get('state');if(!token)return;const expected=sessionStorage.getItem('ai_for_pi_state');sessionStorage.removeItem('ai_for_pi_state');history.replaceState(null,'',location.pathname);if(!expected||st!==expected){authMsg('⚠️ فشل التحقق من حالة Pi.');return}await postAuth('/api/platform/pi/login',{access_token:token})}showAuth();handlePiCallback();</script></body></html>"""
 
 @app.route("/api/platform/pi/login", methods=["POST"])
 def platform_pi_login():
@@ -3233,6 +3321,84 @@ def platform_pi_login():
     result,err=_provider_login("pi",verified["uid"],verified["username"],"",verified["username"] or "AI for Pioneer",True,True)
     if err:return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 503
     account,token=result; return _set_web_cookie(jsonify({"ok":True,"provider":"pi","account":_web_account_public(account)}),token)
+
+@app.route("/api/platform/pi/payment/config", methods=["GET"])
+def platform_pi_payment_config():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    return jsonify({
+        "ok": True,
+        "enabled": bool(PI_PAYMENTS_ENABLED and PI_API_KEY),
+        "sandbox": bool(PI_SANDBOX),
+        "amount": PI_PAYMENT_AMOUNT,
+        "memo": PI_PAYMENT_MEMO,
+    })
+
+
+@app.route("/api/platform/pi/payment/approve", methods=["POST"])
+def platform_pi_payment_approve():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    if not PI_PAYMENTS_ENABLED:
+        return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
+    body = request.get_json(silent=True) or {}
+    payment_id = str(body.get("payment_id") or "").strip()
+    if not payment_id:
+        return jsonify({"ok": False, "error": "payment_id_required"}), 400
+    payment, err = _pi_payment_authorized_for_account(payment_id, account["account_id"])
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    data, err = _pi_api_request("POST", f"payments/{payment_id}/approve")
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    return jsonify({"ok": True, "payment": data})
+
+
+@app.route("/api/platform/pi/payment/complete", methods=["POST"])
+def platform_pi_payment_complete():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    if not PI_PAYMENTS_ENABLED:
+        return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
+    body = request.get_json(silent=True) or {}
+    payment_id = str(body.get("payment_id") or "").strip()
+    txid = str(body.get("txid") or "").strip()
+    if not payment_id or not txid:
+        return jsonify({"ok": False, "error": "payment_id_and_txid_required"}), 400
+    payment, err = _pi_payment_authorized_for_account(payment_id, account["account_id"])
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    transaction = payment.get("transaction") if isinstance(payment, dict) else None
+    if isinstance(transaction, dict) and transaction.get("txid") and str(transaction.get("txid")) != txid:
+        return jsonify({"ok": False, "error": "txid_mismatch"}), 400
+    data, err = _pi_api_request("POST", f"payments/{payment_id}/complete", {"txid": txid})
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    return jsonify({"ok": True, "payment": data, "completed": True})
+
+
+@app.route("/api/platform/pi/payment/cancel", methods=["POST"])
+def platform_pi_payment_cancel():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    if not PI_PAYMENTS_ENABLED:
+        return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
+    body = request.get_json(silent=True) or {}
+    payment_id = str(body.get("payment_id") or "").strip()
+    if not payment_id:
+        return jsonify({"ok": False, "error": "payment_id_required"}), 400
+    payment, err = _pi_payment_authorized_for_account(payment_id, account["account_id"])
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    data, err = _pi_api_request("POST", f"payments/{payment_id}/cancel")
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    return jsonify({"ok": True, "payment": data, "cancelled": True})
+
 
 @app.route("/api/platform/google/login", methods=["POST"])
 def platform_google_login():
@@ -3396,13 +3562,25 @@ def platform_manifest():
 def platform_home():
     ensure_background_services()
     redirect_uri = PI_SIGNIN_REDIRECT_URI or (request.url_root.rstrip("/") + "/platform")
-    html = PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+    html = (PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
+             .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
+             .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
+             .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
+             .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])
 def webapp():
     ensure_background_services()
-    return WEBAPP_HTML, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+    redirect_uri = PI_SIGNIN_REDIRECT_URI or (request.url_root.rstrip("/") + "/platform")
+    html = (WEBAPP_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
+            .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
+            .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+            .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
+            .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
+            .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
+    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/api/app/bootstrap", methods=["GET","POST"])
 def webapp_bootstrap():
@@ -3895,6 +4073,9 @@ def owner_feature_tests(user):
     add("ai_endpoint", callable(globals().get("get_ai_response")), "AI response function exists")
     add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
     add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")
+    add("pi_payment_api_key_configured", bool(PI_API_KEY) if PI_PAYMENTS_ENABLED else True, "Server-side Pi API key is configured when payments are enabled")
+    add("pi_payment_routes", all(name in app.view_functions for name in ("platform_pi_payment_config","platform_pi_payment_approve","platform_pi_payment_complete","platform_pi_payment_cancel")), "Pi U2A payment lifecycle routes are registered")
+    add("pi_payment_amount", PI_PAYMENT_AMOUNT > 0, f"configured amount={PI_PAYMENT_AMOUNT}")
     add("notifications_endpoint", "webapp_notifications" in app.view_functions, "Notifications endpoint registered")
     add("config_persistence", control_db_ready or not CONTROL_DB_REQUIRED, "Runtime controls have durable DB path when configured")
     # Route registration integrity: detect accidental route removal/duplication at runtime.

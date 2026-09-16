@@ -3801,7 +3801,11 @@ def webapp_platform_services():
 
 @app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
-    # Owner authorization is always derived from verified Telegram initData.
+    # Owner Settings remain private to the existing Telegram Owner path.
+    # Browser/Pi users can access the platform, but never this private route.
+    channel = str(request.headers.get("X-AI-For-Channel", "")).strip().lower()
+    if channel != "telegram":
+        return jsonify({"ok":False,"error":"not_found"}),404
     user, err, code = _webapp_auth()
     if err: return err, code
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404

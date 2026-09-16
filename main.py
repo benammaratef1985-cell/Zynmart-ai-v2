@@ -2723,32 +2723,19 @@ def _webapp_file_analysis(name, content, kind=""):
 def _webapp_auth():
     # Channel-aware authentication:
     # - /platform (Pi Edition) uses a verified Pi-linked web session.
-    # - /app opened from Telegram Mini App uses Telegram WebApp initData.
-    # This restores Telegram Mini App operation without changing the Telegram bot webhook/group logic.
+    # - /app may be opened from Telegram Mini App, but Telegram is only the
+    #   transport/entry channel; platform access requires verified Pi identity.
+    # This changes only platform authentication and does not change Telegram
+    # bot webhook/group logic.
     channel = str(request.headers.get("X-AI-For-Channel", "")).strip().lower()
     account = _get_web_account_from_request()
-    if channel == "pi":
+    if channel in ("pi", "telegram"):
         if account:
             user = _web_account_user(account)
             user["auth_type"] = "pi"
             user["pi_edition"] = True
             return user, None, None
         return None, jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if channel == "telegram":
-        init_data = request.headers.get("X-Telegram-Init-Data", "")
-        user = _webapp_data_check(init_data)
-        if user:
-            user["auth_type"] = "telegram"
-            user["pi_edition"] = False
-            if not _webapp_has_access(user):
-                return None, jsonify({"ok": False, "error": "access_denied"}), 403
-            ok, is_new = register_platform_member(user, source="webapp")
-            if MEMBERSHIP_DB_REQUIRED and not ok:
-                return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
-            user["platform_member"] = bool(ok)
-            user["platform_member_new"] = bool(is_new)
-            return user, None, None
-        return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
     # No implicit authentication path: callers must identify their channel explicitly.
     return None, jsonify({"ok": False, "error": "auth_channel_required"}), 401
 
@@ -3225,7 +3212,7 @@ function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='t
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
 async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري تنفيذ مركز الاختبار الشامل...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});let z=d.summary||{};let head=(d.ok?'🟢 الاختبار الشامل ناجح':'🔴 توجد اختبارات تحتاج مراجعة')+'<br><b>النتيجة: '+esc(z.passed||0)+' / '+esc(z.total||0)+' ناجحة</b><br><span class="small">وقت التنفيذ: '+esc(d.executed_at||'—')+'</span><hr style="border:0;border-top:1px solid #3d321b;margin:10px 0">';r.innerHTML=head+(d.tests||[]).map(x=>'<div class="row">'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(typeof x.detail==='object'?JSON.stringify(x.detail):x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات: '+(e.message||'')}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();['n-ai','n-search','n-notify','n-more'].forEach(id=>{let el=document.getElementById(id);if(el)el.style.display='none'});}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(!tg.initData){title='لم تصل بيانات Telegram';msg='لم تصل بيانات Telegram؛ إذا كنت تفتح المنصة من المتصفح العادي، ارجع للصفحة الرئيسية وسجّل حساب Web.'}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من Telegram';msg='وصلت بيانات Telegram لكن الخادم رفض التحقق منها. راجع BOT_TOKEN في Render وتأكد أنه يخص البوت الذي يفتح AI for.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
+async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();['n-ai','n-search','n-notify','n-more'].forEach(id=>{let el=document.getElementById(id);if(el)el.style.display='none'});}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(e?.message==='pi_auth_required'){title='تسجيل الدخول عبر Pi مطلوب';msg='تم فتح المنصة من Telegram، لكن تصفح المنصة وتوثيق الهوية يتطلبان تسجيل الدخول بهوية Pi.';document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🟣</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><button class="action" onclick="location.href=\'/platform\'">🟣 تسجيل الدخول عبر Pi</button><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">Pi Identity: <span class="danger">مطلوبة</span></div><div class="row">HTTP: '+esc(e?.status||'401')+'</div><div class="row">الخطأ: pi_auth_required</div></div></div>';return}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من الهوية';msg='يجب تسجيل الدخول والتحقق من هوية Pi قبل استخدام المنصة.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
 </script></body></html>
 '''
 

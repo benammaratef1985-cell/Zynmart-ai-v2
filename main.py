@@ -3552,7 +3552,7 @@ async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attem
 '''
 
 PLATFORM_HTML = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script src="https://telegram.org/js/telegram-web-app.js"></script><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_SIGNIN_REDIRECT_URI__";window.PI_PAYMENTS_ENABLED=__AI_FOR_PI_PAYMENTS_ENABLED__;window.PI_PAYMENT_AMOUNT=__AI_FOR_PI_PAYMENT_AMOUNT__;window.PI_PAYMENT_MEMO="__AI_FOR_PI_PAYMENT_MEMO__";window.PI_SANDBOX=__AI_FOR_PI_SANDBOX__;</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script src="https://telegram.org/js/telegram-web-app.js"></script><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_SIGNIN_REDIRECT_URI__";window.PI_PAYMENTS_ENABLED=__AI_FOR_PI_PAYMENTS_ENABLED__;window.PI_PAYMENT_AMOUNT=__AI_FOR_PI_PAYMENT_AMOUNT__;window.PI_PAYMENT_MEMO="__AI_FOR_PI_PAYMENT_MEMO__";window.PI_SANDBOX=__AI_FOR_PI_SANDBOX__;</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>window.__PI_INIT_PROMISE=Promise.resolve();try{if(window.Pi&&typeof window.Pi.init==='function'){window.__PI_INIT_PROMISE=Promise.resolve(window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__}));}}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
 <style>
 :root{--bg:#071018;--panel:#0d1822;--line:#1e3443;--text:#f4f8fb;--muted:#a9bac7;--accent:#49e6a1}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0%,#123026 0,#071018 42%,#050a0f 100%);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}.brand{font-size:25px;font-weight:800}.badge{font-size:12px;border:1px solid #285543;color:var(--accent);padding:7px 10px;border-radius:999px;background:#0b1d17}.hero{padding:48px 0 28px}.hero h1{font-size:clamp(34px,7vw,68px);line-height:1.05;margin:0 0 18px}.hero h1 span{color:var(--accent)}.hero p{font-size:18px;line-height:1.8;color:var(--muted);max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;color:#04110b;background:var(--accent);padding:13px 18px;border-radius:13px;font-weight:800}.btn.alt{color:var(--text);background:#102131;border:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{background:rgba(13,24,34,.88);border:1px solid var(--line);border-radius:18px;padding:20px}.icon{font-size:28px}.card h3{margin:10px 0 7px}.card p{margin:0;color:var(--muted);line-height:1.7}.section{margin-top:34px}.section h2{font-size:25px}.road{display:grid;gap:10px}.step{display:flex;gap:12px;align-items:flex-start;background:#0b151e;border:1px solid var(--line);padding:14px;border-radius:14px}.num{min-width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#123529;color:var(--accent);font-weight:800}.foot{padding:30px 0;color:#8195a3;font-size:13px}
 </style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Pi Ecosystem Edition</div></header>
@@ -3576,6 +3576,7 @@ PLATFORM_HTML = r"""<!doctype html>
   }
   authMsg('⏳ جاري فتح Pi Authentication...');
   try{
+    await (window.__PI_INIT_PROMISE||Promise.resolve());
     if(!window.Pi||typeof window.Pi.authenticate!=='function'){
       authMsg('⚠️ افتح AI for داخل Pi Browser لإكمال Pi Authentication.');
       return;
@@ -3650,6 +3651,30 @@ def platform_pi_login():
     account,token=result
     if not account or not _account_has_verified_pi_identity(account["account_id"]):
         return jsonify({"ok":False,"error":"pi_identity_persistence_failed"}),503
+
+    # Exact Pi UID configured for the owner is authoritative for Owner status.
+    # This only grants the immutable Owner identity; it does not affect admin 2.
+    if PI_OWNER_UID and str(verified.get("uid") or "").strip() == PI_OWNER_UID:
+        conn_owner = None
+        try:
+            conn_owner = _membership_db_connect()
+            if conn_owner:
+                with conn_owner:
+                    with conn_owner.cursor(cursor_factory=RealDictCursor) as cur_owner:
+                        cur_owner.execute("SELECT metadata FROM ai_for_web_accounts WHERE account_id=%s AND status='active' FOR UPDATE", (str(account["account_id"]),))
+                        row_owner = cur_owner.fetchone()
+                        if row_owner:
+                            meta_owner = row_owner.get("metadata") if isinstance(row_owner.get("metadata"), dict) else {}
+                            meta_owner["telegram_bridge_id"] = str(OWNER_ID)
+                            meta_owner["telegram_bridge_role"] = "owner"
+                            meta_owner["pi_owner_uid"] = PI_OWNER_UID
+                            meta_owner["owner_verified_at"] = datetime.now(ZoneInfo("UTC")).isoformat()
+                            cur_owner.execute("UPDATE ai_for_web_accounts SET metadata=%s,last_seen=NOW() WHERE account_id=%s AND status='active'", (json.dumps(meta_owner, ensure_ascii=False), str(account["account_id"])))
+        except Exception as owner_bind_error:
+            print(f"Pi owner identity binding error: {owner_bind_error}")
+        finally:
+            _membership_db_release(conn_owner)
+        account = _get_web_account_by_id(account["account_id"]) or account
 
     # Critical owner/admin bridge. Prefer the short-lived server-signed Pi
     # Sign-in state created from verified Telegram initData. Fall back to the

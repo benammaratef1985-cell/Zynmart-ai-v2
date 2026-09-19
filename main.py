@@ -49,7 +49,7 @@ for k, v in os.environ.items():
 OWNER_ID = 7560871853  # Secret owner of the AI for ZYNMART bot only; not ZynMart ownership.
 ADMIN_IDS = [OWNER_ID, 6283667477]
 BOT_USERNAME = "@zynmart_ai_bot"
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ai-for-zynmart.onrender.com/app")
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ai-for-backup.onrender.com/app")
 WEBAPP_MENU_TEXT = os.environ.get("WEBAPP_MENU_TEXT", "📱 ZYNMART")
 WEBAPP_INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
 # External application links: AI for is the gateway; each application remains independent.
@@ -3409,7 +3409,10 @@ def platform_manifest():
 def platform_home():
     ensure_background_services()
     redirect_uri = request.url_root.rstrip("/") + "/platform"
-    html = PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1]).replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false").replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
+    html = (PLATFORM_HTML
+        .replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
+        .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+        .replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])).replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])

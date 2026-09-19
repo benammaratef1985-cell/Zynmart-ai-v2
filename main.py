@@ -1,4 +1,4 @@
-import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io, secrets, uuid
+import os, json, requests, threading, re, time, hmac, hashlib, html, csv, io, secrets, uuid, base64
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, urljoin
@@ -1068,6 +1068,55 @@ def _web_account_user(row):
         "telegram_bridge_id": bridge_id,
         "telegram_bridge_role": bridge_role,
     }
+
+def _bind_telegram_admin_bridge_id(account_id, tg_id):
+    """Bind an already server-authenticated Telegram admin/owner ID."""
+    try:
+        tg_id = int(tg_id)
+    except Exception:
+        return None, "telegram_bridge_invalid"
+    if tg_id not in ADMIN_IDS:
+        return {"telegram_id": tg_id, "role": "user"}, None
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return None, "database_unavailable"
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT account_id FROM ai_for_web_accounts "
+                    "WHERE status='active' AND metadata->>'telegram_bridge_id'=%s LIMIT 1",
+                    (str(tg_id),),
+                )
+                existing = cur.fetchone()
+                if existing and str(existing["account_id"]) != str(account_id):
+                    return None, "telegram_admin_bridge_already_bound"
+                cur.execute(
+                    "SELECT metadata FROM ai_for_web_accounts "
+                    "WHERE account_id=%s AND status='active' FOR UPDATE",
+                    (str(account_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None, "account_not_found"
+                meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                current = str(meta.get("telegram_bridge_id") or "").strip()
+                if current and current != str(tg_id):
+                    return None, "account_already_bound_to_telegram_admin"
+                meta["telegram_bridge_id"] = str(tg_id)
+                meta["telegram_bridge_role"] = "owner" if tg_id == OWNER_ID else "admin"
+                meta["telegram_bridge_verified_at"] = datetime.now(ZoneInfo("UTC")).isoformat()
+                cur.execute(
+                    "UPDATE ai_for_web_accounts SET metadata=%s,last_seen=NOW() WHERE account_id=%s AND status='active'",
+                    (json.dumps(meta, ensure_ascii=False), str(account_id)),
+                )
+                return {"telegram_id": tg_id, "role": meta["telegram_bridge_role"]}, None
+    except Exception as e:
+        print(f"Telegram privileged bridge-by-id error: {e}")
+        return None, "database_error"
+    finally:
+        _membership_db_release(conn)
 
 def _bind_telegram_admin_bridge(account_id, init_data):
     """Bind the current verified Telegram transport identity to a Pi account.
@@ -2793,6 +2842,49 @@ def _webapp_data_check(init_data):
         print(f"WebApp initData validation error: {e}")
         return None
 
+
+PI_SIGNIN_STATE_TTL = 600
+
+def _pi_signin_state_secret():
+    if not BOT_TOKEN:
+        return b""
+    return hmac.new(BOT_TOKEN.encode("utf-8"), b"AI-FOR-PI-SIGNIN-STATE", hashlib.sha256).digest()
+
+def _pi_signin_state_issue(telegram_id=0):
+    """Create a short-lived signed OAuth state. Telegram ID is carried only when
+    the state was created from verified Telegram initData; it is never trusted
+    from client JSON alone."""
+    secret = _pi_signin_state_secret()
+    if not secret:
+        return ""
+    payload = {
+        "v": 1,
+        "exp": int(time.time()) + PI_SIGNIN_STATE_TTL,
+        "tg": int(telegram_id or 0),
+        "n": secrets.token_hex(12),
+    }
+    raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode()).decode().rstrip("=")
+    sig = hmac.new(secret, raw.encode(), hashlib.sha256).hexdigest()
+    return raw + "." + sig
+
+def _pi_signin_state_verify(state):
+    state = str(state or "").strip()
+    secret = _pi_signin_state_secret()
+    if not secret or "." not in state:
+        return None
+    raw, sig = state.rsplit(".", 1)
+    expected = hmac.new(secret, raw.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, sig):
+        return None
+    try:
+        padded = raw + "=" * (-len(raw) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(padded.encode()).decode())
+        if int(payload.get("exp", 0)) < int(time.time()):
+            return None
+        return {"telegram_id": int(payload.get("tg") or 0), "exp": int(payload.get("exp"))}
+    except Exception:
+        return None
+
 # Cost policy: free-first until real revenue exists; paid services are opt-in later.
 FREE_FIRST_POLICY = {
     "prefer_free_services": True,
@@ -3459,7 +3551,43 @@ PLATFORM_HTML = r"""<!doctype html>
 <section class="hero"><h1>AI for <span>Pi</span></h1><p>نسخة AI for المخصصة لمنظومة Pi. تسجيل الدخول في هذه النسخة يتم عبر Pi Authentication فقط، ولا توجد حسابات أو طرق دخول بديلة. يمكن الوصول إليها من زر App في Telegram، ثم يبدأ توثيق Pi هنا داخل Pi Browser.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>🟣 Pi Authentication</h3><p>هذه النسخة مخصصة لـPi Ecosystem Listing. تسجيل الدخول الوحيد هو Pi Authentication.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div><div id="paymentBox" class="card" style="margin-top:18px;max-width:680px"><h3>💳 Pi Payment</h3><p>الدفع يعمل على Pi Testnet أثناء الاختبار، ويستخدم نفس التدفق على Mainnet عند تبديل إعدادات الشبكة والمفتاح.</p><div class="actions"><button class="btn alt" onclick="testPiPayment()">💳 اختبار الدفع</button></div><div id="paymentMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
 <section class="grid"><div class="card"><div class="icon">🧠</div><h3>AI Center</h3><p>محرك الذكاء والخدمات مع قابلية إضافة مزايا وأدوات جديدة.</p></div><div class="card"><div class="icon">🔐</div><h3>Identity & Access</h3><p>هوية وصلاحيات منفصلة عن الواجهة العامة مع حماية منطقة المالك.</p></div><div class="card"><div class="icon">🗄️</div><h3>Persistent Core</h3><p>الإعدادات والعضويات والبيانات الحساسة مصممة لتكون محفوظة في PostgreSQL.</p></div><div class="card"><div class="icon">⛓️</div><h3>Web3 Ready</h3><p>طبقة قابلة لإضافة الهوية والمحافظ والخدمات اللامركزية لاحقًا دون كسر الأساس.</p></div></section>
 <section class="section" id="architecture"><h2>البنية</h2><div class="road"><div class="step"><div class="num">1</div><div><b>Web3 Platform</b><br><span style="color:var(--muted)">الموقع والحساب ولوحة التحكم والإعدادات والخدمات.</span></div></div><div class="step"><div class="num">2</div><div><b>Core & PostgreSQL</b><br><span style="color:var(--muted)">مصدر دائم للإعدادات والعضويات والصلاحيات والسجل.</span></div></div><div class="step"><div class="num">3</div><div><b>Telegram Bot</b><br><span style="color:var(--muted)">مسار مستقل يحافظ على سلوكه ووظائفه الحالية.</span></div></div><div class="step"><div class="num">4</div><div><b>AI for Local</b><br><span style="color:var(--muted)">الطبقة القادمة لـ SoloHost وTermux بعد تثبيت المنصة.</span></div></div></div></section>
-<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';fetch('/api/platform/me',{headers:token?{'Authorization':'Bearer '+token}:{}}).then(r=>{if(r.ok)location.href='/app?channel=pi'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(body?.access_token||sessionStorage.getItem('ai_for_pi_access_token')||''),'X-Telegram-Init-Data':(window.Telegram?.WebApp?.initData||'')},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');if(body?.access_token){window.__PI_ACCESS_TOKEN=body.access_token;sessionStorage.setItem('ai_for_pi_access_token',body.access_token)}authMsg('✅ تم حفظ هوية Pi وإنشاء/استرجاع حساب AI for.');setTimeout(()=>location.href='/app?channel=pi',250)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){authMsg('⏳ جاري فتح Pi Authentication...');if(!window.Pi||typeof window.Pi.authenticate!=='function'){authMsg('⚠️ افتح AI for داخل Pi Browser؛ Pi SDK غير متاح هنا.');return}try{const a=await window.Pi.authenticate(['username'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ فشل توثيق Pi: '+(e?.message||e))}}async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}showAuth();</script></body></html>"""
+<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';fetch('/api/platform/me',{headers:token?{'Authorization':'Bearer '+token}:{}}).then(r=>{if(r.ok)location.href='/app?channel=pi'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(body?.access_token||sessionStorage.getItem('ai_for_pi_access_token')||''),'X-Telegram-Init-Data':(window.Telegram?.WebApp?.initData||'')},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');if(body?.access_token){window.__PI_ACCESS_TOKEN=body.access_token;sessionStorage.setItem('ai_for_pi_access_token',body.access_token)}authMsg('✅ تم حفظ هوية Pi وإنشاء/استرجاع حساب AI for.');setTimeout(()=>location.href='/app?channel=pi',250)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){authMsg('⏳ جاري فتح Pi Authentication...');if(!window.Pi||typeof window.Pi.authenticate!=='function'){try{const r=await fetch('/api/platform/pi/signin-url',{headers:{'X-Telegram-Init-Data':(window.Telegram?.WebApp?.initData||'')}});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'pi_signin_not_configured');if(window.Telegram?.WebApp?.openLink){window.Telegram.WebApp.openLink(d.url);return}window.location.assign(d.url);return}catch(e){authMsg('⚠️ تعذر فتح Pi Authentication: '+(e?.message||e));return} }try{const a=await window.Pi.authenticate(['username'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ فشل توثيق Pi: '+(e?.message||e))}}async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}(async function(){try{const h=location.hash||'';if(!h)return;const q=new URLSearchParams(h.replace(/^#/,''));const token=q.get('access_token');const state=q.get('state')||'';if(!token)return;history.replaceState(null,document.title,location.pathname+location.search);authMsg('⏳ جاري التحقق من هوية Pi...');const r=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({access_token:token,state:state})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'pi_login_failed');window.__PI_ACCESS_TOKEN=token;sessionStorage.setItem('ai_for_pi_access_token',token);location.href='/app?channel=pi'}catch(e){authMsg('⚠️ فشل إكمال تسجيل الدخول عبر Pi: '+(e?.message||e))}})();showAuth();</script></body></html>"""
+
+@app.route("/api/platform/pi/signin-url", methods=["GET"])
+def platform_pi_signin_url():
+    """Return the official Pi Sign-in URL.
+
+    When called from Telegram, the signed Telegram initData is verified first;
+    only then is the Telegram owner/admin ID embedded into a short-lived,
+    server-signed OAuth state. This lets the Pi callback restore the existing
+    privileged bridge without making Telegram the platform login method.
+    """
+    if not PI_CLIENT_ID or not PI_SIGNIN_REDIRECT_URI:
+        return jsonify({"ok": False, "error": "pi_signin_not_configured"}), 503
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    tg_user = _webapp_data_check(init_data)
+    tg_id = 0
+    if tg_user:
+        try:
+            tg_id = int(tg_user.get("id") or 0)
+        except Exception:
+            tg_id = 0
+        if tg_id not in ADMIN_IDS:
+            # Ordinary Telegram users can still use Pi Sign-in, but no
+            # privileged Telegram bridge is carried into the Pi session.
+            tg_id = 0
+    state = _pi_signin_state_issue(tg_id)
+    params = {
+        "response_type": "token",
+        "client_id": PI_CLIENT_ID,
+        "redirect_uri": PI_SIGNIN_REDIRECT_URI,
+        "scope": "username",
+    }
+    if state:
+        params["state"] = state
+    from urllib.parse import urlencode
+    url = "https://accounts.pinet.com/oauth/authorize?" + urlencode(params)
+    return jsonify({"ok": True, "url": url, "privileged_bridge": bool(tg_id), "expires_in": PI_SIGNIN_STATE_TTL})
 
 @app.route("/api/platform/pi/login", methods=["POST"])
 def platform_pi_login():
@@ -3475,14 +3603,21 @@ def platform_pi_login():
     if not account or not _account_has_verified_pi_identity(account["account_id"]):
         return jsonify({"ok":False,"error":"pi_identity_persistence_failed"}),503
 
-    # Critical owner/admin bridge: when the Pi login was initiated from the
-    # Telegram App button, verify Telegram's signed initData and persist the
-    # existing Telegram Owner/Admin identity onto this Pi account. This keeps
-    # Telegram as transport only; Pi remains the actual platform identity.
-    bridge,bridge_err=_bind_telegram_admin_bridge(
-        account["account_id"],
-        request.headers.get("X-Telegram-Init-Data", ""),
-    )
+    # Critical owner/admin bridge. Prefer the short-lived server-signed Pi
+    # Sign-in state created from verified Telegram initData. Fall back to the
+    # original direct Telegram bridge when authentication happens inside Pi
+    # Browser and Telegram initData is still available.
+    bridge = None
+    bridge_err = None
+    signin_state = _pi_signin_state_verify(body.get("state"))
+    bridged_tg_id = int((signin_state or {}).get("telegram_id") or 0)
+    if bridged_tg_id in ADMIN_IDS:
+        bridge, bridge_err = _bind_telegram_admin_bridge_id(account["account_id"], bridged_tg_id)
+    else:
+        bridge, bridge_err = _bind_telegram_admin_bridge(
+            account["account_id"],
+            request.headers.get("X-Telegram-Init-Data", ""),
+        )
     if bridge_err not in (None, "telegram_bridge_not_verified"):
         return jsonify({"ok":False,"error":bridge_err}),409 if bridge_err.startswith("telegram_") else 503
     account=_get_web_account_by_id(account["account_id"]) or account
@@ -4755,6 +4890,14 @@ def webhook():
             if user_id not in ADMIN_IDS:
                 return jsonify({"status": "ok"}), 200
         if user_id not in ADMIN_IDS:
+            return jsonify({"status": "ok"}), 200
+
+        # Direct owner/admin command path. It only duplicates the existing
+        # process_admin_text command and prevents media/caption handling from
+        # ever swallowing the control-panel request.
+        if text in ("لوحة التحكم", "لوحة", "/admin", "admin"):
+            admin_modes.pop(user_id, None)
+            show_admin_panel(chat_id)
             return jsonify({"status": "ok"}), 200
 
         caption = str(msg.get("caption", "")).strip()

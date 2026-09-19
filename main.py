@@ -49,7 +49,7 @@ for k, v in os.environ.items():
 OWNER_ID = 7560871853  # Secret owner of the AI for ZYNMART bot only; not ZynMart ownership.
 ADMIN_IDS = [OWNER_ID, 6283667477]
 BOT_USERNAME = "@zynmart_ai_bot"
-WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ai-for-backup.onrender.com/app")
+TELEGRAM_WEBAPP_URL = os.environ.get("TELEGRAM_WEBAPP_URL", os.environ.get("WEBAPP_URL", "https://ai-for-backup.onrender.com/app")).strip()
 WEBAPP_MENU_TEXT = os.environ.get("WEBAPP_MENU_TEXT", "📱 ZYNMART")
 WEBAPP_INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
 # External application links: AI for is the gateway; each application remains independent.
@@ -162,6 +162,7 @@ WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 PI_CLIENT_ID = os.environ.get("PI_CLIENT_ID", "").strip()
 PI_SIGNIN_REDIRECT_URI = os.environ.get("PI_SIGNIN_REDIRECT_URI", "").strip()
+PI_VALIDATION_KEY = os.environ.get("PI_VALIDATION_KEY", "").strip()
 PI_SANDBOX = os.environ.get("PI_SANDBOX", "false").strip().lower() in ("1", "true", "yes")
 EMAIL_AUTH_ENABLED = os.environ.get("AI_FOR_EMAIL_AUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 AUTH_LINK_MAX_AGE = int(os.environ.get("AI_FOR_AUTH_LINK_MAX_AGE", "86400"))
@@ -2759,10 +2760,10 @@ def _webapp_set_menu_button():
     with webapp_menu_lock:
         if webapp_menu_configured:
             return
-        result = telegram("setChatMenuButton", {"menu_button": {"type": "web_app", "text": WEBAPP_MENU_TEXT, "web_app": {"url": WEBAPP_URL}}})
+        result = telegram("setChatMenuButton", {"menu_button": {"type": "web_app", "text": WEBAPP_MENU_TEXT, "web_app": {"url": TELEGRAM_WEBAPP_URL}}})
         if result and result.get("ok"):
             webapp_menu_configured = True
-            print(f"Telegram Mini App menu configured: {WEBAPP_URL}")
+            print(f"Telegram Mini App menu configured: {TELEGRAM_WEBAPP_URL}")
         else:
             print("Telegram Mini App menu configuration failed.")
 
@@ -3405,6 +3406,13 @@ def platform_manifest():
     }
     return jsonify(manifest), 200, {"Cache-Control": "no-store"}
 
+@app.route("/validation-key.txt", methods=["GET"])
+def pi_validation_key():
+    """Pi Developer Portal domain-ownership verification file."""
+    if not PI_VALIDATION_KEY:
+        return "", 404, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
+    return PI_VALIDATION_KEY + "\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
+
 @app.route("/platform", methods=["GET"])
 def platform_home():
     ensure_background_services()
@@ -3412,7 +3420,7 @@ def platform_home():
     html = (PLATFORM_HTML
         .replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
         .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
-        .replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])).replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
+        .replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])

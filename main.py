@@ -3571,9 +3571,6 @@ PLATFORM_HTML = r"""<!doctype html>
     const url=window.__PI_BROWSER_URL||'';
     if(url){
       authMsg('⏳ جاري فتح Pi Browser...');
-      // The destination is our own /platform page. Once it opens inside Pi Browser,
-      // the official Pi SDK authenticate() flow runs there; the signed state keeps
-      // the verified Telegram owner/admin bridge across the handoff.
       if(window.Telegram.WebApp.openLink){window.Telegram.WebApp.openLink(url);return}
       window.location.assign(url);return;
     }
@@ -3582,21 +3579,26 @@ PLATFORM_HTML = r"""<!doctype html>
   }
   authMsg('⏳ جاري فتح Pi Authentication...');
   try{
-    // Pi Browser can expose Pi.authenticate while Pi.init's returned promise
-    // remains pending. Do not leave the user stuck forever at "جاري فتح".
-    // Pi.init is already invoked during page load; give it a short grace period
-    // and then continue with the official Pi.authenticate call.
-    try{
-      await Promise.race([
-        (window.__PI_INIT_PROMISE||Promise.resolve()),
-        new Promise(resolve=>setTimeout(resolve,2500))
-      ]);
-    }catch(e){}
+    try{await Promise.race([(window.__PI_INIT_PROMISE||Promise.resolve()),new Promise(resolve=>setTimeout(resolve,2500))]);}catch(e){}
     if(!window.Pi||typeof window.Pi.authenticate!=='function'){
       authMsg('⚠️ افتح AI for داخل Pi Browser لإكمال Pi Authentication.');
       return;
     }
-    const a=await window.Pi.authenticate(['username'],()=>{});
+    let authTimedOut=false;
+    const authPromise=window.Pi.authenticate(['username'],()=>{});
+    const a=await Promise.race([
+      authPromise,
+      new Promise((_,reject)=>setTimeout(()=>{authTimedOut=true;reject(new Error('pi_auth_timeout'));},6000))
+    ]).catch(async e=>{
+      if(!authTimedOut)throw e;
+      if(window.Pi&&typeof window.Pi.signIn==='function'){
+        authMsg('⏳ إعادة فتح Pi Authentication...');
+        window.Pi.signIn({clientId:window.PI_CLIENT_ID,redirectUri:window.PI_SIGNIN_REDIRECT_URI,scopes:['username'],state:window.__PI_SIGNIN_STATE||''});
+        return null;
+      }
+      throw e;
+    });
+    if(!a)return;
     if(!a?.accessToken)throw new Error('pi_auth_failed');
     window.__PI_ACCESS_TOKEN=a.accessToken;
     sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);
@@ -3606,12 +3608,13 @@ PLATFORM_HTML = r"""<!doctype html>
 async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}(async function(){try{const h=location.hash||'';if(!h)return;const q=new URLSearchParams(h.replace(/^#/,''));const token=q.get('access_token');const state=q.get('state')||'';const oauthError=q.get('error')||'';if(oauthError){history.replaceState(null,document.title,location.pathname+location.search);authMsg('⚠️ Pi Sign-in: '+oauthError);return}if(!token)return;history.replaceState(null,document.title,location.pathname+location.search);authMsg('⏳ جاري التحقق من هوية Pi...');const r=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+token},body:JSON.stringify({access_token:token,state:state})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'pi_login_failed');window.__PI_ACCESS_TOKEN=token;sessionStorage.setItem('ai_for_pi_access_token',token);location.href='/app?channel=pi'}catch(e){authMsg('⚠️ فشل إكمال تسجيل الدخول عبر Pi: '+(e?.message||e))}})();
 (async function preparePiSignInUrl(){
   try{
+    const existingState=window.__PI_SIGNIN_STATE||'';
     const r=await fetch('/api/platform/pi/signin-url',{headers:{'X-Telegram-Init-Data':(window.Telegram?.WebApp?.initData||'')}});
     const d=await r.json();
     if(r.ok&&d.ok){
       window.__PI_SIGNIN_URL=d.url;
-      window.__PI_SIGNIN_STATE=d.state||'';
-      if(d.browser_url) window.__PI_BROWSER_URL=d.browser_url;
+      if(!existingState)window.__PI_SIGNIN_STATE=d.state||'';
+      if(d.browser_url&&!existingState)window.__PI_BROWSER_URL=d.browser_url;
     }
   }catch(e){}
 })();showAuth();</script></body></html>"""

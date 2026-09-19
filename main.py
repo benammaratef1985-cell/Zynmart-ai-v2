@@ -1071,6 +1071,9 @@ def _web_account_user(row):
         "telegram_bridge_id": bridge_id,
         "telegram_bridge_role": bridge_role,
         "pi_uid": str((pi_identity or {}).get("uid") or "").strip(),
+        # Persisted owner marker is also trusted server-side; this avoids losing
+        # Owner status if the identity-link lookup is temporarily unavailable.
+        "pi_owner_uid": str(meta.get("pi_owner_uid") or "").strip(),
     }
 
 def _bind_telegram_admin_bridge_id(account_id, tg_id):
@@ -2956,7 +2959,10 @@ def _webapp_is_owner(user):
         pass
     # Verified Pi UID may also carry owner permissions. The UID comes from the
     # persisted server-side Pi identity link, never from browser JSON.
-    if PI_OWNER_UID and str(user.get("pi_uid") or "").strip() == PI_OWNER_UID:
+    if PI_OWNER_UID and (
+        str(user.get("pi_uid") or "").strip() == PI_OWNER_UID
+        or str(user.get("pi_owner_uid") or "").strip() == PI_OWNER_UID
+    ):
         return True
     # Legacy Telegram-shaped users remain supported.
     try:
@@ -3576,7 +3582,16 @@ PLATFORM_HTML = r"""<!doctype html>
   }
   authMsg('⏳ جاري فتح Pi Authentication...');
   try{
-    await (window.__PI_INIT_PROMISE||Promise.resolve());
+    // Pi Browser can expose Pi.authenticate while Pi.init's returned promise
+    // remains pending. Do not leave the user stuck forever at "جاري فتح".
+    // Pi.init is already invoked during page load; give it a short grace period
+    // and then continue with the official Pi.authenticate call.
+    try{
+      await Promise.race([
+        (window.__PI_INIT_PROMISE||Promise.resolve()),
+        new Promise(resolve=>setTimeout(resolve,2500))
+      ]);
+    }catch(e){}
     if(!window.Pi||typeof window.Pi.authenticate!=='function'){
       authMsg('⚠️ افتح AI for داخل Pi Browser لإكمال Pi Authentication.');
       return;

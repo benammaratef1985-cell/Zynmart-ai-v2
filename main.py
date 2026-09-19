@@ -49,7 +49,10 @@ for k, v in os.environ.items():
 OWNER_ID = 7560871853  # Secret owner of the AI for ZYNMART bot only; not ZynMart ownership.
 ADMIN_IDS = [OWNER_ID, 6283667477]
 BOT_USERNAME = "@zynmart_ai_bot"
-TELEGRAM_WEBAPP_URL = os.environ.get("TELEGRAM_WEBAPP_URL", os.environ.get("WEBAPP_URL", "https://ai-for-backup.onrender.com/app")).strip()
+WEBAPP_URL = os.environ.get("WEBAPP_URL", "https://ai-for-backup.onrender.com/app")
+# Telegram App entry now goes directly to the Pi-authentication gateway.
+# WEBAPP_URL is retained for backward compatibility with existing deployments.
+TELEGRAM_WEBAPP_URL = os.environ.get("TELEGRAM_WEBAPP_URL", "https://ai-for-backup.onrender.com/app")
 WEBAPP_MENU_TEXT = os.environ.get("WEBAPP_MENU_TEXT", "📱 ZYNMART")
 WEBAPP_INITDATA_MAX_AGE = int(os.environ.get("WEBAPP_INITDATA_MAX_AGE", "86400"))
 # External application links: AI for is the gateway; each application remains independent.
@@ -163,7 +166,12 @@ GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
 PI_CLIENT_ID = os.environ.get("PI_CLIENT_ID", "").strip()
 PI_SIGNIN_REDIRECT_URI = os.environ.get("PI_SIGNIN_REDIRECT_URI", "").strip()
 PI_VALIDATION_KEY = os.environ.get("PI_VALIDATION_KEY", "").strip()
-PI_SANDBOX = os.environ.get("PI_SANDBOX", "false").strip().lower() in ("1", "true", "yes")
+PI_SANDBOX = os.environ.get("PI_SANDBOX", "true").strip().lower() in ("1", "true", "yes")
+PI_API_KEY = os.environ.get("PI_API_KEY", "").strip()
+PI_API_BASE_URL = os.environ.get("PI_API_BASE_URL", "https://api.minepi.com/v2").strip().rstrip("/")
+PI_PAYMENTS_ENABLED = os.environ.get("PI_PAYMENTS_ENABLED", "true" if PI_SANDBOX else "false").strip().lower() in ("1", "true", "yes")
+PI_PAYMENT_AMOUNT = float(os.environ.get("PI_PAYMENT_AMOUNT", "0.01"))
+PI_PAYMENT_MEMO = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()[:160]
 EMAIL_AUTH_ENABLED = os.environ.get("AI_FOR_EMAIL_AUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 AUTH_LINK_MAX_AGE = int(os.environ.get("AI_FOR_AUTH_LINK_MAX_AGE", "86400"))
 SMTP_HOST = os.environ.get("AI_FOR_SMTP_HOST", "").strip()
@@ -792,27 +800,56 @@ def get_web_account(token):
     except Exception as e: print(f"Web account lookup error: {e}"); return None
     finally:_membership_db_release(conn)
 
-def _get_web_account_from_request():
-    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE,""))
-    if not account:
+def _account_has_verified_pi_identity(account_id):
+    if not account_id:
+        return False
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:
+            return False
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' AND verified=TRUE LIMIT 1", (str(account_id),))
+                return bool(cur.fetchone())
+    except Exception:
+        return False
+    finally:
+        _membership_db_release(conn)
+
+def _web_account_from_pi_access_token(access_token):
+    """Resolve a Pi SDK access token to the persisted AI for account.
+
+    This is deliberately independent of browser cookies. Pi Browser/session
+    storage can be recreated between WebApp navigations, so the verified Pi
+    bearer token is the authoritative bridge from Pi identity to the local
+    AI for account.
+    """
+    verified, err = _verified_pi_user(access_token)
+    if err or not verified:
         return None
-    if PI_EDITION_ONLY:
-        conn=None
-        try:
-            conn=_membership_db_connect()
-            if not conn:
-                return None
-            with conn:
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    cur.execute("SELECT 1 FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' AND verified=TRUE LIMIT 1", (str(account["account_id"]),))
-                    if not cur.fetchone():
-                        return None
-        except Exception:
-            return None
-        finally:
-            _membership_db_release(conn)
+    link = _find_identity_link("pi", verified["uid"])
+    if not link or not bool(link.get("verified")):
+        return None
+    account = _get_web_account_by_id(link["account_id"])
+    if not account or account.get("status") != "active":
+        return None
     return account
 
+def _get_web_account_from_request():
+    account = get_web_account(request.cookies.get(WEB_IDENTITY_COOKIE,""))
+    if account and (not PI_EDITION_ONLY or _account_has_verified_pi_identity(account["account_id"])):
+        return account
+
+    # Pi Edition also accepts the short-lived Pi SDK bearer token. This avoids
+    # making the platform depend on cookie persistence after Pi.authenticate().
+    auth = str(request.headers.get("Authorization", "")).strip()
+    if auth.lower().startswith("bearer "):
+        bearer = auth[7:].strip()
+        account = _web_account_from_pi_access_token(bearer)
+        if account:
+            return account
+    return None
 
 def _verified_pi_user(access_token):
     token=str(access_token or "").strip()
@@ -823,6 +860,88 @@ def _verified_pi_user(access_token):
         d=r.json() or {}; u=d.get("user") if isinstance(d.get("user"),dict) else d; uid=str(u.get("uid") or "").strip(); username=str(u.get("username") or "").strip()
         return ({"uid":uid,"username":username},None) if uid else (None,"pi_identity_missing")
     except Exception as e: print(f"Pi identity verification error: {e}"); return None,"pi_verification_unavailable"
+
+def _pi_api_request(method, path, payload=None):
+    """Server-only Pi Platform API wrapper. The Pi API key never reaches the browser."""
+    if not PI_API_KEY:
+        return None, "pi_api_key_missing"
+    url = PI_API_BASE_URL.rstrip("/") + "/" + str(path).lstrip("/")
+    headers = {"Authorization": f"Key {PI_API_KEY}", "Content-Type": "application/json"}
+    try:
+        r = requests.request(method.upper(), url, headers=headers, json=payload, timeout=12)
+        try:
+            data = r.json()
+        except Exception:
+            data = {"raw": r.text[:1000]}
+        if not (200 <= r.status_code < 300):
+            detail = data.get("error") if isinstance(data, dict) else None
+            return None, f"pi_api_{r.status_code}:{detail or 'request_failed'}"
+        return data, None
+    except Exception as e:
+        print(f"Pi API request error: {e}")
+        return None, "pi_api_unavailable"
+
+
+def _pi_identity_for_account(account_id):
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return None
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(
+                    "SELECT provider_subject,provider_username FROM ai_for_identity_links "
+                    "WHERE account_id=%s AND provider='pi' AND verified=TRUE LIMIT 1",
+                    (str(account_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                return {"uid": str(row["provider_subject"]), "username": str(row.get("provider_username") or "")}
+    except Exception as e:
+        print(f"Pi identity lookup error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
+
+
+def _pi_payment_authorized_for_account(payment_id, account_id):
+    identity = _pi_identity_for_account(account_id)
+    if not identity:
+        return None, "pi_identity_required"
+    payment, err = _pi_api_request("GET", f"payments/{payment_id}")
+    if err:
+        return None, err
+    user_uid = str((payment or {}).get("user_uid") or "")
+    if not user_uid or user_uid != identity["uid"]:
+        return None, "payment_user_mismatch"
+    try:
+        amount = float((payment or {}).get("amount"))
+    except Exception:
+        return None, "payment_amount_invalid"
+    if abs(amount - float(PI_PAYMENT_AMOUNT)) > 1e-9:
+        return None, "payment_amount_mismatch"
+    if str((payment or {}).get("memo") or "").strip() != PI_PAYMENT_MEMO:
+        return None, "payment_memo_mismatch"
+    direction = str((payment or {}).get("direction") or "").lower()
+    if direction and direction not in ("user_to_app", "user-to-app"):
+        return None, "payment_direction_invalid"
+    return payment, None
+
+
+def _pi_payment_error_status(err):
+    if err in ("pi_api_key_missing", "pi_api_unavailable") or str(err).startswith("pi_api_5"):
+        return 503
+    if err in ("pi_identity_required",):
+        return 401
+    if err in ("payment_user_mismatch", "payment_direction_invalid"):
+        return 403
+    if err in ("payment_amount_invalid", "payment_amount_mismatch", "payment_memo_mismatch"):
+        return 400
+    if str(err).startswith("pi_api_4"):
+        return 400
+    return 400
 
 def _verified_google_user(id_token):
     token=str(id_token or "").strip()
@@ -933,6 +1052,9 @@ def get_web_profile_photo(account_id):
 
 def _web_account_user(row):
     aid = str(row.get("account_id"))
+    meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+    bridge_id = str(meta.get("telegram_bridge_id") or "").strip()
+    bridge_role = str(meta.get("telegram_bridge_role") or "").strip().lower()
     return {
         "id": _web_account_numeric_id(aid),
         "first_name": str(row.get("display_name") or "AI for user"),
@@ -941,7 +1063,78 @@ def _web_account_user(row):
         "auth_type": "web",
         "platform_member": True,
         "platform_member_new": False,
+        # Secure server-created bridge from the Telegram transport identity to
+        # the persisted Pi account. This is never accepted from browser JSON.
+        "telegram_bridge_id": bridge_id,
+        "telegram_bridge_role": bridge_role,
     }
+
+def _bind_telegram_admin_bridge(account_id, init_data):
+    """Bind the current verified Telegram transport identity to a Pi account.
+
+    Telegram is not used as the platform login method. It is only a one-time
+    owner/admin bridge when the user arrived through the Telegram App button.
+    The Telegram WebApp initData is verified server-side with BOT_TOKEN. Only
+    IDs already present in the immutable ADMIN_IDS list may create this bridge.
+    One Telegram admin identity can be bound to only one AI for web account,
+    and an account already bound to another admin cannot be reassigned.
+    """
+    tg_user = _webapp_data_check(init_data)
+    if not tg_user:
+        return None, "telegram_bridge_not_verified"
+    try:
+        tg_id = int(tg_user.get("id"))
+    except Exception:
+        return None, "telegram_bridge_invalid"
+    if tg_id not in ADMIN_IDS:
+        return {"telegram_id": tg_id, "role": "user"}, None
+
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return None, "database_unavailable"
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Prevent the same privileged Telegram identity from owning
+                # multiple Pi accounts.
+                cur.execute(
+                    "SELECT account_id,metadata FROM ai_for_web_accounts "
+                    "WHERE status='active' AND metadata->>'telegram_bridge_id'=%s "
+                    "LIMIT 1",
+                    (str(tg_id),),
+                )
+                existing = cur.fetchone()
+                if existing and str(existing["account_id"]) != str(account_id):
+                    return None, "telegram_admin_bridge_already_bound"
+
+                cur.execute(
+                    "SELECT metadata FROM ai_for_web_accounts "
+                    "WHERE account_id=%s AND status='active' FOR UPDATE",
+                    (str(account_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None, "account_not_found"
+                meta = row.get("metadata") if isinstance(row.get("metadata"), dict) else {}
+                current = str(meta.get("telegram_bridge_id") or "").strip()
+                if current and current != str(tg_id):
+                    return None, "account_already_bound_to_telegram_admin"
+
+                meta["telegram_bridge_id"] = str(tg_id)
+                meta["telegram_bridge_role"] = "owner" if tg_id == OWNER_ID else "admin"
+                meta["telegram_bridge_verified_at"] = datetime.now(ZoneInfo("UTC")).isoformat()
+                cur.execute(
+                    "UPDATE ai_for_web_accounts SET metadata=%s,last_seen=NOW() "
+                    "WHERE account_id=%s AND status='active'",
+                    (json.dumps(meta, ensure_ascii=False), str(account_id)),
+                )
+                return {"telegram_id": tg_id, "role": meta["telegram_bridge_role"]}, None
+    except Exception as e:
+        print(f"Telegram privileged bridge error: {e}")
+        return None, "database_error"
+    finally:
+        _membership_db_release(conn)
 
 def membership_service_status():
     """Return a safe, JSON-serializable snapshot of the membership database service."""
@@ -2654,10 +2847,36 @@ def _webapp_allowed_username(user):
     return True
 
 def _webapp_is_owner(user):
-    return bool(user and is_owner(user.get("id")))
+    if not user:
+        return False
+    # Preserve the original Telegram Owner ID exactly, while allowing the
+    # verified Pi account linked from that Telegram session to carry the same
+    # Owner permissions inside Pi Browser.
+    try:
+        bridge_id = int(user.get("telegram_bridge_id") or 0)
+        if bridge_id == OWNER_ID:
+            return True
+    except Exception:
+        pass
+    # Legacy Telegram-shaped users remain supported.
+    try:
+        return is_owner(user.get("id"))
+    except Exception:
+        return False
 
 def _webapp_is_admin(user):
-    return bool(user and int(user.get("id", 0)) in ADMIN_IDS)
+    if not user:
+        return False
+    try:
+        bridge_id = int(user.get("telegram_bridge_id") or 0)
+        if bridge_id in ADMIN_IDS:
+            return True
+    except Exception:
+        pass
+    try:
+        return int(user.get("id", 0)) in ADMIN_IDS
+    except Exception:
+        return False
 
 def _webapp_has_access(user):
     # Platform entry is intentionally global for authenticated users.
@@ -2722,35 +2941,33 @@ def _webapp_file_analysis(name, content, kind=""):
     return {"type":"text", "name":name, "characters":len(text), "lines":len(lines), "words":len(words), "preview":text[:6000]}
 
 def _webapp_auth():
-    # Channel-aware authentication:
-    # - /platform (Pi Edition) uses a verified Pi-linked web session.
-    # - /app opened from Telegram Mini App uses Telegram WebApp initData.
-    # This restores Telegram Mini App operation without changing the Telegram bot webhook/group logic.
+    # Telegram remains the transport/entry channel only. Once the user reaches
+    # AI for, the platform requires a verified Pi identity. Authentication can
+    # be carried by the secure web session cookie or by the Pi SDK bearer token.
     channel = str(request.headers.get("X-AI-For-Channel", "")).strip().lower()
     account = _get_web_account_from_request()
-    if channel == "pi":
+    if channel in ("pi", "telegram"):
         if account:
+            # If this authenticated Pi account arrived through Telegram and the
+            # signed Telegram identity is one of the existing Owner/Admin IDs,
+            # complete the one-time privileged bridge automatically. This also
+            # repairs an account created by the previous build without requiring
+            # a new database account. Avoid a DB write when the bridge already exists.
+            pre_user = _web_account_user(account)
+            if not pre_user.get("telegram_bridge_id"):
+                bridge, bridge_err = _bind_telegram_admin_bridge(
+                    account["account_id"],
+                    request.headers.get("X-Telegram-Init-Data", ""),
+                )
+                if bridge_err not in (None, "telegram_bridge_not_verified"):
+                    print(f"Telegram privileged bridge skipped: {bridge_err}")
+                if bridge and bridge.get("role") in ("owner", "admin"):
+                    account = _get_web_account_by_id(account["account_id"]) or account
             user = _web_account_user(account)
             user["auth_type"] = "pi"
             user["pi_edition"] = True
             return user, None, None
         return None, jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if channel == "telegram":
-        init_data = request.headers.get("X-Telegram-Init-Data", "")
-        user = _webapp_data_check(init_data)
-        if user:
-            user["auth_type"] = "telegram"
-            user["pi_edition"] = False
-            if not _webapp_has_access(user):
-                return None, jsonify({"ok": False, "error": "access_denied"}), 403
-            ok, is_new = register_platform_member(user, source="webapp")
-            if MEMBERSHIP_DB_REQUIRED and not ok:
-                return None, jsonify({"ok": False, "error": "membership_persistence_unavailable"}), 503
-            user["platform_member"] = bool(ok)
-            user["platform_member_new"] = bool(is_new)
-            return user, None, None
-        return None, jsonify({"ok": False, "error": "invalid_webapp_auth"}), 401
-    # No implicit authentication path: callers must identify their channel explicitly.
     return None, jsonify({"ok": False, "error": "auth_channel_required"}), 401
 
 def _webapp_set_menu_button():
@@ -3006,7 +3223,7 @@ def _webapp_platform_payload(user):
             "external_apps": _external_apps_payload(user),
             "assets": {"zynmart_logo": ZYNMART_LOGO_DATA},
             "theme": AI_FOR_THEME,
-            "access": {"public_open_sections": sorted(_webapp_public_open_set()), "owner_private": _webapp_is_owner(user)},
+            "access": {"public_open_sections": sorted(_webapp_public_open_set()), "owner_private": _webapp_is_owner(user), "admin": _webapp_is_admin(user), "telegram_bridge_role": str(user.get("telegram_bridge_role") or "")},
             "membership": {
                 "joined": bool(user.get("platform_member")),
                 "new": bool(user.get("platform_member_new")),
@@ -3121,17 +3338,18 @@ WEBAPP_HTML = r'''<!doctype html>
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button class="nav" id="n-account" onclick="accountBox()"><b>👤</b>الحساب</button></nav>
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
-async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':channel==='telegram'?(tg?.initData||''):''},opts.headers||{});try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
+async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':(tg?.initData||'')},channel==='pi'&&token?{'Authorization':'Bearer '+token}:{},opts.headers||{});try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
+async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
-function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
+function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="card" style="margin:14px 0"><h3>💳 Pi Payments</h3><p class="small">${window.PI_PAYMENTS_ENABLED?'دفع Pi مفعّل على '+(window.PI_SANDBOX?'Testnet':'Mainnet')+' بمبلغ '+Number(window.PI_PAYMENT_AMOUNT).toFixed(4)+' Pi.':'دفع Pi غير مفعّل حاليًا.'}</p><div class="actions"><button class="action" onclick="testPiPayment()">💳 دفع Pi</button></div><div id="paymentMsg" class="small" style="margin-top:8px"></div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
 function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
-function openSection(key){let s=state.sections.find(x=>x.key===key);if(!s)return;let privileged=(state.role==='owner'||state.role==='admin');if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}if(key==='tools'){toolsBox();return}if(key==='account'){accountBox();return}if(key==='support'){supportBox();return}if(key==='community'){communityBox();return}if(key==='messages'){messagesBox();return}if(key==='rewards'){rewardsBox();return}if(key==='fun'){funBox();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
-function more(){setNav('n-more');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>كل أقسام المنصة في مكان واحد.</p></section><div class="grid">${state.sections.map(card).join('')}</div>`}
+function openSection(key){let s=state.sections.find(x=>x.key===key);let privileged=(state.role==='owner'||state.role==='admin');if(!s&&!privileged){setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>بانتظار تفعيل المالك</h2><p class="small">هذا القسم موجود في المنصة لكنه مغلق حاليًا. سيظهر محتواه للمستخدمين بعد أن يفعّله المالك من مركز تحكم المالك.</p><div class="statusBox"><div class="row">الدور الحالي: <span class="warn">User</span></div><div class="row">صلاحية الإدارة: <span class="danger">غير متاحة</span></div><div class="row">إعدادات المالك: <span class="danger">خاصة بالمالك فقط</span></div></div></div>';return}if(!s)return;if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}if(key==='tools'){toolsBox();return}if(key==='account'){accountBox();return}if(key==='support'){supportBox();return}if(key==='community'){communityBox();return}if(key==='messages'){messagesBox();return}if(key==='rewards'){rewardsBox();return}if(key==='fun'){funBox();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
+function more(){setNav('n-more');let allKeys=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps','nft'];let meta={};(state.sections||[]).forEach(x=>meta[x.key]=x);let labels={ai:'AI',search:'بحث',market:'السوق',stores:'المتاجر',community:'المجتمع',messages:'الرسائل',news:'الأخبار',pi:'Pi',content:'المحتوى',analytics:'التحليلات',tools:'الأدوات',fun:'الترفيه',plus:'Plus',ads:'الإعلانات',rewards:'المكافآت',account:'الحساب',security:'الأمان',knowledge:'المعرفة',support:'الدعم',lab:'ZYN LAB',autocore:'AUTO CORE',revenue:'مركز الدخل',external_apps:'التطبيقات الخارجية',nft:'NFT'};let cards=allKeys.map(k=>{let s=meta[k];if(s)return card(s);return `<button class="card" onclick="openSection('${k}')"><div class="ico">🔒</div><h3>${esc(labels[k]||k)}</h3><p>بانتظار تفعيل المالك.</p><span class="badge soon">🔒 مغلق حاليًا</span></button>`}).join('');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>الأقسام المفتوحة متاحة للمستخدمين. الأقسام الأخرى تنتظر تفعيل المالك.</p></section><div class="grid">${cards}</div>`}
 async function renderExternalApps(){
  document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔗 التطبيقات الخارجية</div><p class="small">تطبيقات مستقلة يمكن فتحها مباشرة. هوية التطبيق تُستخرج من بياناته العامة عند الإضافة عندما تكون متاحة.</p><div id="externalAppsView" class="grid"></div></section>`;
  let r=document.getElementById('externalAppsView'); let apps=state.external_apps||[];
@@ -3181,7 +3399,7 @@ async function quiz(option){try{let d=await platformSvc('quiz_answer',{question_
 function accountBox(){let img='';document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';loadFavorites();loadIdentityStatus();let box=document.getElementById('profileImageBox');fetch('/api/app/account/photo',{headers:{'X-AI-For-Channel':new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram','X-Telegram-Init-Data':new URLSearchParams(location.search).get('channel')==='pi'?'':(tg?.initData||'')}}).then(r=>{if(!r.ok)throw new Error('no_photo');return r.blob()}).then(blob=>{let im=new Image();im.style='width:64px;height:64px;border-radius:50%;object-fit:cover;vertical-align:middle;border:1px solid #4cff88';im.onload=()=>{box.innerHTML='🖼️ الصورة:<br>';box.appendChild(im)};im.src=URL.createObjectURL(blob)}).catch(()=>{box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>'})}
 async function loadIdentityStatus(){try{let d=await fetch('/api/platform/identity/status').then(r=>r.json());if(!d.ok)throw new Error(d.error);let ids=d.identities||[];document.getElementById('identityStatus').textContent='🔐 مزودو الدخول: '+(ids.map(x=>x.provider).join(' · ')||'لم يتم الربط بعد');document.getElementById('identityLinks').innerHTML=ids.length?ids.map(x=>'<div class="row">✓ '+esc(x.provider)+(x.provider_username?' — '+esc(x.provider_username):'')+'</div>').join(''):'<div>لم يتم ربط مزود إضافي بعد.</div>'}catch(e){document.getElementById('identityLinks').textContent='⚠️ تعذر قراءة حالة الربط.'}}
 async function updateProfile(){let r=document.getElementById('profileEditResult');r.textContent='⏳';try{let d=await fetch('/api/platform/profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:document.getElementById('editDisplayName').value,username:document.getElementById('editUsername').value})}).then(x=>x.json());if(!d.ok)throw new Error(d.error||'update_failed');r.innerHTML='<div class="statusBox">✅ تم حفظ التعديل.</div>';state.user.first_name=d.account.display_name;state.user.username=d.account.username;document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'')}catch(e){r.innerHTML='<div class="statusBox">⚠️ '+esc(e.message)+'</div>'}}
-async function linkPi(){if(window.Pi?.authenticate&&/Pi Browser/i.test(navigator.userAgent)){try{let a=await window.Pi.authenticate(['username'],()=>{});let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'pi',access_token:a.accessToken})}).then(r=>r.json());if(!d.ok)throw new Error(d.error);document.getElementById('linkResult').textContent='✅ تم ربط Pi: @'+(d.account.username||'');accountBox()}catch(e){document.getElementById('linkResult').textContent='⚠️ '+e.message}return}if(!window.PI_CLIENT_ID){document.getElementById('linkResult').textContent='⚠️ Pi Sign-in غير مفعّل.';return}const state=crypto.randomUUID();sessionStorage.setItem('ai_for_pi_state',state);sessionStorage.setItem('ai_for_pi_linking','1');const redirect=window.PI_SIGNIN_REDIRECT_URI||location.origin+'/platform';if(window.Pi?.signIn)window.Pi.signIn({clientId:window.PI_CLIENT_ID,redirectUri:redirect,scopes:['username'],state});else location.href='https://accounts.pinet.com/oauth/authorize?response_type=token&client_id='+encodeURIComponent(window.PI_CLIENT_ID)+'&redirect_uri='+encodeURIComponent(redirect)+'&scope=username&state='+encodeURIComponent(state)}
+async function linkPi(){if(!window.Pi?.authenticate){document.getElementById('linkResult').textContent='⚠️ افتح AI for داخل Pi Browser.';return}try{let a=await window.Pi.authenticate(['username'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+a.accessToken},body:JSON.stringify({provider:'pi',access_token:a.accessToken})}).then(r=>r.json());if(!d.ok)throw new Error(d.error);document.getElementById('linkResult').textContent='✅ تم ربط Pi: @'+(d.account.username||'');accountBox()}catch(e){document.getElementById('linkResult').textContent='⚠️ '+e.message}}
 async function linkGoogle(){if(!window.google?.accounts?.id){let s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';document.head.appendChild(s);await new Promise(r=>setTimeout(r,700))}if(!window.GOOGLE_CLIENT_ID||!window.google?.accounts?.id){document.getElementById('linkResult').textContent='⚠️ Google غير مفعّل.';return}window.google.accounts.id.initialize({client_id:window.GOOGLE_CLIENT_ID,callback:async r=>{let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'google',id_token:r.credential})}).then(x=>x.json());document.getElementById('linkResult').textContent=d.ok?'✅ تم ربط Google.':'⚠️ '+(d.error||'link_failed');if(d.ok)accountBox()}});window.google.accounts.id.prompt()}
 async function linkTelegram(){window.onTelegramAuth=async u=>{let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({provider:'telegram'},u||{}))}).then(x=>x.json());document.getElementById('linkResult').textContent=d.ok?'✅ تم ربط Telegram.':'⚠️ '+(d.error||'link_failed');if(d.ok)accountBox()};let b=document.getElementById('tgLinkWidget');if(b)b.remove();b=document.createElement('div');b.id='tgLinkWidget';let sc=document.createElement('script');sc.async=true;sc.src='https://telegram.org/js/telegram-widget.js?22';sc.dataset.telegramLogin=window.TELEGRAM_BOT_USERNAME;sc.dataset.size='large';sc.dataset.userpic='false';sc.dataset.requestAccess='write';sc.dataset.onauth='onTelegramAuth(user)';b.appendChild(sc);document.getElementById('linkResult').appendChild(b)}
 
@@ -3194,7 +3412,7 @@ async function doSearch(){let q=document.getElementById('sq').value.trim(),r=doc
 function admin(){if(state.role==='owner'){ownerArea();return}setNav('n-admin');document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">⚙️ مركز الإدارة</div><div class="statusBox"><div class="row">الدور: ${state.role==='owner'?'تحكم سري':'Admin'}</div><div class="row">🛡️ الحماية: <span class="ok">مفعلة</span></div><div class="row">🤖 الذكاء: <span class="ok">متاح</span></div><div class="row">🔎 البحث: <span class="ok">متاح</span></div><div class="row">🟣 Pi: <span class="ok">متاح</span></div></div><button class="action" onclick="telegramPanel()">📋 فتح لوحة الإدارة في Telegram</button></section>`}
 async function ownerArea(){
 setNav('n-admin');
-document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 مركز تحكم المالك</div><p class="small">ترتيب جديد من الصفر: كل إعداد هنا حقيقي ومحفوظ، ومنطقة المالك لا تظهر إلا للمالك.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل الإعدادات...</div></div></section>';
+document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 مركز تحكم المالك</div><p class="small">ترتيب جديد من الصفر: كل إعداد هنا حقيقي ومحفوظ، وهذه المنطقة خاصة بالمالك فقط. لا تظهر للإدمن الثاني ولا لأي مستخدم، وكل عملياتها محمية من الخادم.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل الإعدادات...</div></div></section>';
 try{
  let d=await api('/api/app/owner');
  let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps','nft'];
@@ -3226,27 +3444,137 @@ function telegramPanel(){tg?.close();setTimeout(()=>{try{window.location.href='t
 async function emergency(){try{let d=await api('/api/app/emergency');alert(d.text||'الحالة غير متاحة')}catch(e){alert('⚠️ تعذر قراءة حالة الطوارئ')}}
 async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري تنفيذ مركز الاختبار الشامل...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});let z=d.summary||{};let head=(d.ok?'🟢 الاختبار الشامل ناجح':'🔴 توجد اختبارات تحتاج مراجعة')+'<br><b>النتيجة: '+esc(z.passed||0)+' / '+esc(z.total||0)+' ناجحة</b><br><span class="small">وقت التنفيذ: '+esc(d.executed_at||'—')+'</span><hr style="border:0;border-top:1px solid #3d321b;margin:10px 0">';r.innerHTML=head+(d.tests||[]).map(x=>'<div class="row">'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(typeof x.detail==='object'?JSON.stringify(x.detail):x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات: '+(e.message||'')}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();['n-ai','n-search','n-notify','n-more'].forEach(id=>{let el=document.getElementById(id);if(el)el.style.display='none'});}applyTheme();if(state.role==='user')document.getElementById('n-admin')?.remove();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(!tg.initData){title='لم تصل بيانات Telegram';msg='لم تصل بيانات Telegram؛ إذا كنت تفتح المنصة من المتصفح العادي، ارجع للصفحة الرئيسية وسجّل حساب Web.'}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من Telegram';msg='وصلت بيانات Telegram لكن الخادم رفض التحقق منها. راجع BOT_TOKEN في Render وتأكد أنه يخص البوت الذي يفتح AI for.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
+function openPiPlatform(){const url=location.origin+'/platform';try{if(tg?.openLink){tg.openLink(url,{try_instant_view:false});return}}catch(_){}try{window.open(url,'_blank','noopener,noreferrer')}catch(_){location.href=url}}
+async function start(){try{let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();}applyTheme();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(e?.message==='pi_auth_required'){title='تسجيل الدخول عبر Pi مطلوب';msg='تم فتح المنصة من Telegram، لكن تصفح المنصة وتوثيق الهوية يتطلبان تسجيل الدخول بهوية Pi.';document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🟣</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><button class="action" onclick="openPiPlatform()">🟣 فتح AI for في Pi Browser</button><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">Pi Identity: <span class="danger">مطلوبة</span></div><div class="row">طريقة الدخول: <span class="info">Pi Browser</span></div><div class="row">HTTP: '+esc(e?.status||'401')+'</div><div class="row">الخطأ: pi_auth_required</div></div></div>';return}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من الهوية';msg='يجب تسجيل الدخول والتحقق من هوية Pi قبل استخدام المنصة.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
 </script></body></html>
 '''
 
 PLATFORM_HTML = r"""<!doctype html>
-<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_REDIRECT_URI__";</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
+<html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#080b12"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="manifest" href="/manifest.webmanifest"><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_SIGNIN_REDIRECT_URI__";window.PI_PAYMENTS_ENABLED=__AI_FOR_PI_PAYMENTS_ENABLED__;window.PI_PAYMENT_AMOUNT=__AI_FOR_PI_PAYMENT_AMOUNT__;window.PI_PAYMENT_MEMO="__AI_FOR_PI_PAYMENT_MEMO__";window.PI_SANDBOX=__AI_FOR_PI_SANDBOX__;</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>try{window.Pi&&window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__});}catch(e){console.warn("Pi SDK init unavailable",e);}</script><title>AI for Pi — Pi Ecosystem Edition</title>
 <style>
 :root{--bg:#071018;--panel:#0d1822;--line:#1e3443;--text:#f4f8fb;--muted:#a9bac7;--accent:#49e6a1}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0%,#123026 0,#071018 42%,#050a0f 100%);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;min-height:100vh}.wrap{max-width:1080px;margin:auto;padding:24px}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0}.brand{font-size:25px;font-weight:800}.badge{font-size:12px;border:1px solid #285543;color:var(--accent);padding:7px 10px;border-radius:999px;background:#0b1d17}.hero{padding:48px 0 28px}.hero h1{font-size:clamp(34px,7vw,68px);line-height:1.05;margin:0 0 18px}.hero h1 span{color:var(--accent)}.hero p{font-size:18px;line-height:1.8;color:var(--muted);max-width:760px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:24px}.btn{display:inline-block;text-decoration:none;color:#04110b;background:var(--accent);padding:13px 18px;border-radius:13px;font-weight:800}.btn.alt{color:var(--text);background:#102131;border:1px solid var(--line)}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;margin:28px 0}.card{background:rgba(13,24,34,.88);border:1px solid var(--line);border-radius:18px;padding:20px}.icon{font-size:28px}.card h3{margin:10px 0 7px}.card p{margin:0;color:var(--muted);line-height:1.7}.section{margin-top:34px}.section h2{font-size:25px}.road{display:grid;gap:10px}.step{display:flex;gap:12px;align-items:flex-start;background:#0b151e;border:1px solid var(--line);padding:14px;border-radius:14px}.num{min-width:30px;height:30px;border-radius:50%;display:grid;place-items:center;background:#123529;color:var(--accent);font-weight:800}.foot{padding:30px 0;color:#8195a3;font-size:13px}
 </style></head><body><main class="wrap"><header class="top"><div class="brand">AI for</div><div class="badge">Pi Ecosystem Edition</div></header>
-<section class="hero"><h1>AI for <span>Pi</span></h1><p>نسخة AI for المخصصة لمنظومة Pi. تسجيل الدخول في هذه النسخة يتم عبر Pi Authentication فقط، ولا توجد حسابات أو طرق دخول بديلة.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>🟣 Pi Authentication</h3><p>هذه النسخة مخصصة لـPi Ecosystem Listing. تسجيل الدخول الوحيد هو Pi Authentication.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
+<section class="hero"><h1>AI for <span>Pi</span></h1><p>نسخة AI for المخصصة لمنظومة Pi. تسجيل الدخول في هذه النسخة يتم عبر Pi Authentication فقط، ولا توجد حسابات أو طرق دخول بديلة. يمكن الوصول إليها من زر App في Telegram، ثم يبدأ توثيق Pi هنا داخل Pi Browser.</p><div class="actions"><button class="btn" onclick="showAuth()">تسجيل الدخول / إنشاء حساب</button><a class="btn alt" href="#architecture">استكشاف البنية</a></div><div id="authBox" class="card" style="display:none;margin-top:18px;max-width:680px"><h3>🟣 Pi Authentication</h3><p>هذه النسخة مخصصة لـPi Ecosystem Listing. تسجيل الدخول الوحيد هو Pi Authentication.</p><div class="actions"><button class="btn" onclick="loginPi()">🟣 الدخول عبر Pi</button></div><div id="authMsg" style="margin-top:10px;color:var(--muted)"></div></div><div id="paymentBox" class="card" style="margin-top:18px;max-width:680px"><h3>💳 Pi Payment</h3><p>الدفع يعمل على Pi Testnet أثناء الاختبار، ويستخدم نفس التدفق على Mainnet عند تبديل إعدادات الشبكة والمفتاح.</p><div class="actions"><button class="btn alt" onclick="testPiPayment()">💳 اختبار الدفع</button></div><div id="paymentMsg" style="margin-top:10px;color:var(--muted)"></div></div></section>
 <section class="grid"><div class="card"><div class="icon">🧠</div><h3>AI Center</h3><p>محرك الذكاء والخدمات مع قابلية إضافة مزايا وأدوات جديدة.</p></div><div class="card"><div class="icon">🔐</div><h3>Identity & Access</h3><p>هوية وصلاحيات منفصلة عن الواجهة العامة مع حماية منطقة المالك.</p></div><div class="card"><div class="icon">🗄️</div><h3>Persistent Core</h3><p>الإعدادات والعضويات والبيانات الحساسة مصممة لتكون محفوظة في PostgreSQL.</p></div><div class="card"><div class="icon">⛓️</div><h3>Web3 Ready</h3><p>طبقة قابلة لإضافة الهوية والمحافظ والخدمات اللامركزية لاحقًا دون كسر الأساس.</p></div></section>
 <section class="section" id="architecture"><h2>البنية</h2><div class="road"><div class="step"><div class="num">1</div><div><b>Web3 Platform</b><br><span style="color:var(--muted)">الموقع والحساب ولوحة التحكم والإعدادات والخدمات.</span></div></div><div class="step"><div class="num">2</div><div><b>Core & PostgreSQL</b><br><span style="color:var(--muted)">مصدر دائم للإعدادات والعضويات والصلاحيات والسجل.</span></div></div><div class="step"><div class="num">3</div><div><b>Telegram Bot</b><br><span style="color:var(--muted)">مسار مستقل يحافظ على سلوكه ووظائفه الحالية.</span></div></div><div class="step"><div class="num">4</div><div><b>AI for Local</b><br><span style="color:var(--muted)">الطبقة القادمة لـ SoloHost وTermux بعد تثبيت المنصة.</span></div></div></div></section>
-<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';fetch('/api/platform/me').then(r=>{if(r.ok)location.href='/app'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');authMsg('✅ تم التحقق عبر Pi وفتح AI for.');setTimeout(()=>location.href='/app?channel=pi',300)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){if(!/Pi Browser/i.test(navigator.userAgent)){authMsg('⚠️ افتح هذه الصفحة من Pi Browser.');return}if(window.Pi&&typeof window.Pi.authenticate==='function'){authMsg('⏳ جاري الاتصال بـPi...');try{const a=await Promise.race([window.Pi.authenticate(['username'],()=>{}),new Promise((_,rej)=>setTimeout(()=>rej(new Error('pi_auth_timeout')),15000))]);if(!a?.accessToken)throw new Error('pi_access_token_missing');await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ تعذر الدخول عبر Pi: '+(e?.message||e))}return}authMsg('⚠️ Pi SDK غير متاح. افتح التطبيق داخل Pi Browser.')}async function handlePiCallback(){const p=new URLSearchParams(location.hash.slice(1));const token=p.get('access_token'),st=p.get('state');if(!token)return;const expected=sessionStorage.getItem('ai_for_pi_state');sessionStorage.removeItem('ai_for_pi_state');history.replaceState(null,'',location.pathname);if(!expected||st!==expected){authMsg('⚠️ فشل التحقق من حالة Pi.');return}await postAuth('/api/platform/pi/login',{access_token:token})}showAuth();handlePiCallback();</script></body></html>"""
+<section class="section"><h2>الإصلاح من داخل المنصة</h2><div class="card"><p>الإعدادات القابلة للتغيير ستصبح DB-backed وتُدار من Control Center. إضافة منطق برمجي جديد فقط تحتاج نشر نسخة جديدة؛ الهدف هو ألا نحتاج Render عند كل تغيير إعداد أو صلاحية أو فتح أو قفل خدمة.</p></div></section><div class="foot">AI for Pi — نسخة مخصصة لـPi Ecosystem Listing باستخدام Pi Authentication فقط.</div></main><script>function showAuth(){document.getElementById('authBox').style.display='block';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';fetch('/api/platform/me',{headers:token?{'Authorization':'Bearer '+token}:{}}).then(r=>{if(r.ok)location.href='/app?channel=pi'}).catch(()=>{})}function authMsg(t){document.getElementById('authMsg').textContent=t}async function postAuth(path,body){authMsg('⏳ جاري التحقق من هوية Pi...');try{const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(body?.access_token||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify(body)});const d=await r.json();if(!r.ok)throw new Error(d.error||'auth_failed');if(body?.access_token){window.__PI_ACCESS_TOKEN=body.access_token;sessionStorage.setItem('ai_for_pi_access_token',body.access_token)}authMsg('✅ تم حفظ هوية Pi وإنشاء/استرجاع حساب AI for.');setTimeout(()=>location.href='/app?channel=pi',250)}catch(e){authMsg('⚠️ '+e.message)}}async function loginPi(){authMsg('⏳ جاري فتح Pi Authentication...');if(!window.Pi||typeof window.Pi.authenticate!=='function'){authMsg('⚠️ افتح AI for داخل Pi Browser؛ Pi SDK غير متاح هنا.');return}try{const a=await window.Pi.authenticate(['username'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);await postAuth('/api/platform/pi/login',{access_token:a.accessToken})}catch(e){authMsg('⚠️ فشل توثيق Pi: '+(e?.message||e))}}async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}showAuth();</script></body></html>"""
 
 @app.route("/api/platform/pi/login", methods=["POST"])
 def platform_pi_login():
-    verified,err=_verified_pi_user((request.get_json(silent=True) or {}).get("access_token"))
-    if err:return jsonify({"ok":False,"error":err}),401 if err.startswith("invalid_") or err in ("missing_access_token","pi_identity_missing") else 503
+    body = request.get_json(silent=True) or {}
+    access_token = str(body.get("access_token") or "").strip()
+    verified,err=_verified_pi_user(access_token)
+    if err:
+        return jsonify({"ok":False,"error":err}),401 if err.startswith("invalid_") or err in ("missing_access_token","pi_identity_missing") else 503
     result,err=_provider_login("pi",verified["uid"],verified["username"],"",verified["username"] or "AI for Pioneer",True,True)
-    if err:return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 503
-    account,token=result; return _set_web_cookie(jsonify({"ok":True,"provider":"pi","account":_web_account_public(account)}),token)
+    if err:
+        return jsonify({"ok":False,"error":err}),409 if err=="identity_already_linked" else 503
+    account,token=result
+    if not account or not _account_has_verified_pi_identity(account["account_id"]):
+        return jsonify({"ok":False,"error":"pi_identity_persistence_failed"}),503
+
+    # Critical owner/admin bridge: when the Pi login was initiated from the
+    # Telegram App button, verify Telegram's signed initData and persist the
+    # existing Telegram Owner/Admin identity onto this Pi account. This keeps
+    # Telegram as transport only; Pi remains the actual platform identity.
+    bridge,bridge_err=_bind_telegram_admin_bridge(
+        account["account_id"],
+        request.headers.get("X-Telegram-Init-Data", ""),
+    )
+    if bridge_err not in (None, "telegram_bridge_not_verified"):
+        return jsonify({"ok":False,"error":bridge_err}),409 if bridge_err.startswith("telegram_") else 503
+    account=_get_web_account_by_id(account["account_id"]) or account
+    effective_user=_web_account_user(account)
+    response = jsonify({
+        "ok":True,
+        "provider":"pi",
+        "account":_web_account_public(account),
+        "identity":{"uid":verified["uid"],"username":verified["username"]},
+        "session_ready":bool(token),
+        "privileged_bridge": {
+            "bound": bool(bridge and bridge.get("role") in ("owner","admin")),
+            "role": "owner" if _webapp_is_owner(effective_user) else "admin" if _webapp_is_admin(effective_user) else "user",
+        },
+    })
+    return _set_web_cookie(response,token) if token else response
+
+@app.route("/api/platform/pi/payment/config", methods=["GET"])
+def platform_pi_payment_config():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    return jsonify({
+        "ok": True,
+        "enabled": bool(PI_PAYMENTS_ENABLED and PI_API_KEY),
+        "sandbox": bool(PI_SANDBOX),
+        "amount": PI_PAYMENT_AMOUNT,
+        "memo": PI_PAYMENT_MEMO,
+    })
+
+
+@app.route("/api/platform/pi/payment/approve", methods=["POST"])
+def platform_pi_payment_approve():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    if not PI_PAYMENTS_ENABLED:
+        return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
+    body = request.get_json(silent=True) or {}
+    payment_id = str(body.get("payment_id") or "").strip()
+    if not payment_id:
+        return jsonify({"ok": False, "error": "payment_id_required"}), 400
+    payment, err = _pi_payment_authorized_for_account(payment_id, account["account_id"])
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    data, err = _pi_api_request("POST", f"payments/{payment_id}/approve")
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    return jsonify({"ok": True, "payment": data})
+
+
+@app.route("/api/platform/pi/payment/complete", methods=["POST"])
+def platform_pi_payment_complete():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    if not PI_PAYMENTS_ENABLED:
+        return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
+    body = request.get_json(silent=True) or {}
+    payment_id = str(body.get("payment_id") or "").strip()
+    txid = str(body.get("txid") or "").strip()
+    if not payment_id or not txid:
+        return jsonify({"ok": False, "error": "payment_id_and_txid_required"}), 400
+    payment, err = _pi_payment_authorized_for_account(payment_id, account["account_id"])
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    transaction = payment.get("transaction") if isinstance(payment, dict) else None
+    if isinstance(transaction, dict) and transaction.get("txid") and str(transaction.get("txid")) != txid:
+        return jsonify({"ok": False, "error": "txid_mismatch"}), 400
+    data, err = _pi_api_request("POST", f"payments/{payment_id}/complete", {"txid": txid})
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    return jsonify({"ok": True, "payment": data, "completed": True})
+
+
+@app.route("/api/platform/pi/payment/cancel", methods=["POST"])
+def platform_pi_payment_cancel():
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    if not PI_PAYMENTS_ENABLED:
+        return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
+    body = request.get_json(silent=True) or {}
+    payment_id = str(body.get("payment_id") or "").strip()
+    if not payment_id:
+        return jsonify({"ok": False, "error": "payment_id_required"}), 400
+    payment, err = _pi_payment_authorized_for_account(payment_id, account["account_id"])
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    data, err = _pi_api_request("POST", f"payments/{payment_id}/cancel")
+    if err:
+        return jsonify({"ok": False, "error": err}), _pi_payment_error_status(err)
+    return jsonify({"ok": True, "payment": data, "cancelled": True})
+
 
 @app.route("/api/platform/google/login", methods=["POST"])
 def platform_google_login():
@@ -3408,25 +3736,38 @@ def platform_manifest():
 
 @app.route("/validation-key.txt", methods=["GET"])
 def pi_validation_key():
-    """Pi Developer Portal domain-ownership verification file."""
+    # Pi Developer domain validation. The key is supplied only through Render env.
     if not PI_VALIDATION_KEY:
-        return "", 404, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
+        return "", 404
     return PI_VALIDATION_KEY + "\n", 200, {"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/platform", methods=["GET"])
 def platform_home():
     ensure_background_services()
-    redirect_uri = request.url_root.rstrip("/") + "/platform"
-    html = (PLATFORM_HTML
-        .replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
-        .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
-        .replace("__AI_FOR_PI_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1]))
+    redirect_uri = PI_SIGNIN_REDIRECT_URI or (request.url_root.rstrip("/") + "/platform")
+    html = (PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
+             .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
+             .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
+             .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
+             .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/app", methods=["GET"])
 def webapp():
+    # Legacy Telegram WebApp URL remains available, but the user-facing App
+    # entry is now the Pi gateway. Post-auth navigation still uses /app?channel=pi.
+    if str(request.args.get("channel") or "").strip().lower() != "pi":
+        return redirect("/platform?from=telegram", code=302)
     ensure_background_services()
-    return WEBAPP_HTML, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+    redirect_uri = PI_SIGNIN_REDIRECT_URI or (request.url_root.rstrip("/") + "/platform")
+    html = (WEBAPP_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
+            .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
+            .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
+            .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
+            .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
+            .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
+    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
 
 @app.route("/api/app/bootstrap", methods=["GET","POST"])
 def webapp_bootstrap():
@@ -3812,17 +4153,18 @@ def webapp_platform_services():
 
 @app.route("/api/app/owner", methods=["GET", "POST"])
 def webapp_owner_private():
-    # Owner Settings remain private to the existing Telegram Owner path.
-    # Browser/Pi users can access the platform, but never this private route.
+    # Owner Settings are available to the original Telegram Owner identity
+    # and to the verified Pi account securely bridged from that identity.
+    # Telegram remains transport only; Pi is the platform authentication.
     channel = str(request.headers.get("X-AI-For-Channel", "")).strip().lower()
-    if channel != "telegram":
+    if channel not in ("telegram", "pi"):
         return jsonify({"ok":False,"error":"not_found"}),404
     user, err, code = _webapp_auth()
     if err: return err, code
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
     if request.method == "GET":
         control_status = {"persistent": bool(control_db_ready), "required": bool(CONTROL_DB_REQUIRED), "error": "" if control_db_ready else control_db_error}
-        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"]})
+        return jsonify({"ok":True,"area":"owner_private","open_sections":sorted(_webapp_public_open_set()),"allowed_usernames":sorted(AI_FOR_ALLOWED_USERNAMES),"allowed_user_ids":dict(_webapp_allowed_ids),"control_db":control_status,"features":["feature_firewall","allowlist","theme","system_controls","audit","emergency","feature_tests","universal_actions"],"owner_only":True,"admin_2_allowed":False})
     body=request.get_json(silent=True) or {}; action=str(body.get("action","" )).strip().lower()
     if action == "persistence_probe":
         mode=str(body.get("mode","status")).strip().lower()
@@ -3903,7 +4245,7 @@ def owner_feature_tests(user):
     """Owner-only deterministic health/structure tests; never reports unexecuted live probes as passed."""
     tests=[]
     def add(name, ok, detail): tests.append({"name":name,"ok":bool(ok),"detail":str(detail)})
-    add("owner_identity", is_owner(user.get("id")), "Verified Telegram User ID matches owner")
+    add("owner_identity", _webapp_is_owner(user), "Verified Owner identity is enforced by the original Telegram Owner ID or its signed Pi bridge")
     add("admin_exclusion", 6283667477 in ADMIN_IDS and 6283667477 != OWNER_ID, "Admin 2 remains distinct from owner")
     add("owner_route_guard", True, "Route returns not_found for non-owner after initData validation")
     add("membership_db", membership_db_ready and bool(get_platform_member(user.get("id"))) or (not MEMBERSHIP_DB_REQUIRED), membership_service_status())
@@ -3919,6 +4261,9 @@ def owner_feature_tests(user):
     add("ai_endpoint", callable(globals().get("get_ai_response")), "AI response function exists")
     add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
     add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")
+    add("pi_payment_api_key_configured", bool(PI_API_KEY) if PI_PAYMENTS_ENABLED else True, "Server-side Pi API key is configured when payments are enabled")
+    add("pi_payment_routes", all(name in app.view_functions for name in ("platform_pi_payment_config","platform_pi_payment_approve","platform_pi_payment_complete","platform_pi_payment_cancel")), "Pi U2A payment lifecycle routes are registered")
+    add("pi_payment_amount", PI_PAYMENT_AMOUNT > 0, f"configured amount={PI_PAYMENT_AMOUNT}")
     add("notifications_endpoint", "webapp_notifications" in app.view_functions, "Notifications endpoint registered")
     add("config_persistence", control_db_ready or not CONTROL_DB_REQUIRED, "Runtime controls have durable DB path when configured")
     # Route registration integrity: detect accidental route removal/duplication at runtime.
@@ -4016,7 +4361,7 @@ def webapp_external_app_open(app_id):
 def webapp_emergency():
     user, err, code = _webapp_auth()
     if err: return err, code
-    if not is_owner(user.get("id")): return jsonify({"ok": False, "error": "not_found"}), 404
+    if not _webapp_is_owner(user): return jsonify({"ok": False, "error": "not_found"}), 404
     return jsonify({"ok": True, "text": "🔴 وضع الطوارئ مفعّل." if emergency_active() else "🟢 النظام في الوضع الطبيعي."})
 
 @app.route("/api/app/files/analyze", methods=["POST"])

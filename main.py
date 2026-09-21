@@ -3572,12 +3572,11 @@ PLATFORM_HTML = r"""<!doctype html>
     if(url){
       authMsg('⏳ جاري فتح Pi Browser...');
       try{
-        const piUrl=url.replace(/^https?:\/\//i,'pi://');
-        window.location.assign(piUrl);
-        setTimeout(()=>{try{if(document.visibilityState!=='hidden'&&window.Telegram?.WebApp?.openLink)window.Telegram.WebApp.openLink(url,{try_instant_view:false});}catch(_){ }},1200);
-        return;
+        if(window.Telegram?.WebApp?.openLink){
+          window.Telegram.WebApp.openLink(url,{try_instant_view:false});
+          return;
+        }
       }catch(_){ }
-      if(window.Telegram.WebApp.openLink){window.Telegram.WebApp.openLink(url,{try_instant_view:false});return}
       window.location.assign(url);return;
     }
     authMsg('⏳ جاري تجهيز رابط Pi... اضغط «الدخول عبر Pi» مرة أخرى.');
@@ -3660,8 +3659,7 @@ def platform_pi_signin_url():
     from urllib.parse import urlencode, quote
     url = "https://accounts.pinet.com/oauth/authorize?" + urlencode(params)
     browser_url = request.url_root.rstrip("/") + "/platform?from=telegram&pi_state=" + quote(state, safe="") if state else request.url_root.rstrip("/") + "/platform?from=telegram"
-    pi_browser_url = re.sub(r"^https?://", "pi://", browser_url, flags=re.I)
-    return jsonify({"ok": True, "url": url, "browser_url": browser_url, "pi_browser_url": pi_browser_url, "state": state, "privileged_bridge": bool(tg_id), "expires_in": PI_SIGNIN_STATE_TTL})
+    return jsonify({"ok": True, "url": url, "browser_url": browser_url, "state": state, "privileged_bridge": bool(tg_id), "expires_in": PI_SIGNIN_STATE_TTL})
 
 @app.route("/api/platform/pi/login", methods=["POST"])
 def platform_pi_login():

@@ -182,6 +182,19 @@ NFT_RPC_URL = os.environ.get("NFT_RPC_URL", "").strip()
 NFT_GENESIS_ENABLED = str(os.environ.get("NFT_GENESIS_ENABLED", "true")).lower() in ("1","true","yes","on")
 NFT_GENESIS_NAME = os.environ.get("NFT_GENESIS_NAME", "AI for Genesis").strip()
 NFT_GENESIS_BENEFITS = os.environ.get("NFT_GENESIS_BENEFITS", "").strip()
+# NFT Marketplace trading layer: pricing, fees, orders, auctions, offers and OHLC data.
+NFT_MARKETPLACE_FEE_BPS = max(0, min(10000, int(os.environ.get("NFT_MARKETPLACE_FEE_BPS", "200"))))
+NFT_DEFAULT_ROYALTY_BPS = max(0, min(10000, int(os.environ.get("NFT_DEFAULT_ROYALTY_BPS", "500"))))
+NFT_MAX_ROYALTY_BPS = max(NFT_DEFAULT_ROYALTY_BPS, min(10000, int(os.environ.get("NFT_MAX_ROYALTY_BPS", "1000"))))
+NFT_AUCTION_EXTENSION_SECONDS = max(0, int(os.environ.get("NFT_AUCTION_EXTENSION_SECONDS", "300")))
+NFT_MARKETPLACE_CURRENCIES = [x.strip().upper() for x in os.environ.get("NFT_MARKETPLACE_CURRENCIES", "PI").split(",") if x.strip()] or ["PI"]
+NFT_ZYN_ENABLED = str(os.environ.get("NFT_ZYN_ENABLED", "false")).lower() in ("1","true","yes","on")
+NFT_ZYN_ASSET_CODE = os.environ.get("NFT_ZYN_ASSET_CODE", "ZYN").strip()[:12]
+NFT_ZYN_ISSUER = os.environ.get("NFT_ZYN_ISSUER", "").strip()
+NFT_ZYN_MAINNET_APPROVED = str(os.environ.get("NFT_ZYN_MAINNET_APPROVED", "false")).lower() in ("1","true","yes","on")
+# Pi's current Mainnet listing guidance is Pi-only; ZYN stays disabled until separately approved.
+if NFT_ZYN_ENABLED and not NFT_ZYN_MAINNET_APPROVED:
+    NFT_MARKETPLACE_CURRENCIES = [x for x in NFT_MARKETPLACE_CURRENCIES if x != "ZYN"] or ["PI"]
 PI_PAYMENTS_ENABLED = os.environ.get("PI_PAYMENTS_ENABLED", "true" if PI_SANDBOX else "false").strip().lower() in ("1", "true", "yes")
 PI_PAYMENT_AMOUNT = float(os.environ.get("PI_PAYMENT_AMOUNT", "0.01"))
 PI_PAYMENT_MEMO = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()[:160]
@@ -387,10 +400,58 @@ def _ensure_db_schema(cur):
         "ALTER TABLE ai_for_nft_projects ADD COLUMN IF NOT EXISTS contract_network TEXT",
         "ALTER TABLE ai_for_nft_projects ADD COLUMN IF NOT EXISTS genesis_enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE ai_for_nft_projects ADD COLUMN IF NOT EXISTS genesis_benefits TEXT",
+        "ALTER TABLE ai_for_nft_projects ADD COLUMN IF NOT EXISTS royalty_bps INTEGER NOT NULL DEFAULT 500",
+        "ALTER TABLE ai_for_nft_projects ADD COLUMN IF NOT EXISTS onchain_asset_id TEXT NOT NULL DEFAULT ''",
     ):
         try: cur.execute(stmt)
         except Exception as e: print(f"NFT schema extension skipped: {e}")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_projects_owner ON ai_for_nft_projects (owner_identity, updated_at DESC)")
+    # Marketplace is an order/settlement layer separate from NFT metadata.
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_nft_listings (
+            listing_id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES ai_for_nft_projects(project_id) ON DELETE CASCADE,
+            seller_identity TEXT NOT NULL, sale_type TEXT NOT NULL, currency TEXT NOT NULL DEFAULT 'PI',
+            price NUMERIC(30,7) NOT NULL DEFAULT 0, starting_price NUMERIC(30,7), reserve_price NUMERIC(30,7),
+            bid_increment_bps INTEGER NOT NULL DEFAULT 100, buy_now_price NUMERIC(30,7),
+            royalty_bps INTEGER NOT NULL DEFAULT 500, marketplace_fee_bps INTEGER NOT NULL DEFAULT 200,
+            starts_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), expires_at TIMESTAMPTZ,
+            status TEXT NOT NULL DEFAULT 'active', blockchain_network TEXT NOT NULL DEFAULT 'testnet',
+            contract_id TEXT NOT NULL DEFAULT '', onchain_asset_id TEXT NOT NULL DEFAULT '',
+            payment_id TEXT NOT NULL DEFAULT '', settlement_tx_hash TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_nft_offers (
+            offer_id UUID PRIMARY KEY, listing_id UUID NOT NULL REFERENCES ai_for_nft_listings(listing_id) ON DELETE CASCADE,
+            project_id UUID NOT NULL REFERENCES ai_for_nft_projects(project_id) ON DELETE CASCADE, bidder_identity TEXT NOT NULL,
+            amount NUMERIC(30,7) NOT NULL, currency TEXT NOT NULL DEFAULT 'PI', expires_at TIMESTAMPTZ NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active', payment_id TEXT NOT NULL DEFAULT '', settlement_tx_hash TEXT NOT NULL DEFAULT '',
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_nft_bids (
+            bid_id UUID PRIMARY KEY, listing_id UUID NOT NULL REFERENCES ai_for_nft_listings(listing_id) ON DELETE CASCADE,
+            bidder_identity TEXT NOT NULL, amount NUMERIC(30,7) NOT NULL, currency TEXT NOT NULL DEFAULT 'PI',
+            payment_id TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'active', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS ai_for_nft_trades (
+            trade_id UUID PRIMARY KEY, listing_id UUID NOT NULL REFERENCES ai_for_nft_listings(listing_id) ON DELETE CASCADE,
+            project_id UUID NOT NULL REFERENCES ai_for_nft_projects(project_id) ON DELETE CASCADE, seller_identity TEXT NOT NULL,
+            buyer_identity TEXT NOT NULL, amount NUMERIC(30,7) NOT NULL, currency TEXT NOT NULL DEFAULT 'PI',
+            marketplace_fee NUMERIC(30,7) NOT NULL DEFAULT 0, creator_royalty NUMERIC(30,7) NOT NULL DEFAULT 0,
+            seller_proceeds NUMERIC(30,7) NOT NULL DEFAULT 0, payment_id TEXT NOT NULL DEFAULT '',
+            payment_tx_hash TEXT NOT NULL DEFAULT '', blockchain_tx_hash TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'pending_blockchain', traded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+    """)
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_listings_active ON ai_for_nft_listings(status, updated_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_listings_project ON ai_for_nft_listings(project_id, status)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_trades_project_time ON ai_for_nft_trades(project_id, traded_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_bids_listing_time ON ai_for_nft_bids(listing_id, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_conversations_recent ON ai_for_conversations (identity_key, conversation_id, created_at)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_external_apps_public ON ai_for_external_apps (public_open, enabled)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_external_apps_created ON ai_for_external_apps (created_at)")
@@ -3149,7 +3210,7 @@ def _webapp_set_menu_button():
         else:
             print("Telegram Mini App menu configuration failed.")
 
-def _nft_project_create(user, name='', description='', collection_name='', marketplace_url='', genesis_enabled=False, genesis_benefits=''):
+def _nft_project_create(user, name='', description='', collection_name='', marketplace_url='', genesis_enabled=False, genesis_benefits='', royalty_bps=NFT_DEFAULT_ROYALTY_BPS, onchain_asset_id=''):
     """Create an NFT Studio project while preserving the existing draft workflow."""
     identity = _webapp_identity_key(user); project_id = str(uuid.uuid4()); conn = None
     try:
@@ -3159,14 +3220,14 @@ def _nft_project_create(user, name='', description='', collection_name='', marke
         with conn:
             with conn.cursor() as cur:
                 cur.execute("""INSERT INTO ai_for_nft_projects
-                    (project_id, owner_identity, name, description, collection_name, status, metadata, marketplace_url, contract_id, contract_network, genesis_enabled, genesis_benefits)
-                    VALUES (%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s,%s)""",
+                    (project_id, owner_identity, name, description, collection_name, status, metadata, marketplace_url, contract_id, contract_network, genesis_enabled, genesis_benefits, royalty_bps, onchain_asset_id)
+                    VALUES (%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s,%s,%s,%s)""",
                     (project_id, identity, str(name or '')[:160], str(description or '')[:2000], str(collection_name or '')[:160],
                      json.dumps({}, ensure_ascii=False), str(marketplace_url or NFT_MARKETPLACE_URL)[:500], NFT_CONTRACT_ID[:120], NFT_CONTRACT_NETWORK[:30],
-                     bool(genesis_enabled and NFT_GENESIS_ENABLED), str(genesis_benefits or NFT_GENESIS_BENEFITS)[:2000]))
+                     bool(genesis_enabled and NFT_GENESIS_ENABLED and _webapp_is_owner(user)), str(genesis_benefits or NFT_GENESIS_BENEFITS)[:2000] if _webapp_is_owner(user) else '', max(0,min(NFT_MAX_ROYALTY_BPS,int(royalty_bps or NFT_DEFAULT_ROYALTY_BPS))), str(onchain_asset_id or '')[:200]))
         return {"ok": True, "project": {"project_id":project_id,"name":str(name or '')[:160],"description":str(description or '')[:2000],
                 "collection_name":str(collection_name or '')[:160],"status":"draft","marketplace_url":str(marketplace_url or NFT_MARKETPLACE_URL)[:500],
-                "contract_id":NFT_CONTRACT_ID,"contract_network":NFT_CONTRACT_NETWORK,"genesis_enabled":bool(genesis_enabled and NFT_GENESIS_ENABLED)}}
+                "contract_id":NFT_CONTRACT_ID,"contract_network":NFT_CONTRACT_NETWORK,"genesis_enabled":bool(genesis_enabled and NFT_GENESIS_ENABLED and _webapp_is_owner(user)),"royalty_bps":max(0,min(NFT_MAX_ROYALTY_BPS,int(royalty_bps or NFT_DEFAULT_ROYALTY_BPS))),"onchain_asset_id":str(onchain_asset_id or '')[:200]}}
     except Exception as e:
         print(f"NFT project create error: {e}"); return {"ok": False, "error": "nft_project_create_failed"}
     finally: _membership_db_release(conn)
@@ -3178,7 +3239,7 @@ def _nft_projects_list(user):
         conn=_membership_db_connect()
         if not conn:return {"ok":False,"error":"database_unavailable","projects":[]}
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""SELECT project_id,name,description,collection_name,status,created_at,updated_at,ipfs_cid,ipfs_uri,marketplace_url,contract_id,contract_network,genesis_enabled,genesis_benefits
+            cur.execute("""SELECT project_id,name,description,collection_name,status,created_at,updated_at,ipfs_cid,ipfs_uri,marketplace_url,contract_id,contract_network,genesis_enabled,genesis_benefits,royalty_bps,onchain_asset_id
                            FROM ai_for_nft_projects WHERE owner_identity=%s ORDER BY updated_at DESC LIMIT 100""",(identity,)); rows=cur.fetchall()
         projects=[]
         for r in rows:
@@ -3186,7 +3247,7 @@ def _nft_projects_list(user):
                 "created_at":r["created_at"].isoformat() if r.get("created_at") else None,"updated_at":r["updated_at"].isoformat() if r.get("updated_at") else None,
                 "ipfs_cid":r.get("ipfs_cid") or "","ipfs_uri":r.get("ipfs_uri") or "","marketplace_url":r.get("marketplace_url") or "",
                 "contract_id":r.get("contract_id") or "","contract_network":r.get("contract_network") or "","genesis_enabled":bool(r.get("genesis_enabled")),
-                "genesis_benefits":r.get("genesis_benefits") or ""})
+                "genesis_benefits":r.get("genesis_benefits") or "","royalty_bps":int(r.get("royalty_bps") or NFT_DEFAULT_ROYALTY_BPS),"onchain_asset_id":r.get("onchain_asset_id") or ""})
         return {"ok":True,"projects":projects}
     except Exception as e:
         print(f"NFT projects list error: {e}"); return {"ok":False,"error":"nft_projects_list_failed","projects":[]}
@@ -3206,6 +3267,79 @@ def _pin_json_to_ipfs(metadata, filename="ai-for-nft.json"):
 
 def _nft_contract_status():
     return {"configured":bool(NFT_CONTRACT_ID and NFT_RPC_URL),"contract_id":NFT_CONTRACT_ID,"network":NFT_CONTRACT_NETWORK,"rpc_configured":bool(NFT_RPC_URL),"note":"Contract signing/minting requires a dedicated server-side signer; no private wallet key is stored in the browser."}
+
+def _nft_market_currency_allowed(currency):
+    c=str(currency or '').strip().upper()
+    return c in NFT_MARKETPLACE_CURRENCIES and (c != 'ZYN' or (NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER))
+
+def _nft_market_money(value):
+    try:
+        x=float(value)
+        if x <= 0 or x != x or x == float('inf'):
+            return None
+        return round(x,7)
+    except Exception:
+        return None
+
+def _nft_market_listing_row(cur, listing_id):
+    cur.execute("""SELECT l.*,p.name,p.description,p.collection_name,p.ipfs_cid,p.ipfs_uri,p.contract_id AS project_contract_id,p.contract_network AS project_contract_network
+                   FROM ai_for_nft_listings l JOIN ai_for_nft_projects p ON p.project_id=l.project_id WHERE l.listing_id=%s""", (listing_id,))
+    return cur.fetchone()
+
+def _nft_market_item(r):
+    if not r:return None
+    return {"listing_id":str(r["listing_id"]),"project_id":str(r["project_id"]),"name":r.get("name") or "NFT","description":r.get("description") or "","collection_name":r.get("collection_name") or "",
+            "ipfs_uri":r.get("ipfs_uri") or "","sale_type":r.get("sale_type"),"currency":r.get("currency"),"price":float(r.get("price") or 0),"starting_price":float(r.get("starting_price") or 0) if r.get("starting_price") is not None else None,
+            "reserve_price":float(r.get("reserve_price") or 0) if r.get("reserve_price") is not None else None,"buy_now_price":float(r.get("buy_now_price") or 0) if r.get("buy_now_price") is not None else None,
+            "bid_increment_bps":int(r.get("bid_increment_bps") or 0),"royalty_bps":int(r.get("royalty_bps") or 0),"marketplace_fee_bps":int(r.get("marketplace_fee_bps") or 0),
+            "starts_at":r["starts_at"].isoformat() if r.get("starts_at") else None,"expires_at":r["expires_at"].isoformat() if r.get("expires_at") else None,"status":r.get("status"),
+            "blockchain_network":r.get("blockchain_network") or "","contract_id":r.get("contract_id") or r.get("project_contract_id") or "","onchain_asset_id":r.get("onchain_asset_id") or "",
+            "settlement_tx_hash":r.get("settlement_tx_hash") or ""}
+
+def _nft_market_create_listing(user, body):
+    identity=_webapp_identity_key(user); project_id=str(body.get('project_id') or '').strip(); sale_type=str(body.get('sale_type') or 'fixed').strip().lower(); currency=str(body.get('currency') or 'PI').strip().upper()
+    if sale_type not in ('fixed','auction'): return {"ok":False,"error":"invalid_sale_type"},400
+    if not _nft_market_currency_allowed(currency): return {"ok":False,"error":"currency_not_available"},400
+    price=_nft_market_money(body.get('price')); start=_nft_market_money(body.get('starting_price') if body.get('starting_price') is not None else body.get('price'))
+    if not project_id or not price or (sale_type=='auction' and not start): return {"ok":False,"error":"project_and_price_required"},400
+    reserve=_nft_market_money(body.get('reserve_price')); buy_now=_nft_market_money(body.get('buy_now_price'))
+    royalty=int(body.get('royalty_bps',NFT_DEFAULT_ROYALTY_BPS) or 0); royalty=max(0,min(NFT_MAX_ROYALTY_BPS,royalty)); inc=int(body.get('bid_increment_bps',100) or 100); inc=max(1,min(10000,inc))
+    expires=body.get('expires_at'); network=str(body.get('blockchain_network') or NFT_CONTRACT_NETWORK).strip().lower()
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return {"ok":False,"error":"database_unavailable"},503
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM ai_for_nft_projects WHERE project_id=%s AND owner_identity=%s",(project_id,identity)); p=cur.fetchone()
+                if not p:return {"ok":False,"error":"nft_project_not_owned"},404
+                # Fail closed: a Marketplace listing must point at an on-chain NFT asset; no DB-only sale is allowed.
+                contract_id=str(p.get('contract_id') or NFT_CONTRACT_ID or '').strip(); asset_id=str(body.get('onchain_asset_id') or p.get('onchain_asset_id') or '').strip()
+                if str(p.get('status') or '') != 'published':return {"ok":False,"error":"nft_not_published"},409
+                if not p.get('ipfs_cid') or not contract_id or not asset_id or not NFT_RPC_URL:return {"ok":False,"error":"nft_not_onchain_ready"},409
+                cur.execute("SELECT 1 FROM ai_for_nft_listings WHERE project_id=%s AND status='active' LIMIT 1",(project_id,))
+                if cur.fetchone():return {"ok":False,"error":"nft_already_listed"},409
+                listing_id=str(uuid.uuid4())
+                cur.execute("""INSERT INTO ai_for_nft_listings(listing_id,project_id,seller_identity,sale_type,currency,price,starting_price,reserve_price,bid_increment_bps,buy_now_price,royalty_bps,marketplace_fee_bps,expires_at,status,blockchain_network,contract_id,onchain_asset_id)
+                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'active',%s,%s,%s)""",(listing_id,project_id,identity,sale_type,currency,price,start,reserve,inc,buy_now,royalty,NFT_MARKETPLACE_FEE_BPS,expires,network,contract_id,asset_id))
+                cur.execute("SELECT * FROM ai_for_nft_listings WHERE listing_id=%s",(listing_id,)); row=cur.fetchone()
+        return {"ok":True,"listing":_nft_market_item(row)},201
+    except Exception as e:
+        print(f"NFT listing create error: {e}"); return {"ok":False,"error":"nft_listing_create_failed"},503
+    finally:_membership_db_release(conn)
+
+def _nft_market_ohlc(cur, project_id, interval_seconds):
+    # Candles are generated only from blockchain-confirmed trades, never from listings/offers.
+    cur.execute("""SELECT EXTRACT(EPOCH FROM traded_at)::bigint AS ts, amount FROM ai_for_nft_trades WHERE project_id=%s AND status='confirmed_blockchain' ORDER BY traded_at ASC""",(project_id,)); rows=cur.fetchall()
+    buckets={}
+    for r in rows:
+        ts=int(r['ts']); bucket=(ts//interval_seconds)*interval_seconds; price=float(r['amount'] or 0)
+        c=buckets.get(bucket)
+        if not c:buckets[bucket]={"time":bucket,"open":price,"high":price,"low":price,"close":price,"volume":0.0}
+        else:
+            c['high']=max(c['high'],price); c['low']=min(c['low'],price); c['close']=price
+        c['volume']+=price
+    return list(buckets.values())
 
 def _external_app_safe_url(raw):
     raw = str(raw or "").strip()
@@ -3541,17 +3675,21 @@ async function renderExternalApps(){
  r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
 }
 async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
-function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">مسودات + Metadata + IPFS + تجهيز عقد Pi/Soroban + تحديد Marketplace + Genesis. لا يتم وضع أي مفتاح محفظة خاص في الواجهة.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم المشروع" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="وصف المشروع" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" placeholder="رابط Marketplace (اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><label class="small" style="display:flex;gap:8px;align-items:center;margin:8px 0"><input id="nftGenesis" type="checkbox"> نسخة Genesis خاصة بالمنصة</label><textarea id="nftGenesisBenefits" placeholder="مزايا Genesis (اختياري)" style="width:100%;min-height:70px;padding:12px;margin:7px 0;border-radius:10px"></textarea><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
-async function loadNFTStatus(){try{let x=await api('/api/app/nft/status');document.getElementById('nftInfra').innerHTML='<div class="row">IPFS: <span class="'+(x.ipfs?.configured?'ok':'warn')+'">'+(x.ipfs?.configured?'🟢 جاهز':'🟡 يحتاج إعداد الخادم')+'</span></div><div class="row">العقد: <span class="'+(x.contract?.configured?'ok':'warn')+'">'+(x.contract?.configured?'🟢 مرتبط':'🟡 يحتاج Contract/RPC')+'</span></div><div class="row">Marketplace: '+esc(x.marketplace?.url||'سيحدد لكل مشروع')+'</div><div class="row">Genesis: '+(x.genesis?.enabled?'🟢 مفعّل':'🟡 غير مفعّل')+'</div>'}catch(e){document.getElementById('nftInfra').textContent='⚠️ تعذر فحص NFT الآن.'}}
-async function pinNFTMetadata(){let m=document.getElementById('nftMsg');let metadata={name:document.getElementById('nftName')?.value.trim()||'AI for NFT',description:document.getElementById('nftDescription')?.value.trim()||'',collection:document.getElementById('nftCollection')?.value.trim()||'',marketplace:document.getElementById('nftMarketplace')?.value.trim()||'',genesis:!!document.getElementById('nftGenesis')?.checked,genesis_benefits:document.getElementById('nftGenesisBenefits')?.value.trim()||'',schema:'ai-for-nft-v2'};m.textContent='⏳ جاري رفع Metadata إلى IPFS...';try{let d=await api('/api/app/nft/ipfs',{method:'POST',body:JSON.stringify({metadata})});m.innerHTML='<div class="statusBox">✅ IPFS: <b>'+esc(d.ipfs?.cid||'')+'</b><br>'+esc(d.ipfs?.uri||'')+'</div>'}catch(e){m.textContent='⚠️ '+(e.message||'ipfs_failed')}}
-
-async function publishCurrentNFT(){let m=document.getElementById('nftMsg'),id=window.__AI_FOR_NFT_PROJECT_ID||'';if(!id){m.textContent='⚠️ احفظ المشروع أولًا.';return}try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'nft_publish',project_id:id})});if(!d.ok)throw new Error(d.error||'publish_failed');m.textContent='✅ تم نشر NFT في Marketplace ZynMart NFT.';loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'تعذر النشر')}}
-
-async function loadNFTProjects(){let r=document.getElementById('nftProjects');if(!r)return;try{let d=await api('/api/app/nft/projects');if(!d.ok)throw new Error(d.error||'load_failed');r.innerHTML=(d.projects||[]).length?(d.projects||[]).map(p=>`<div class="row">🖼️ <b>${esc(p.name||'بدون اسم')}</b> · ${esc(p.collection_name||'بدون مجموعة')} · ${esc(p.status)}</div>`).join(''):'<span class="small">لا توجد مسودات بعد.</span>'}catch(e){r.textContent='⚠️ '+(e.message||'')}}
+function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
+async function loadNFTStatus(){try{let x=await api('/api/app/nft/status');document.getElementById('nftInfra').innerHTML='<div class="row">IPFS: <span class="'+(x.ipfs?.configured?'ok':'warn')+'">'+(x.ipfs?.configured?'🟢 جاهز':'🟡 يحتاج إعداد الخادم')+'</span></div><div class="row">Pi Blockchain Contract: <span class="'+(x.contract?.configured?'ok':'warn')+'">'+(x.contract?.configured?'🟢 RPC + Contract مضبوط':'🟡 يحتاج Contract/RPC')+'</span></div><div class="row">Marketplace Fee: <b>'+((x.marketplace?.fee_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Default Royalty: <b>'+((x.marketplace?.default_royalty_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Currency: <b>Pi</b> · ZYN: '+(x.marketplace?.zyn?.enabled?'🟢 جاهز بعد الاعتماد':'🟡 مؤجل حتى اعتماد Mainnet')+'</div><div class="row">Genesis: '+(x.genesis?.enabled?'🔒 للمنصة فقط':'🟡 غير مفعّل')+'</div>'}catch(e){document.getElementById('nftInfra').textContent='⚠️ تعذر فحص NFT الآن.'}}
+async function pinNFTMetadata(){let m=document.getElementById('nftMsg');let metadata={name:document.getElementById('nftName')?.value.trim()||'AI for NFT',description:document.getElementById('nftDescription')?.value.trim()||'',collection:document.getElementById('nftCollection')?.value.trim()||'',schema:'ai-for-nft-v3',blockchain:'Pi',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100)};m.textContent='⏳ جاري رفع Metadata إلى IPFS...';try{let d=await api('/api/app/nft/ipfs',{method:'POST',body:JSON.stringify({metadata})});m.innerHTML='<div class="statusBox">✅ IPFS: <b>'+esc(d.ipfs?.cid||'')+'</b><br>'+esc(d.ipfs?.uri||'')+'</div>'}catch(e){m.textContent='⚠️ '+(e.message||'ipfs_failed')}}
 async function generateNFTMetadata(){let name=document.getElementById('nftName')?.value.trim()||'AI for NFT',description=document.getElementById('nftDescription')?.value.trim()||'',collection=document.getElementById('nftCollection')?.value.trim()||'';try{let d=await platformSvc('nft_metadata',{name,description,collection});document.getElementById('nftMsg').innerHTML='<div class="statusBox"><pre style="white-space:pre-wrap">'+esc(JSON.stringify(d.metadata,null,2))+'</pre></div>'}catch(e){document.getElementById('nftMsg').textContent='⚠️ تعذر إنشاء Metadata.'}}
-async function createNFTProject(){let m=document.getElementById('nftMsg');if(!m)return;m.textContent='⏳ جاري حفظ المسودة...';try{let d=await api('/api/app/nft/projects',{method:'POST',body:JSON.stringify({name:document.getElementById('nftName').value,collection_name:document.getElementById('nftCollection').value,description:document.getElementById('nftDescription').value,marketplace_url:document.getElementById('nftMarketplace')?.value||'',genesis_enabled:!!document.getElementById('nftGenesis')?.checked,genesis_benefits:document.getElementById('nftGenesisBenefits')?.value||''})});if(!d.ok)throw new Error(d.error||'save_failed');window.__AI_FOR_NFT_PROJECT_ID=d.project?.project_id||'';m.innerHTML='✅ تم حفظ مسودة NFT في PostgreSQL.'+(window.__AI_FOR_NFT_PROJECT_ID?'<br><button class="action" onclick="publishCurrentNFT()">🛍️ نشرها في Marketplace ZynMart NFT</button>':'');loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'')}}
-function renderNFTMarketplace(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ Marketplace ZynMart NFT</div><p class="small">سوق عرض NFTs المنشورة من داخل AI for، مع بيانات IPFS والعقد وطبقة مساعدة AI for.</p><div id="nftMarketList" class="statusBox">⏳ جاري تحميل الـNFT...</div></section>`;loadNFTMarketplace()}
-async function loadNFTMarketplace(){let r=document.getElementById('nftMarketList');if(!r)return;try{let d=await api('/api/app/nft/marketplace');let a=d.items||[];r.innerHTML=a.length?a.map(x=>`<div class="filebox"><h3>${esc(x.name||'NFT')}</h3><div class="small">${esc(x.collection_name||'')}</div><p>${esc(x.description||'')}</p><div class="row">IPFS: ${esc(x.ipfs_uri||'غير متوفر')}</div><div class="row">العقد: ${esc(x.contract_id||'غير مرتبط')} · ${esc(x.contract_network||'')}</div>${x.genesis_enabled?`<div class="row">Genesis: 🟢 ${esc(x.genesis_benefits||'مزايا خاصة')}</div>`:''}<button class="action" onclick="alert('🤖 AI for: يمكن استخدام بيانات الـNFT الظاهرة هنا للتحليل عند فتح بطاقة AI.')">🤖 لمسة AI for</button></div>`).join(''):'<div class="small">لا توجد NFTs منشورة للعامة حاليًا.</div>'}catch(e){r.textContent='⚠️ تعذر تحميل Marketplace الآن.'}}
+async function createNFTProject(){let m=document.getElementById('nftMsg');if(!m)return;m.textContent='⏳ جاري حفظ المسودة...';try{let d=await api('/api/app/nft/projects',{method:'POST',body:JSON.stringify({name:document.getElementById('nftName').value,collection_name:document.getElementById('nftCollection').value,description:document.getElementById('nftDescription').value,marketplace_url:'',genesis_enabled:false,genesis_benefits:'',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100),onchain_asset_id:document.getElementById('nftAssetId')?.value.trim()||''})});if(!d.ok)throw new Error(d.error||'save_failed');window.__AI_FOR_NFT_PROJECT_ID=d.project?.project_id||'';m.textContent='✅ تم حفظ مسودة NFT في PostgreSQL. استخدم زر نشر بجانب المشروع.';loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'')}}
+async function loadNFTProjects(){let r=document.getElementById('nftProjects');if(!r)return;try{let d=await api('/api/app/nft/projects');if(!d.ok)throw new Error(d.error||'load_failed');r.innerHTML=(d.projects||[]).length?(d.projects||[]).map(p=>`<div class="row">🖼️ <b>${esc(p.name||'بدون اسم')}</b> · ${esc(p.collection_name||'بدون مجموعة')} · ${esc(p.status)} · Royalty ${(Number(p.royalty_bps||0)/100).toFixed(2)}%${p.onchain_asset_id?' · On-chain':''}<button class="mini" style="float:left" onclick="publishMyNFT('${esc(p.project_id)}')">نشر</button></div>`).join(''):'<span class="small">لا توجد مسودات بعد.</span>'}catch(e){r.textContent='⚠️ '+(e.message||'')}}
+async function publishMyNFT(id){try{let d=await api('/api/app/nft/projects/'+encodeURIComponent(id)+'/publish',{method:'POST'});if(!d.ok)throw new Error(d.error||'publish_failed');window.__AI_FOR_NFT_PROJECT_ID=id;document.getElementById('nftMsg').textContent='✅ تم نشر NFT. الإدراج التجاري يتطلب أصل Pi Blockchain وIPFS.';loadNFTProjects()}catch(e){document.getElementById('nftMsg').textContent='⚠️ '+(e.message||'تعذر النشر')}}
+
+function openNFTListingForm(){let m=document.getElementById('nftMsg');if(!m)return;m.innerHTML='<div class="statusBox"><b>إدراج NFT في Marketplace</b><input id="marketPrice" type="number" min="0.0000001" step="0.0000001" placeholder="السعر بـ Pi" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><select id="marketType" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><option value="fixed">Fixed Price</option><option value="auction">Auction</option></select><input id="marketReserve" type="number" min="0" step="0.0000001" placeholder="Reserve Price (Auction اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="marketBuyNow" type="number" min="0" step="0.0000001" placeholder="Buy Now (Auction اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="marketIncrement" type="number" min="0.01" max="100" step="0.01" value="1" placeholder="Minimum Bid Increment %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTListing()">🚀 نشر الإدراج</button><div class="small" style="margin-top:8px">عملة Marketplace الحالية: Pi. رسوم ZynMart تُحسب من الإعدادات الآمنة للخادم.</div></div>'}
+async function createNFTListing(){try{let d=await api('/api/app/nft/marketplace/listings',{method:'POST',body:JSON.stringify({project_id:window.__AI_FOR_NFT_PROJECT_ID,sale_type:document.getElementById('marketType')?.value||'fixed',currency:'PI',price:Number(document.getElementById('marketPrice')?.value||0),starting_price:Number(document.getElementById('marketPrice')?.value||0),reserve_price:Number(document.getElementById('marketReserve')?.value||0)||null,buy_now_price:Number(document.getElementById('marketBuyNow')?.value||0)||null,bid_increment_bps:Math.round(Number(document.getElementById('marketIncrement')?.value||1)*100),onchain_asset_id:document.getElementById('nftAssetId')?.value.trim()||''})});if(!d.ok)throw new Error(d.error||'listing_failed');document.getElementById('nftMsg').innerHTML='✅ تم إنشاء Listing بانتظار التداول وفق حالة الـBlockchain.';renderNFTMarketplace()}catch(e){document.getElementById('nftMsg').textContent='⚠️ '+(e.message||'listing_failed')}}
+function renderNFTMarketplace(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ Marketplace ZynMart NFT</div><div class="statusBox"><b>Pi Blockchain Trading</b><div class="small">Fixed Price · Auction · Offers · Creator Royalty · ZynMart Fee · Price History · Candles</div></div><div id="nftMarketList" class="statusBox">⏳ جاري تحميل الـNFT...</div></section>`;loadNFTMarketplace()}
+async function loadNFTMarketplace(){let r=document.getElementById('nftMarketList');if(!r)return;try{let d=await api('/api/app/nft/marketplace');let a=d.items||[];r.innerHTML='<div class="row">💰 ZynMart Fee: '+((d.fee_bps||0)/100).toFixed(2)+'%</div>'+(a.length?a.map(x=>`<div class="filebox"><h3>${esc(x.name||'NFT')}</h3><div class="small">${esc(x.collection_name||'')}</div><p>${esc(x.description||'')}</p><div class="metricGrid"><div class="metric"><span>السعر</span><b>${Number(x.price||0).toFixed(4)} ${esc(x.currency||'PI')}</b></div><div class="metric"><span>النوع</span><b>${esc(x.sale_type||'fixed')}</b></div></div><div class="row">Royalty: ${(Number(x.royalty_bps||0)/100).toFixed(2)}% · Fee: ${(Number(x.marketplace_fee_bps||0)/100).toFixed(2)}%</div><div class="row">Blockchain: ${esc(x.blockchain_network||'')} · Asset: ${esc(x.onchain_asset_id||'غير مرتبط')}</div><button class="action" onclick="loadNFTChart('${esc(x.project_id)}')">📈 الشموع والسجل</button><button class="action green" onclick="makeNFTOffer('${esc(x.listing_id)}')">🤝 عرض شراء</button>${x.sale_type==='auction'?'<button class="action" onclick="makeNFTBid(\''+esc(x.listing_id)+'\')">🔨 مزايدة</button>':''}</div>`).join(''):'<div class="small">لا توجد Listings مؤهلة حاليًا. لا يتم عرض NFT كسوق حقيقي قبل ربطه بأصل Pi Blockchain.</div>');}catch(e){r.textContent='⚠️ تعذر تحميل Marketplace الآن.'}}
+async function makeNFTOffer(id){let amount=prompt('قيمة العرض بـ Pi:');if(!amount)return;try{let d=await api('/api/app/nft/marketplace/listings/'+encodeURIComponent(id)+'/offer',{method:'POST',body:JSON.stringify({amount:Number(amount),currency:'PI',expires_at:new Date(Date.now()+48*3600*1000).toISOString()})});alert(d.ok?'تم حفظ العرض بانتظار تسوية Pi/Blockchain.':(d.error||'تعذر العرض'))}catch(e){alert(e.message||'تعذر العرض')}}
+async function makeNFTBid(id){let amount=prompt('قيمة المزايدة بـ Pi:');if(!amount)return;try{let d=await api('/api/app/nft/marketplace/listings/'+encodeURIComponent(id)+'/bid',{method:'POST',body:JSON.stringify({amount:Number(amount)})});alert(d.ok?'تم تسجيل المزايدة بانتظار تسوية Pi/Blockchain.':(d.error||'تعذر المزايدة'))}catch(e){alert(e.message||'تعذر المزايدة')}}
+async function loadNFTChart(projectId){let host=document.getElementById('nftMarketList');if(!host)return;try{let d=await api('/api/app/nft/marketplace/charts/'+encodeURIComponent(projectId)+'?interval=1h');let cs=d.candles||[];let box=document.createElement('div');box.className='statusBox';box.innerHTML='<b>📊 Candlestick — 1H</b><div class="small">المصدر: صفقات مؤكدة على Blockchain فقط.</div>';if(!cs.length){box.innerHTML+='<div class="small">لا توجد صفقات مؤكدة كافية لعرض شموع حقيقية.</div>'}else{let pre=document.createElement('pre');pre.style.whiteSpace='pre-wrap';pre.textContent=cs.slice(-40).map(c=>new Date(c.time*1000).toLocaleString()+' | O '+c.open+' H '+c.high+' L '+c.low+' C '+c.close+' V '+c.volume).join('\n');box.appendChild(pre)}host.prepend(box)}catch(e){alert('تعذر تحميل بيانات الشموع')}}
 function renderAutoCore(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🚀 AUTO CORE</div><p class="small">Autonomous Business Agent — واجهة احترافية داخل AI for مع بقاء محرك Auto Core مستقلًا.</p><div class="statusBox autocore"><div class="metricGrid"><div class="metric">الحالة<b class="ok">ARCHITECTURE READY</b></div><div class="metric">الاستقلال<b class="info">SEPARATE CORE</b></div><div class="metric">التشغيل<b>AUTONOMOUS</b></div><div class="metric">الأمان<b class="ok">ISOLATED</b></div></div></div><div class="statusBox"><div class="row">🔎 Scout — البحث عن الفرص والعملاء</div><div class="row">🤝 Negotiate — فهم الطلب والتفاوض</div><div class="row">⚙️ Execute — تنفيذ المهمة كاملة</div><div class="row">📦 Deliver — التسليم</div><div class="row">💳 Settle — التسوية عبر طبقة دفع آمنة</div><div class="row">📜 Audit — سجل تدقيق</div></div><button class="action green" onclick="openAutoCore()">🚀 فتح Auto Core المستقل</button><p class="small">لا يتم تشغيل الوكيل من هذه الواجهة. تشغيله المستقل يظل خارج AI for؛ هذه البطاقة هي بوابة الوصول فقط.</p></section>`}
 function renderRevenue(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">💰 مركز الدخل</div><p class="small">منظومة ربح مبنية على خدمات حقيقية، مع حواجز تمنع المقامرة والخداع والـspam والنقرات الوهمية.</p><div class="statusBox safe"><div class="row">🛡️ Revenue Safety Gate — <span class="ok">مفعّل</span></div><div class="row">🎰 مقامرة/رهان مالي — <span class="danger">ممنوع</span></div><div class="row">🤖 نقرات إعلانية مصطنعة — <span class="danger">ممنوع</span></div><div class="row">📢 إعلان مدفوع مخفي — <span class="danger">ممنوع</span></div><div class="row">🔐 كشف بيانات الدفع الشخصية — <span class="danger">ممنوع</span></div></div><div class="statusBox"><div class="row">⭐ ZYNMART+ — 🚧 قريبًا</div><div class="row">📣 Advertising Network — 🚧 قريبًا وفق شروط المزود</div><div class="row">🎁 Rewarded Ads — 🚧 قريبًا وفق شروط المزود</div><div class="row">🏪 Promoted Stores/Products — 🚧 قريبًا</div><div class="row">🏢 Business Plans — 🚧 قريبًا</div></div></section>`}
 async function piStatus(){try{let d=await api('/api/app/pi');alert(d.text||'تعذر الحصول على بيانات Pi الموثوقة الآن.')}catch(e){alert('⚠️ لا توجد بيانات موثوقة متاحة الآن. لن نخمن.')}}
@@ -4303,20 +4441,152 @@ def webapp_nft_marketplace():
     if denied[0]:return denied
     conn=None
     try:
-        if not membership_db_ready:return jsonify({"ok":True,"items":[]})
         conn=_membership_db_connect()
-        if not conn:return jsonify({"ok":True,"items":[]})
+        if not conn:return jsonify({"ok":True,"items":[],"currencies":NFT_MARKETPLACE_CURRENCIES})
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT project_id,name,description,collection_name,status,ipfs_cid,ipfs_uri,marketplace_url,contract_id,contract_network,genesis_enabled,genesis_benefits,updated_at FROM ai_for_nft_projects WHERE status='published' ORDER BY updated_at DESC LIMIT 100")
-            rows=cur.fetchall()
-        items=[]
-        for r in rows:
-            items.append({"project_id":str(r["project_id"]),"name":r["name"],"description":r["description"],"collection_name":r["collection_name"],"status":r["status"],"ipfs_cid":r.get("ipfs_cid") or "","ipfs_uri":r.get("ipfs_uri") or "","marketplace_url":r.get("marketplace_url") or "","contract_id":r.get("contract_id") or "","contract_network":r.get("contract_network") or "","genesis_enabled":bool(r.get("genesis_enabled")),"genesis_benefits":r.get("genesis_benefits") or ""})
-        return jsonify({"ok":True,"items":items})
+            cur.execute("""SELECT l.*,p.name,p.description,p.collection_name,p.ipfs_uri,p.contract_id AS project_contract_id,p.contract_network AS project_contract_network
+                           FROM ai_for_nft_listings l JOIN ai_for_nft_projects p ON p.project_id=l.project_id
+                           WHERE l.status='active' AND l.starts_at<=NOW() AND (l.expires_at IS NULL OR l.expires_at>NOW()) ORDER BY l.created_at DESC LIMIT 200""")
+            rows=cur.fetchall(); items=[_nft_market_item(r) for r in rows]
+            return jsonify({"ok":True,"items":items,"currencies":NFT_MARKETPLACE_CURRENCIES,"fee_bps":NFT_MARKETPLACE_FEE_BPS,"default_royalty_bps":NFT_DEFAULT_ROYALTY_BPS,"zyn":{"enabled":bool(NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER),"asset_code":NFT_ZYN_ASSET_CODE}})
     except Exception as e:
-        print(f"NFT marketplace list error: {e}")
-        return jsonify({"ok":False,"error":"nft_marketplace_unavailable","items":[]}),503
+        print(f"NFT marketplace list error: {e}"); return jsonify({"ok":False,"error":"nft_marketplace_unavailable","items":[]}),503
     finally:_membership_db_release(conn)
+
+@app.route("/api/app/nft/marketplace/listings", methods=["POST"])
+def webapp_nft_marketplace_listing():
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    result,status=_nft_market_create_listing(user,request.get_json(silent=True) or {})
+    if result.get('ok'): control_audit(user['id'],'nft_marketplace_listing',result['listing']['listing_id'],result['listing'])
+    return jsonify(result),status
+
+@app.route("/api/app/nft/marketplace/listings/<listing_id>/cancel", methods=["POST"])
+def webapp_nft_marketplace_cancel(listing_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("UPDATE ai_for_nft_listings SET status='cancelled',updated_at=NOW() WHERE listing_id=%s AND seller_identity=%s AND status='active' RETURNING listing_id",(str(listing_id),_webapp_identity_key(user)))
+                row=cur.fetchone()
+                if not row:return jsonify({"ok":False,"error":"listing_not_owned_or_inactive"}),404
+        return jsonify({"ok":True,"cancelled":True,"listing_id":str(listing_id)})
+    except Exception as e:
+        print(f"NFT listing cancel error: {e}");return jsonify({"ok":False,"error":"listing_cancel_failed"}),503
+    finally:_membership_db_release(conn)
+
+@app.route("/api/app/nft/marketplace/listings/<listing_id>/offer", methods=["POST"])
+def webapp_nft_marketplace_offer(listing_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"stores")
+    if denied[0]:return denied
+    body=request.get_json(silent=True) or {}; amount=_nft_market_money(body.get('amount')); currency=str(body.get('currency') or 'PI').upper(); expires=body.get('expires_at')
+    if not amount or not _nft_market_currency_allowed(currency) or not expires:return jsonify({"ok":False,"error":"amount_currency_expiry_required"}),400
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                row=_nft_market_listing_row(cur,str(listing_id))
+                if not row or row.get('status')!='active':return jsonify({"ok":False,"error":"listing_not_active"}),404
+                if row.get('seller_identity')==_webapp_identity_key(user):return jsonify({"ok":False,"error":"self_offer_not_allowed"}),400
+                oid=str(uuid.uuid4()); cur.execute("INSERT INTO ai_for_nft_offers(offer_id,listing_id,project_id,bidder_identity,amount,currency,expires_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",(oid,str(listing_id),row['project_id'],_webapp_identity_key(user),amount,currency,expires))
+        return jsonify({"ok":True,"offer_id":oid,"status":"active","requires_pi_settlement":currency=='PI'})
+    except Exception as e:
+        print(f"NFT offer error: {e}");return jsonify({"ok":False,"error":"offer_create_failed"}),503
+    finally:_membership_db_release(conn)
+
+@app.route("/api/app/nft/marketplace/listings/<listing_id>/bid", methods=["POST"])
+def webapp_nft_marketplace_bid(listing_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"stores")
+    if denied[0]:return denied
+    body=request.get_json(silent=True) or {}; amount=_nft_market_money(body.get('amount'))
+    if not amount:return jsonify({"ok":False,"error":"amount_required"}),400
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                row=_nft_market_listing_row(cur,str(listing_id))
+                if not row or row.get('status')!='active' or row.get('sale_type')!='auction':return jsonify({"ok":False,"error":"auction_not_active"}),404
+                if row.get('seller_identity')==_webapp_identity_key(user):return jsonify({"ok":False,"error":"self_bid_not_allowed"}),400
+                cur.execute("SELECT MAX(amount) AS max_bid FROM ai_for_nft_bids WHERE listing_id=%s AND status='active'",(str(listing_id),)); mx=float((cur.fetchone() or {}).get('max_bid') or 0)
+                minimum=max(float(row.get('starting_price') or 0),mx*(1+int(row.get('bid_increment_bps') or 100)/10000))
+                if amount+1e-9<minimum:return jsonify({"ok":False,"error":"bid_too_low","minimum":round(minimum,7)}),400
+                bid_id=str(uuid.uuid4());cur.execute("INSERT INTO ai_for_nft_bids(bid_id,listing_id,bidder_identity,amount,currency) VALUES(%s,%s,%s,%s,%s)",(bid_id,str(listing_id),_webapp_identity_key(user),amount,row['currency'])); cur.execute("UPDATE ai_for_nft_listings SET expires_at=CASE WHEN expires_at IS NOT NULL AND expires_at <= NOW() + (%s * INTERVAL '1 second') THEN expires_at + (%s * INTERVAL '1 second') ELSE expires_at END, updated_at=NOW() WHERE listing_id=%s",(NFT_AUCTION_EXTENSION_SECONDS,NFT_AUCTION_EXTENSION_SECONDS,str(listing_id)))
+        return jsonify({"ok":True,"bid_id":bid_id,"amount":amount,"currency":row['currency'],"requires_pi_settlement":row['currency']=='PI'})
+    except Exception as e:
+        print(f"NFT bid error: {e}");return jsonify({"ok":False,"error":"bid_create_failed"}),503
+    finally:_membership_db_release(conn)
+
+@app.route("/api/app/nft/marketplace/offers/<offer_id>/decision", methods=["POST"])
+def webapp_nft_marketplace_offer_decision(offer_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    action=str((request.get_json(silent=True) or {}).get('action') or '').strip().lower()
+    if action not in ('accept','reject','counter'):return jsonify({"ok":False,"error":"invalid_offer_action"}),400
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""SELECT o.*,l.seller_identity,l.contract_id,l.onchain_asset_id,l.project_id,l.currency AS listing_currency
+                               FROM ai_for_nft_offers o JOIN ai_for_nft_listings l ON l.listing_id=o.listing_id WHERE o.offer_id=%s AND o.status='active'""",(str(offer_id),)); o=cur.fetchone()
+                if not o:return jsonify({"ok":False,"error":"offer_not_active"}),404
+                if o['seller_identity']!=_webapp_identity_key(user):return jsonify({"ok":False,"error":"not_offer_owner"}),403
+                if action=='reject':
+                    cur.execute("UPDATE ai_for_nft_offers SET status='rejected',updated_at=NOW() WHERE offer_id=%s",(str(offer_id),)); return jsonify({"ok":True,"status":"rejected"})
+                if action=='counter':
+                    amount=_nft_market_money((request.get_json(silent=True) or {}).get('amount'))
+                    if not amount:return jsonify({"ok":False,"error":"counter_amount_required"}),400
+                    nid=str(uuid.uuid4()); cur.execute("INSERT INTO ai_for_nft_offers(offer_id,listing_id,project_id,bidder_identity,amount,currency,expires_at) VALUES(%s,%s,%s,%s,%s,%s,NOW()+INTERVAL '48 hours')",(nid,o['listing_id'],o['project_id'],_webapp_identity_key(user),amount,o['currency']))
+                    cur.execute("UPDATE ai_for_nft_offers SET status='countered',updated_at=NOW() WHERE offer_id=%s",(str(offer_id),)); return jsonify({"ok":True,"status":"countered","counter_offer_id":nid})
+                # Acceptance only creates a pending settlement record. It never declares ownership transferred without blockchain confirmation.
+                cur.execute("UPDATE ai_for_nft_offers SET status='accepted_pending_blockchain',updated_at=NOW() WHERE offer_id=%s",(str(offer_id),))
+                fee=round(float(o['amount'])*NFT_MARKETPLACE_FEE_BPS/10000,7); royalty=0.0
+                cur.execute("INSERT INTO ai_for_nft_trades(trade_id,listing_id,project_id,seller_identity,buyer_identity,amount,currency,marketplace_fee,creator_royalty,seller_proceeds,status) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending_blockchain')",(str(uuid.uuid4()),o['listing_id'],o['project_id'],o['seller_identity'],o['bidder_identity'],o['amount'],o['currency'],fee,royalty,round(float(o['amount'])-fee-royalty,7)))
+                return jsonify({"ok":True,"status":"accepted_pending_blockchain","requires_blockchain_settlement":True})
+    except Exception as e:
+        print(f"NFT offer decision error: {e}");return jsonify({"ok":False,"error":"offer_decision_failed"}),503
+    finally:_membership_db_release(conn)
+
+@app.route("/api/app/nft/marketplace/charts/<project_id>", methods=["GET"])
+def webapp_nft_marketplace_chart(project_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"stores")
+    if denied[0]:return denied
+    interval=str(request.args.get('interval','1h')).lower(); seconds={'1m':60,'5m':300,'15m':900,'1h':3600,'4h':14400,'1d':86400,'1w':604800}.get(interval)
+    if not seconds:return jsonify({"ok":False,"error":"invalid_interval"}),400
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            candles=_nft_market_ohlc(cur,str(project_id),seconds)
+        return jsonify({"ok":True,"project_id":str(project_id),"interval":interval,"candles":candles,"source":"confirmed_blockchain_trades_only"})
+    except Exception as e:
+        print(f"NFT chart error: {e}");return jsonify({"ok":False,"error":"chart_unavailable","candles":[]}),503
+    finally:_membership_db_release(conn)
+
+@app.route("/api/app/nft/marketplace/config", methods=["GET"])
+def webapp_nft_marketplace_config():
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"stores")
+    if denied[0]:return denied
+    return jsonify({"ok":True,"currency":"PI","currencies":NFT_MARKETPLACE_CURRENCIES,"fee_bps":NFT_MARKETPLACE_FEE_BPS,"default_royalty_bps":NFT_DEFAULT_ROYALTY_BPS,"max_royalty_bps":NFT_MAX_ROYALTY_BPS,"auction_extension_seconds":NFT_AUCTION_EXTENSION_SECONDS,"blockchain_network":NFT_CONTRACT_NETWORK,"contract_configured":bool(NFT_CONTRACT_ID and NFT_RPC_URL),"zyn":{"enabled":bool(NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER),"asset_code":NFT_ZYN_ASSET_CODE,"issuer":NFT_ZYN_ISSUER if NFT_ZYN_MAINNET_APPROVED else ""}})
 
 @app.route("/api/app/nft/projects", methods=["GET", "POST"])
 def webapp_nft_projects():
@@ -4327,10 +4597,29 @@ def webapp_nft_projects():
     if request.method == "GET":
         return jsonify(_nft_projects_list(user))
     body = request.get_json(silent=True) or {}
-    result = _nft_project_create(user, body.get("name"), body.get("description"), body.get("collection_name"), body.get("marketplace_url"), body.get("genesis_enabled"), body.get("genesis_benefits"))
+    result = _nft_project_create(user, body.get("name"), body.get("description"), body.get("collection_name"), body.get("marketplace_url"), body.get("genesis_enabled"), body.get("genesis_benefits"), body.get("royalty_bps", NFT_DEFAULT_ROYALTY_BPS), body.get("onchain_asset_id", ""))
     if result.get("ok"):
         control_audit(user["id"], "nft_project_create", result["project"]["project_id"], {"name": result["project"]["name"]})
     return jsonify(result), (201 if result.get("ok") else 503)
+
+@app.route("/api/app/nft/projects/<project_id>/publish", methods=["POST"])
+def webapp_nft_project_publish(project_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("UPDATE ai_for_nft_projects SET status='published',updated_at=NOW() WHERE project_id=%s AND owner_identity=%s AND genesis_enabled=FALSE RETURNING project_id",(str(project_id),_webapp_identity_key(user)))
+                row=cur.fetchone()
+                if not row:return jsonify({"ok":False,"error":"project_not_found_or_genesis_restricted"}),404
+        return jsonify({"ok":True,"project_id":str(project_id),"status":"published"})
+    except Exception as e:
+        print(f"NFT public publish error: {e}");return jsonify({"ok":False,"error":"nft_publish_failed"}),503
+    finally:_membership_db_release(conn)
 
 @app.route("/api/app/nft/ipfs", methods=["POST"])
 def webapp_nft_ipfs():
@@ -4360,7 +4649,7 @@ def webapp_nft_status():
     if err:return err,code
     denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
-    return jsonify({"ok":True,"ipfs":{"provider":NFT_IPFS_PROVIDER,"configured":bool(NFT_IPFS_JWT)},"contract":_nft_contract_status(),"marketplace":{"url":NFT_MARKETPLACE_URL},"genesis":{"enabled":NFT_GENESIS_ENABLED,"name":NFT_GENESIS_NAME,"benefits":NFT_GENESIS_BENEFITS}})
+    return jsonify({"ok":True,"ipfs":{"provider":NFT_IPFS_PROVIDER,"configured":bool(NFT_IPFS_JWT)},"contract":_nft_contract_status(),"marketplace":{"url":NFT_MARKETPLACE_URL,"fee_bps":NFT_MARKETPLACE_FEE_BPS,"default_royalty_bps":NFT_DEFAULT_ROYALTY_BPS,"max_royalty_bps":NFT_MAX_ROYALTY_BPS,"currencies":NFT_MARKETPLACE_CURRENCIES,"auction_extension_seconds":NFT_AUCTION_EXTENSION_SECONDS,"zyn":{"enabled":bool(NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER),"asset_code":NFT_ZYN_ASSET_CODE}},"genesis":{"enabled":NFT_GENESIS_ENABLED,"name":NFT_GENESIS_NAME,"benefits":NFT_GENESIS_BENEFITS}})
 
 @app.route("/api/app/wallet", methods=["GET"])
 def webapp_wallet():
@@ -4725,7 +5014,7 @@ def owner_feature_tests(user):
     add("external_apps_public_state_separation", callable(globals().get("_external_apps_payload")) and callable(globals().get("_external_app_set_open")), "External app public visibility is controlled separately from Owner inspection")
     add("conversation_persistence", callable(globals().get("_webapp_save_history")) and callable(globals().get("_webapp_history")), "Persistent conversation helpers are present")
     add("durable_persistence_architecture", bool(DATABASE_URL) and callable(globals().get("_persistence_probe")), "Critical platform persistence has a PostgreSQL path and a cross-deploy probe; Render filesystem is not used for the probe")
-    add("nft_studio_architecture", callable(globals().get("_nft_project_create")) and callable(globals().get("_nft_projects_list")) and "webapp_nft_projects" in app.view_functions, "NFT Studio drafts have a PostgreSQL-backed project path; minting/market transactions remain future")
+    add("nft_studio_architecture", callable(globals().get("_nft_project_create")) and callable(globals().get("_nft_projects_list")) and "webapp_nft_projects" in app.view_functions and "webapp_nft_marketplace_listing" in app.view_functions, "NFT Studio + Marketplace order layer is PostgreSQL-backed; completed sales remain blockchain-gated")
     add("email_verification_routes", all(x in app.view_functions for x in ("platform_email_verify","platform_email_resend")), "Email registration requires server-side verification code before session issuance")
     add("email_verification_schema", "ai_for_email_verifications" in globals() or callable(globals().get("_verify_email_code")), "Verification-code persistence helpers are present")
     add("telegram_widget_dom_loader", "createElement('script')" in open(__file__, encoding="utf-8").read(), "Telegram widget is inserted as a real DOM script element, not innerHTML")

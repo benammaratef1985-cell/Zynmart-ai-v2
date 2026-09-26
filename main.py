@@ -159,7 +159,7 @@ DB_CONNECT_TIMEOUT = int(os.environ.get("AI_FOR_DB_CONNECT_TIMEOUT", "8"))
 # database remains durable and requests fail fast instead of looking like data loss.
 DB_STATEMENT_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_STATEMENT_TIMEOUT_MS", "10000"))
 DB_LOCK_TIMEOUT_MS = int(os.environ.get("AI_FOR_DB_LOCK_TIMEOUT_MS", "5000"))
-DB_SCHEMA_VERSION = 9
+DB_SCHEMA_VERSION = 10
 WEB_IDENTITY_COOKIE = "ai_for_sid"
 WEB_IDENTITY_MAX_AGE = 60 * 60 * 24 * 90
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
@@ -182,6 +182,13 @@ NFT_RPC_URL = os.environ.get("NFT_RPC_URL", "").strip()
 NFT_GENESIS_ENABLED = str(os.environ.get("NFT_GENESIS_ENABLED", "true")).lower() in ("1","true","yes","on")
 NFT_GENESIS_NAME = os.environ.get("NFT_GENESIS_NAME", "AI for Genesis").strip()
 NFT_GENESIS_BENEFITS = os.environ.get("NFT_GENESIS_BENEFITS", "").strip()
+# V12 NFT image generation: self-hosted/open-model only; no paid image key.
+NFT_IMAGE_AI_URL = os.environ.get("NFT_IMAGE_AI_URL", "").strip().rstrip("/")
+NFT_IMAGE_AI_MODEL = os.environ.get("NFT_IMAGE_AI_MODEL", "black-forest-labs/FLUX.1-schnell").strip()
+NFT_IMAGE_AI_TIMEOUT = max(10, min(120, int(os.environ.get("NFT_IMAGE_AI_TIMEOUT", "60"))))
+NFT_IMAGE_MAX_PIXELS = max(262144, min(4194304, int(os.environ.get("NFT_IMAGE_MAX_PIXELS", str(1024*1024)))))
+# Secure external signer boundary; private keys are never accepted here.
+NFT_CHAIN_SERVICE_URL = os.environ.get("NFT_CHAIN_SERVICE_URL", "").strip().rstrip("/")
 # NFT Marketplace trading layer: pricing, fees, orders, auctions, offers and OHLC data.
 NFT_MARKETPLACE_FEE_BPS = max(0, min(10000, int(os.environ.get("NFT_MARKETPLACE_FEE_BPS", "200"))))
 NFT_DEFAULT_ROYALTY_BPS = max(0, min(10000, int(os.environ.get("NFT_DEFAULT_ROYALTY_BPS", "500"))))
@@ -501,10 +508,18 @@ def _ensure_db_schema(cur):
             correct BOOLEAN NOT NULL, points BIGINT NOT NULL DEFAULT 0, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )
     """)
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_reputation (identity_key TEXT PRIMARY KEY, score BIGINT NOT NULL DEFAULT 0, level INTEGER NOT NULL DEFAULT 1, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_reputation_events (event_id UUID PRIMARY KEY, identity_key TEXT NOT NULL, event_type TEXT NOT NULL, points BIGINT NOT NULL DEFAULT 0, source_key TEXT NOT NULL DEFAULT '', metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(identity_key,event_type,source_key))""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_reward_ledger (ledger_id UUID PRIMARY KEY, identity_key TEXT NOT NULL, event_type TEXT NOT NULL, points BIGINT NOT NULL DEFAULT 0, source_key TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), UNIQUE(identity_key,event_type,source_key))""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_zynmart_plus (identity_key TEXT PRIMARY KEY, tier TEXT NOT NULL DEFAULT 'free', active BOOLEAN NOT NULL DEFAULT FALSE, benefits JSONB NOT NULL DEFAULT '{}'::jsonb, started_at TIMESTAMPTZ, expires_at TIMESTAMPTZ, updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_nft_image_jobs (job_id UUID PRIMARY KEY, identity_key TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'created', image_url TEXT NOT NULL DEFAULT '', image_cid TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_support_identity ON ai_for_support_tickets(identity_key, updated_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_recent ON ai_for_community_posts(created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_pair ON ai_for_messages(sender_identity, recipient_identity, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_recipient ON ai_for_messages(recipient_identity, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_reputation_events_identity_time ON ai_for_reputation_events(identity_key, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_reward_ledger_identity_time ON ai_for_reward_ledger(identity_key, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_image_jobs_identity_time ON ai_for_nft_image_jobs(identity_key, created_at DESC)")
     cur.execute("""INSERT INTO ai_for_db_meta(key,value) VALUES('schema_version',%s)
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
     db_schema_version = DB_SCHEMA_VERSION
@@ -2945,7 +2960,7 @@ PLATFORM_STATUS = {
     "autocore": {"active": ["واجهة مستقلة داخل AI for", "فصل الكود والصلاحيات", "تشغيل مستقل عن واجهة AI for", "Kill Switch / سجل تدقيق مخطط"], "soon": ["ربط الخدمة المستقلة", "التنفيذ التجاري الفعلي", "طبقة التسوية الآمنة"]},
     "revenue": {"active": ["Revenue Safety Gate", "منع المقامرة والـspam والنقرات الوهمية", "إخفاء البيانات المالية الشخصية", "تمييز المحتوى المدفوع بوضوح"], "soon": ["ZYNMART+", "شبكات الإعلانات", "Rewarded Ads وفق سياسات المزود", "Promoted Products/Stores", "خطط Business", "الفوترة والتسوية الآمنة"]},
     "external_apps": {"active": ["إضافة تطبيق خارجي بالرابط", "استخراج الاسم والهوية البصرية عند توفرها", "فتح مباشر للتطبيق", "تتبع زيارات الوصول داخل AI for"], "soon": ["برامج إحالة واتفاقيات Revenue Share", "Featured Apps", "خطط Business للتطبيقات"]},
-    "nft": {"active": ["مسودات المشاريع", "إنشاء Metadata JSON", "إدارة المشاريع"], "soon": ["مصمم بصري كامل", "بوابة عرض عالمية", "Minting", "البيع/المعاملات", "تكاملات Web3"]}
+    "nft": {"active": ["مسودات المشاريع", "إنشاء Metadata JSON", "إدارة المشاريع", "مولد صورة NFT بخادم ذاتي عند الإعداد", "Marketplace ZynMart NFT", "الأسعار والمزادات والعروض", "شموع من صفقات Blockchain المؤكدة"], "soon": ["Minting تلقائي عبر خدمة توقيع آمنة", "التسوية التجارية الكاملة على السلسلة", "ZYN بعد الاعتماد"]}
 }
 
 def _webapp_data_check(init_data):
@@ -3252,6 +3267,47 @@ def _nft_projects_list(user):
     except Exception as e:
         print(f"NFT projects list error: {e}"); return {"ok":False,"error":"nft_projects_list_failed","projects":[]}
     finally: _membership_db_release(conn)
+
+def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
+    prompt=str(prompt or "").strip()[:2000]
+    if not prompt:return {"ok":False,"error":"prompt_required"},400
+    if not NFT_IMAGE_AI_URL:return {"ok":False,"error":"nft_image_ai_not_configured","model":NFT_IMAGE_AI_MODEL},503
+    try:
+        width=max(256,min(2048,int(width))); height=max(256,min(2048,int(height))); steps=max(1,min(12,int(steps)))
+        if width*height>NFT_IMAGE_MAX_PIXELS:return {"ok":False,"error":"image_too_large"},400
+    except Exception:return {"ok":False,"error":"invalid_image_parameters"},400
+    identity=_webapp_identity_key(user); job_id=str(uuid.uuid4()); conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return {"ok":False,"error":"database_unavailable"},503
+        with conn:
+            with conn.cursor() as cur:cur.execute("INSERT INTO ai_for_nft_image_jobs(job_id,identity_key,prompt,model,status) VALUES(%s,%s,%s,%s,'running')",(job_id,identity,prompt,NFT_IMAGE_AI_MODEL))
+        r=requests.post(NFT_IMAGE_AI_URL+"/generate",json={"prompt":prompt,"model":NFT_IMAGE_AI_MODEL,"width":width,"height":height,"steps":steps},timeout=NFT_IMAGE_AI_TIMEOUT)
+        try:data=r.json() or {}
+        except Exception:data={}
+        if not 200<=r.status_code<300:raise RuntimeError(f"image_service_http_{r.status_code}")
+        image_url=str(data.get("image_url") or data.get("url") or "").strip(); image_b64=str(data.get("b64_json") or "").strip()
+        if not image_url and not image_b64:raise RuntimeError("image_service_no_output")
+        conn2=_membership_db_connect()
+        try:
+            if conn2:
+                with conn2:
+                    with conn2.cursor() as cur:cur.execute("UPDATE ai_for_nft_image_jobs SET status='ready',image_url=%s,updated_at=NOW() WHERE job_id=%s",(image_url,job_id))
+        finally:_membership_db_release(conn2)
+        _record_reputation_event(user,"nft_create",job_id)
+        out={"ok":True,"job_id":job_id,"model":NFT_IMAGE_AI_MODEL,"image_url":image_url,"generated_by":"self_hosted_open_model"}
+        if image_b64:out["b64_json"]=image_b64
+        return out,200
+    except Exception as e:
+        print(f"NFT image generation error: {e}")
+        try:
+            conn2=_membership_db_connect()
+            if conn2:
+                with conn2:
+                    with conn2.cursor() as cur:cur.execute("UPDATE ai_for_nft_image_jobs SET status='failed',error=%s,updated_at=NOW() WHERE job_id=%s",(str(e)[:300],job_id))
+        except Exception:pass
+        finally:_membership_db_release(conn2 if 'conn2' in locals() else None)
+        return {"ok":False,"error":"nft_image_generation_failed","detail":str(e)[:160]},503
 
 def _pin_json_to_ipfs(metadata, filename="ai-for-nft.json"):
     if not NFT_IPFS_JWT:return None,"ipfs_not_configured"
@@ -3651,12 +3707,12 @@ body{background:#f4f5f7!important;color:#111827!important}
 .detail .action.dark{background:#fff!important;color:#111827!important;border-color:rgba(0,0,0,.12)!important}
 .detail [style*="background:#0a1018"],.detail [style*="background:#0b1119"],.detail [style*="background:#0a1018"]{background:#fff!important;color:#111827!important;border-color:rgba(0,0,0,.12)!important}
 .detail [style*="color:white"],.detail [style*="color: white"]{color:#111827!important}
-</style></head>
+</style><style>/* V12 iOS/mobile presentation layer only. */:root{--bg:#f5f7fb;--panel:#fff;--panel2:#fff;--panel3:#fff;--text:#111827;--muted:#667085;--line:rgba(15,23,42,.09);--shadow:0 10px 30px rgba(15,23,42,.08)}body{background:linear-gradient(180deg,#f8fafc 0%,#eef2f7 100%);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,"Segoe UI",Arial,sans-serif}.app{max-width:820px;padding-bottom:108px}.top{background:rgba(248,250,252,.86);color:#111827;border-bottom:1px solid rgba(15,23,42,.08);padding-top:calc(8px + env(safe-area-inset-top));box-shadow:0 4px 20px rgba(15,23,42,.05)}.brand{color:#111827}.sub{color:#667085}.iconbtn{background:rgba(255,255,255,.82);color:#111827;border-color:rgba(15,23,42,.08);box-shadow:0 4px 14px rgba(15,23,42,.06)}.hero h1{color:#111827}.hero p,.small{color:#667085}.banner,.card,.statusBox,.filebox,.back{background:rgba(255,255,255,.94);color:#111827;border-color:rgba(15,23,42,.08);box-shadow:0 8px 26px rgba(15,23,42,.07)}.card h3,.ownerSettingTitle,.ownerSectionHead,.sectionTitle{color:#111827;text-shadow:none}.card p{color:#667085}.bottom{left:10px;right:10px;bottom:calc(8px + env(safe-area-inset-bottom));border:1px solid rgba(15,23,42,.08);border-radius:24px;background:rgba(255,255,255,.88);backdrop-filter:blur(22px);box-shadow:0 10px 32px rgba(15,23,42,.14);padding:7px 6px}.nav{color:#667085}.nav.active{color:#111827}.detail .row,.detail .ownerSettingRow{color:#111827;border-color:rgba(15,23,42,.08)}.detail [style*="background:#0a1018"],.detail [style*="background:#0b1119"]{background:#fff!important;color:#111827!important;border-color:rgba(15,23,42,.10)!important}.detail [style*="color:white"],.detail [style*="color: white"]{color:#111827!important}@media(max-width:600px){.grid{grid-template-columns:1fr 1fr;gap:10px;padding:10px}.card{min-height:132px;padding:13px}.hero{padding:18px 14px 8px}.hero h1{font-size:25px}.bottom .nav{font-size:10px;min-width:14%}.bottom .nav b{font-size:19px}}</style></head>
 <body><div class="app"><div class="top"><button class="iconbtn" onclick="goHome()">⌂</button><div class="brand">AI for<div class="sub" id="userline">جاري التحقق...</div></div><img id="headerAvatar" class="headerAvatar" alt="" style="display:none"><button class="iconbtn" onclick="tg?.close()">✕</button></div><main id="view"><div class="center"><div class="loader">⏳</div><p>جاري فتح المنصة...</p></div></main></div>
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button class="nav" id="n-account" onclick="accountBox()"><b>👤</b>الحساب</button></nav>
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
-async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':(tg?.initData||'')},channel==='pi'&&token?{'Authorization':'Bearer '+token}:{},opts.headers||{});if(opts.body instanceof FormData)delete opts.headers['Content-Type'];try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
+async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':(tg?.initData||'')},token?{'Authorization':'Bearer '+token}:{},opts.headers||{});if(opts.body instanceof FormData)delete opts.headers['Content-Type'];try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
 async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}
@@ -3675,7 +3731,8 @@ async function renderExternalApps(){
  r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
 }
 async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
-function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
+function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>🎨 مولد صورة NFT — AI مستقل</b><p class="small">خادم ذاتي الاستضافة بنموذج مفتوح/مجاني فقط، ولا يستهلك مفاتيح AI النصي.</p><textarea id="nftImagePrompt" placeholder="اكتب وصف الصورة التي تريدها..." style="width:100%;min-height:80px;padding:12px;margin:7px 0;border-radius:10px"></textarea><button class="action green" onclick="generateNFTImage()">🎨 توليد الصورة</button><div id="nftImageResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
+async function generateNFTImage(){let p=document.getElementById("nftImagePrompt")?.value.trim(),r=document.getElementById("nftImageResult");if(!p){if(r)r.textContent="⚠️ اكتب وصف الصورة أولًا.";return}if(r)r.textContent="⏳ جاري توليد الصورة...";try{let d=await api("/api/app/nft/image",{method:"POST",body:JSON.stringify({prompt:p,width:1024,height:1024,steps:4})});if(!d.ok)throw new Error(d.error||"image_generation_failed");r.innerHTML=(d.image_url?"<img src=\""+esc(d.image_url)+"\" style=\"width:100%;border-radius:16px;margin-top:8px\">":"<div class=\"statusBox\">تم التوليد، لكن الخدمة لم تعد رابط عرض مباشر.</div>")+"<div class=\"small\">النموذج: "+esc(d.model||"open model")+"</div>"}catch(e){if(r)r.textContent="⚠️ "+(e.message||"تعذر توليد الصورة")}}
 async function loadNFTStatus(){try{let x=await api('/api/app/nft/status');document.getElementById('nftInfra').innerHTML='<div class="row">IPFS: <span class="'+(x.ipfs?.configured?'ok':'warn')+'">'+(x.ipfs?.configured?'🟢 جاهز':'🟡 يحتاج إعداد الخادم')+'</span></div><div class="row">Pi Blockchain Contract: <span class="'+(x.contract?.configured?'ok':'warn')+'">'+(x.contract?.configured?'🟢 RPC + Contract مضبوط':'🟡 يحتاج Contract/RPC')+'</span></div><div class="row">Marketplace Fee: <b>'+((x.marketplace?.fee_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Default Royalty: <b>'+((x.marketplace?.default_royalty_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Currency: <b>Pi</b> · ZYN: '+(x.marketplace?.zyn?.enabled?'🟢 جاهز بعد الاعتماد':'🟡 مؤجل حتى اعتماد Mainnet')+'</div><div class="row">Genesis: '+(x.genesis?.enabled?'🔒 للمنصة فقط':'🟡 غير مفعّل')+'</div>'}catch(e){document.getElementById('nftInfra').textContent='⚠️ تعذر فحص NFT الآن.'}}
 async function pinNFTMetadata(){let m=document.getElementById('nftMsg');let metadata={name:document.getElementById('nftName')?.value.trim()||'AI for NFT',description:document.getElementById('nftDescription')?.value.trim()||'',collection:document.getElementById('nftCollection')?.value.trim()||'',schema:'ai-for-nft-v3',blockchain:'Pi',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100)};m.textContent='⏳ جاري رفع Metadata إلى IPFS...';try{let d=await api('/api/app/nft/ipfs',{method:'POST',body:JSON.stringify({metadata})});m.innerHTML='<div class="statusBox">✅ IPFS: <b>'+esc(d.ipfs?.cid||'')+'</b><br>'+esc(d.ipfs?.uri||'')+'</div>'}catch(e){m.textContent='⚠️ '+(e.message||'ipfs_failed')}}
 async function generateNFTMetadata(){let name=document.getElementById('nftName')?.value.trim()||'AI for NFT',description=document.getElementById('nftDescription')?.value.trim()||'',collection=document.getElementById('nftCollection')?.value.trim()||'';try{let d=await platformSvc('nft_metadata',{name,description,collection});document.getElementById('nftMsg').innerHTML='<div class="statusBox"><pre style="white-space:pre-wrap">'+esc(JSON.stringify(d.metadata,null,2))+'</pre></div>'}catch(e){document.getElementById('nftMsg').textContent='⚠️ تعذر إنشاء Metadata.'}}
@@ -3722,7 +3779,7 @@ async function createPost(){let b=document.getElementById('postBody').value.trim
 function messagesBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الرسائل</button><section class="detail"><div class="sectionTitle">💬 رسائل AI for</div><input id="msgTo" placeholder="معرّف الحساب المستلم" style="width:100%;padding:12px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px"><textarea id="msgBody" placeholder="الرسالة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"></textarea><button class="action" onclick="sendPlatformMessage()">إرسال</button><div id="msgs" class="statusBox">⏳</div></section>`;loadMessages()}
 async function loadMessages(){try{let d=await platformSvc('messages');document.getElementById('msgs').innerHTML=(d.messages||[]).map(m=>'<div class="row"><b>'+esc(m.sender_identity)+'</b> → '+esc(m.recipient_identity)+'<br>'+esc(m.body)+'<div class="small">'+esc(m.created_at||'')+'</div></div>').join('')||'لا توجد رسائل.'}catch(e){document.getElementById('msgs').textContent='⚠️ تعذر تحميل الرسائل.'}}
 async function sendPlatformMessage(){let to=document.getElementById('msgTo').value.trim(),body=document.getElementById('msgBody').value.trim();if(!to||!body)return;try{await platformSvc('message_send',{recipient:to,body});document.getElementById('msgBody').value='';loadMessages()}catch(e){alert('⚠️ تعذر إرسال الرسالة.')}}
-function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
+function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط والسمعة</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi. السمعة تُبنى من نشاطات واضحة وقابلة للتدقيق.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b><br>سمعة الحساب: <b>'+esc(d.reputation?.score||0)+'</b> · المستوى '+esc(d.reputation?.level||1)+'<br>ZYNMART+: <b>'+esc(d.plus?.active?'مفعّل':'غير مفعّل')+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
 function funBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الترفيه</button><section class="detail"><div class="sectionTitle">🎮 اختبار سريع</div><div class="statusBox"><b>سؤال اليوم</b><p>ما هو اختصار HTTP؟</p><button class="mini" onclick="quiz('a')">HyperText Transfer Process</button><button class="mini" onclick="quiz('b')">HyperText Transfer Protocol</button></div><div id="quizResult"></div></section>`}
 async function quiz(option){try{let d=await platformSvc('quiz_answer',{question_key:'http-001',option});let correct=Number(d.awarded||0)>0;document.getElementById('quizResult').innerHTML='<div class="statusBox">'+(correct?'✅ إجابة صحيحة — +10 نقاط':'❌ إجابة غير صحيحة — +0')+'<br>الرصيد: '+esc(d.points||0)+'</div>'}catch(e){document.getElementById('quizResult').textContent='⚠️ تعذر تسجيل المحاولة.'}}
 function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row" style="display:flex;align-items:center;gap:12px">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox"><b>👛 المحفظة الإلكترونية</b> <span class="badge soon">🚧 قريبًا</span><p class="small">لن نطلب أي مفتاح خاص أو عبارة سرية.</p></div></section>';loadFavorites();loadIdentityStatus();loadProfilePhoto()}
@@ -4248,6 +4305,7 @@ def webapp_bootstrap():
     if elapsed > 5:
         print(f"WebApp bootstrap slow: {elapsed:.2f}s")
     payload.setdefault("system", {})["persistence"] = "postgresql"
+    _record_reputation_event(user, "visit", datetime.now(ZoneInfo("Africa/Tunis")).date().isoformat())
     return jsonify(payload), 200, {"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"}
 
 @app.route("/api/app/pi", methods=["GET"])
@@ -4298,6 +4356,7 @@ def webapp_ai():
             if evidence_mode and not search_res:
                 return jsonify({"ok": False, "text": "⚠️ وضع Evidence Mode مفعّل، لكن تعذر الحصول على مصدر موثوق الآن."}), 503
             reply = _webapp_ai_with_context(user, conversation_id, question, user.get("first_name", ""), search_context=search_res)
+        _record_reputation_event(user, "ai_use", f"{conversation_id}:{hashlib.sha256(question.encode('utf-8')).hexdigest()[:16]}")
         return jsonify({"ok": True, "text": reply or AI_PRIVATE_FAILURE_MESSAGE})
     except Exception as e:
         print(f"WebApp AI error: {e}")
@@ -4422,7 +4481,7 @@ def webapp_account_photo():
     saved = save_web_profile_photo(user.get("platform_account_id"), raw, mime) if user.get("auth_type") == "web" else save_profile_photo(user.get("id"), raw, mime)
     if not saved:
         return jsonify({"ok":False,"error":"photo_persistence_unavailable"}),503
-    return jsonify({"ok":True,"photo_url":"/api/app/account/photo"})
+    return jsonify({"ok":True,"photo_url":"/api/app/account/photo?v="+str(int(time.time()))})
 
 @app.route("/api/app/account/photo", methods=["GET"])
 def webapp_account_photo_get():
@@ -4580,6 +4639,25 @@ def webapp_nft_marketplace_chart(project_id):
         print(f"NFT chart error: {e}");return jsonify({"ok":False,"error":"chart_unavailable","candles":[]}),503
     finally:_membership_db_release(conn)
 
+@app.route("/api/app/nft/marketplace/ai", methods=["POST"])
+def webapp_nft_marketplace_ai():
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"stores")
+    if denied[0]:return denied
+    body=request.get_json(silent=True) or {}; project_id=str(body.get("project_id") or "").strip()
+    if not project_id:return jsonify({"ok":False,"error":"project_id_required"}),400
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:cur.execute("SELECT name,description,collection_name FROM ai_for_nft_projects WHERE project_id=%s",(project_id,)); p=cur.fetchone()
+        if not p:return jsonify({"ok":False,"error":"project_not_found"}),404
+        prompt=f"حلّل أصل NFT في Marketplace ZynMart NFT باختصار وبدون اختلاق: الاسم={p.get('name')}; المجموعة={p.get('collection_name')}; الوصف={p.get('description')}"
+        reply=get_ai_response(prompt,user.get("first_name",""))
+        return jsonify({"ok":bool(reply),"analysis":reply or AI_PRIVATE_FAILURE_MESSAGE})
+    except Exception as e:print(f"NFT marketplace AI error: {e}");return jsonify({"ok":False,"error":"marketplace_ai_failed"}),503
+    finally:_membership_db_release(conn)
+
 @app.route("/api/app/nft/marketplace/config", methods=["GET"])
 def webapp_nft_marketplace_config():
     user, err, code=_webapp_auth()
@@ -4621,6 +4699,16 @@ def webapp_nft_project_publish(project_id):
         print(f"NFT public publish error: {e}");return jsonify({"ok":False,"error":"nft_publish_failed"}),503
     finally:_membership_db_release(conn)
 
+@app.route("/api/app/nft/image", methods=["POST"])
+def webapp_nft_image():
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    body=request.get_json(silent=True) or {}
+    result,status=_nft_image_generate(user,body.get("prompt"),body.get("width",1024),body.get("height",1024),body.get("steps",4))
+    return jsonify(result),status
+
 @app.route("/api/app/nft/ipfs", methods=["POST"])
 def webapp_nft_ipfs():
     user, err, code=_webapp_auth()
@@ -4649,7 +4737,7 @@ def webapp_nft_status():
     if err:return err,code
     denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
-    return jsonify({"ok":True,"ipfs":{"provider":NFT_IPFS_PROVIDER,"configured":bool(NFT_IPFS_JWT)},"contract":_nft_contract_status(),"marketplace":{"url":NFT_MARKETPLACE_URL,"fee_bps":NFT_MARKETPLACE_FEE_BPS,"default_royalty_bps":NFT_DEFAULT_ROYALTY_BPS,"max_royalty_bps":NFT_MAX_ROYALTY_BPS,"currencies":NFT_MARKETPLACE_CURRENCIES,"auction_extension_seconds":NFT_AUCTION_EXTENSION_SECONDS,"zyn":{"enabled":bool(NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER),"asset_code":NFT_ZYN_ASSET_CODE}},"genesis":{"enabled":NFT_GENESIS_ENABLED,"name":NFT_GENESIS_NAME,"benefits":NFT_GENESIS_BENEFITS}})
+    return jsonify({"ok":True,"ipfs":{"provider":NFT_IPFS_PROVIDER,"configured":bool(NFT_IPFS_JWT)},"contract":_nft_contract_status(),"image_ai":{"configured":bool(NFT_IMAGE_AI_URL),"model":NFT_IMAGE_AI_MODEL,"self_hosted_open_model":True},"chain_service":{"configured":bool(NFT_CHAIN_SERVICE_URL),"private_key_in_app":False},"marketplace":{"url":NFT_MARKETPLACE_URL,"fee_bps":NFT_MARKETPLACE_FEE_BPS,"default_royalty_bps":NFT_DEFAULT_ROYALTY_BPS,"max_royalty_bps":NFT_MAX_ROYALTY_BPS,"currencies":NFT_MARKETPLACE_CURRENCIES,"auction_extension_seconds":NFT_AUCTION_EXTENSION_SECONDS,"zyn":{"enabled":bool(NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER),"asset_code":NFT_ZYN_ASSET_CODE}},"genesis":{"enabled":NFT_GENESIS_ENABLED,"name":NFT_GENESIS_NAME,"benefits":NFT_GENESIS_BENEFITS}})
 
 @app.route("/api/app/wallet", methods=["GET"])
 def webapp_wallet():
@@ -4702,6 +4790,40 @@ def _platform_db_query(fn):
         return None
     finally:
         _membership_db_release(conn)
+
+REPUTATION_EVENT_POINTS={"visit":1,"ai_use":2,"search_use":1,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":2,"message_send":1,"support_ticket":1,"quiz_correct":10}
+
+def _record_reputation_event(user,event_type,source_key="",metadata=None,reward=True):
+    identity=_platform_identity(user); event_type=str(event_type or "").strip()[:60]; source_key=str(source_key or "").strip()[:180]
+    if not identity or not event_type:return {"ok":False,"recorded":False,"points":0}
+    points=int(REPUTATION_EVENT_POINTS.get(event_type,0)) if reward else 0; event_id=str(uuid.uuid4()); metadata=metadata if isinstance(metadata,dict) else {}
+    def q(cur):
+        cur.execute("INSERT INTO ai_for_reputation_events(event_id,identity_key,event_type,points,source_key,metadata) VALUES(%s,%s,%s,%s,%s,%s) ON CONFLICT(identity_key,event_type,source_key) DO NOTHING RETURNING event_id",(event_id,identity,event_type,points,source_key,json.dumps(metadata,ensure_ascii=False)))
+        inserted=bool(cur.fetchone())
+        if inserted:
+            cur.execute("INSERT INTO ai_for_reputation(identity_key,score,level) VALUES(%s,%s,1) ON CONFLICT(identity_key) DO UPDATE SET score=GREATEST(0,ai_for_reputation.score+%s),updated_at=NOW()",(identity,points,points))
+            if points:
+                cur.execute("INSERT INTO ai_for_rewards(identity_key,points) VALUES(%s,%s) ON CONFLICT(identity_key) DO UPDATE SET points=GREATEST(0,ai_for_rewards.points+%s),updated_at=NOW()",(identity,points,points))
+                cur.execute("INSERT INTO ai_for_reward_ledger(ledger_id,identity_key,event_type,points,source_key) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(identity_key,event_type,source_key) DO NOTHING",(str(uuid.uuid4()),identity,event_type,points,source_key))
+        cur.execute("SELECT score,level FROM ai_for_reputation WHERE identity_key=%s",(identity,)); row=cur.fetchone() or {"score":0,"level":1}
+        return {"recorded":inserted,"points":points if inserted else 0,"score":int(row["score"]),"level":int(row["level"])}
+    result=_platform_db_query(q); return {"ok":result is not None,**(result or {"recorded":False,"points":0,"score":0,"level":1})}
+
+def _reputation_snapshot(user):
+    identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("SELECT score,level,updated_at FROM ai_for_reputation WHERE identity_key=%s",(identity,)); row=cur.fetchone()
+        cur.execute("SELECT event_type,points,created_at FROM ai_for_reputation_events WHERE identity_key=%s ORDER BY created_at DESC LIMIT 30",(identity,)); events=[dict(x) for x in cur.fetchall()]
+        return {"score":int(row["score"]) if row else 0,"level":int(row["level"]) if row else 1,"updated_at":row["updated_at"].isoformat() if row and row.get("updated_at") else None,"events":events}
+    return _platform_db_query(q) or {"score":0,"level":1,"events":[]}
+
+def _zynmart_plus_snapshot(user):
+    identity=_platform_identity(user)
+    def q(cur):
+        cur.execute("SELECT tier,active,benefits,started_at,expires_at FROM ai_for_zynmart_plus WHERE identity_key=%s",(identity,)); row=cur.fetchone()
+        if not row:return {"tier":"free","active":False,"benefits":{}}
+        return {"tier":row["tier"],"active":bool(row["active"]),"benefits":row["benefits"] if isinstance(row["benefits"],dict) else {},"started_at":row["started_at"].isoformat() if row.get("started_at") else None,"expires_at":row["expires_at"].isoformat() if row.get("expires_at") else None}
+    return _platform_db_query(q) or {"tier":"free","active":False,"benefits":{}}
 
 def _reward_points(user, delta=0):
     identity=_platform_identity(user)
@@ -4813,6 +4935,7 @@ def webapp_platform_services():
         if denied[0]: return denied
     if op=="support_create":
         row=_platform_ticket_create(user,body.get("subject",""),body.get("message",""))
+        if row: _record_reputation_event(user,"support_ticket",str(row.get("ticket_id") or uuid.uuid4()))
         return jsonify({"ok":bool(row),"ticket":row})
     if op=="support_list": return jsonify({"ok":True,"tickets":_platform_ticket_list(user)})
     if op=="favorite_add":
@@ -4824,12 +4947,18 @@ def webapp_platform_services():
     if op=="favorites": return jsonify({"ok":True,"favorites":_platform_favorites(user)})
     if op=="community_list": return jsonify({"ok":True,"posts":_platform_community_posts()})
     if op=="community_post":
-        row=_platform_post_create(user,body.get("body","")); return jsonify({"ok":bool(row),"post":row})
+        row=_platform_post_create(user,body.get("body",""));
+        if row: _record_reputation_event(user,"community_post",str(row.get("post_id") or uuid.uuid4()))
+        return jsonify({"ok":bool(row),"post":row})
     if op=="message_send":
-        row=_platform_message_send(user,body.get("recipient"),body.get("body","")); return jsonify({"ok":bool(row),"message":row})
+        row=_platform_message_send(user,body.get("recipient"),body.get("body",""));
+        if row: _record_reputation_event(user,"message_send",str(row.get("message_id") or uuid.uuid4()))
+        return jsonify({"ok":bool(row),"message":row})
     if op=="messages": return jsonify({"ok":True,"messages":_platform_messages(user)})
     if op=="rewards":
-        pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0)})
+        pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0),"reputation":_reputation_snapshot(user),"plus":_zynmart_plus_snapshot(user)})
+    if op=="reputation": return jsonify({"ok":True,"reputation":_reputation_snapshot(user)})
+    if op=="zynmart_plus": return jsonify({"ok":True,"plus":_zynmart_plus_snapshot(user)})
     if op=="quiz_answer":
         key=str(body.get("question_key",""))[:100]; option=str(body.get("option",""))[:100]
         answer_key={"http-001":"b"}.get(key)
@@ -5004,7 +5133,9 @@ def owner_feature_tests(user):
         "webapp_db_health":"/api/app/db/health",
         "webapp_external_apps":"/api/app/external-apps",
         "webapp_external_app_open":"/api/app/external-apps/open",
-        "webapp_nft_projects":"/api/app/nft/projects"
+        "webapp_nft_projects":"/api/app/nft/projects",
+        "webapp_nft_image":"/api/app/nft/image",
+        "webapp_nft_marketplace_ai":"/api/app/nft/marketplace/ai"
     }
     for endpoint, path in required_routes.items():
         add("route:"+path, endpoint in app.view_functions, "Registered endpoint: "+endpoint)

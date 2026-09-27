@@ -4543,7 +4543,7 @@ def webapp_account_photo_get():
 def webapp_nft_marketplace():
     user, err, code=_webapp_auth()
     if err:return err,code
-    denied=_webapp_require_section(user,"stores")
+    denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
     conn=None
     try:
@@ -4592,7 +4592,7 @@ def webapp_nft_marketplace_cancel(listing_id):
 def webapp_nft_marketplace_offer(listing_id):
     user, err, code=_webapp_auth()
     if err:return err,code
-    denied=_webapp_require_section(user,"stores")
+    denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
     body=request.get_json(silent=True) or {}; amount=_nft_market_money(body.get('amount')); currency=str(body.get('currency') or 'PI').upper(); expires=body.get('expires_at')
     if not amount or not _nft_market_currency_allowed(currency) or not expires:return jsonify({"ok":False,"error":"amount_currency_expiry_required"}),400
@@ -4614,7 +4614,7 @@ def webapp_nft_marketplace_offer(listing_id):
 def webapp_nft_marketplace_bid(listing_id):
     user, err, code=_webapp_auth()
     if err:return err,code
-    denied=_webapp_require_section(user,"stores")
+    denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
     body=request.get_json(silent=True) or {}; amount=_nft_market_money(body.get('amount'))
     if not amount:return jsonify({"ok":False,"error":"amount_required"}),400
@@ -4672,7 +4672,7 @@ def webapp_nft_marketplace_offer_decision(offer_id):
 def webapp_nft_marketplace_chart(project_id):
     user, err, code=_webapp_auth()
     if err:return err,code
-    denied=_webapp_require_section(user,"stores")
+    denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
     interval=str(request.args.get('interval','1h')).lower(); seconds={'1m':60,'5m':300,'15m':900,'1h':3600,'4h':14400,'1d':86400,'1w':604800}.get(interval)
     if not seconds:return jsonify({"ok":False,"error":"invalid_interval"}),400
@@ -4690,7 +4690,7 @@ def webapp_nft_marketplace_chart(project_id):
 def webapp_nft_marketplace_ai():
     user, err, code=_webapp_auth()
     if err:return err,code
-    denied=_webapp_require_section(user,"stores")
+    denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
     body=request.get_json(silent=True) or {}; project_id=str(body.get("project_id") or "").strip()
     if not project_id:return jsonify({"ok":False,"error":"project_id_required"}),400
@@ -4709,7 +4709,7 @@ def webapp_nft_marketplace_ai():
 def webapp_nft_marketplace_config():
     user, err, code=_webapp_auth()
     if err:return err,code
-    denied=_webapp_require_section(user,"stores")
+    denied=_webapp_require_section(user,"nft")
     if denied[0]:return denied
     return jsonify({"ok":True,"currency":"PI","currencies":NFT_MARKETPLACE_CURRENCIES,"fee_bps":NFT_MARKETPLACE_FEE_BPS,"default_royalty_bps":NFT_DEFAULT_ROYALTY_BPS,"max_royalty_bps":NFT_MAX_ROYALTY_BPS,"auction_extension_seconds":NFT_AUCTION_EXTENSION_SECONDS,"blockchain_network":NFT_CONTRACT_NETWORK,"contract_configured":bool(NFT_CONTRACT_ID and NFT_RPC_URL),"zyn":{"enabled":bool(NFT_ZYN_ENABLED and NFT_ZYN_MAINNET_APPROVED and NFT_ZYN_ISSUER),"asset_code":NFT_ZYN_ASSET_CODE,"issuer":NFT_ZYN_ISSUER if NFT_ZYN_MAINNET_APPROVED else ""}})
 

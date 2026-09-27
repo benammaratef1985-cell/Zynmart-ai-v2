@@ -3127,7 +3127,7 @@ def _webapp_has_access(user):
     # whether they entered from Telegram WebApp or a normal/Pi Browser.
     if _webapp_is_owner(user) or _webapp_is_admin(user):
         return True
-    if user and user.get("auth_type") in ("web", "telegram"):
+    if user and user.get("auth_type") in ("web", "telegram", "pi"):
         return True
     # Legacy allowlist remains available as a fallback for older/private flows.
     try:

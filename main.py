@@ -15,6 +15,13 @@ except Exception:
     RealDictCursor = None
     ThreadedConnectionPool = None
 
+# Pi NFT on-chain layer: uses the existing AI for App Wallet as issuer.
+# This is a Pi-native unique asset on the Stellar-based Pi Testnet, not an EVM/ERC-721 contract.
+try:
+    from stellar_sdk import Server as StellarServer, Keypair as StellarKeypair, Asset as StellarAsset, TransactionBuilder as StellarTransactionBuilder
+except Exception:
+    StellarServer = StellarKeypair = StellarAsset = StellarTransactionBuilder = None
+
 app = Flask(__name__)
 
 # Pi Ecosystem Edition: this deployment is intentionally Pi-authentication-only.
@@ -189,6 +196,10 @@ NFT_IMAGE_AI_TIMEOUT = max(10, min(120, int(os.environ.get("NFT_IMAGE_AI_TIMEOUT
 NFT_IMAGE_MAX_PIXELS = max(262144, min(4194304, int(os.environ.get("NFT_IMAGE_MAX_PIXELS", str(1024*1024)))))
 # Secure external signer boundary; private keys are never accepted here.
 NFT_CHAIN_SERVICE_URL = os.environ.get("NFT_CHAIN_SERVICE_URL", "").strip().rstrip("/")
+# Existing App Wallet secret only; never exposed to browser. No new wallet is created.
+NFT_APP_WALLET_SECRET = os.environ.get("NFT_APP_WALLET_SECRET", "").strip()
+NFT_HORIZON_URL = os.environ.get("NFT_HORIZON_URL", "https://api.testnet.minepi.com").strip().rstrip("/")
+NFT_NETWORK_PASSPHRASE = os.environ.get("NFT_NETWORK_PASSPHRASE", "Pi Testnet").strip()
 # NFT Marketplace trading layer: pricing, fees, orders, auctions, offers and OHLC data.
 NFT_MARKETPLACE_FEE_BPS = max(0, min(10000, int(os.environ.get("NFT_MARKETPLACE_FEE_BPS", "200"))))
 NFT_DEFAULT_ROYALTY_BPS = max(0, min(10000, int(os.environ.get("NFT_DEFAULT_ROYALTY_BPS", "500"))))
@@ -203,8 +214,25 @@ NFT_ZYN_MAINNET_APPROVED = str(os.environ.get("NFT_ZYN_MAINNET_APPROVED", "false
 if NFT_ZYN_ENABLED and not NFT_ZYN_MAINNET_APPROVED:
     NFT_MARKETPLACE_CURRENCIES = [x for x in NFT_MARKETPLACE_CURRENCIES if x != "ZYN"] or ["PI"]
 PI_PAYMENTS_ENABLED = os.environ.get("PI_PAYMENTS_ENABLED", "true" if PI_SANDBOX else "false").strip().lower() in ("1", "true", "yes")
-PI_PAYMENT_AMOUNT = float(os.environ.get("PI_PAYMENT_AMOUNT", "0.01"))
-PI_PAYMENT_MEMO = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()[:160]
+
+# U2A payment configuration: the user signs from the user's own Pi wallet.
+# The app/developer wallet is the wallet registered for this Pi App; no second
+# user wallet or server-created wallet is introduced here.
+_raw_pi_payment_amount = os.environ.get("PI_PAYMENT_AMOUNT", "0.01").strip()
+_raw_pi_payment_memo = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()
+try:
+    PI_PAYMENT_AMOUNT = float(_raw_pi_payment_amount)
+except (TypeError, ValueError):
+    # Tolerate the common deployment mistake where amount and memo are swapped.
+    try:
+        PI_PAYMENT_AMOUNT = float(_raw_pi_payment_memo)
+    except (TypeError, ValueError):
+        PI_PAYMENT_AMOUNT = 0.01
+    if _raw_pi_payment_amount:
+        _raw_pi_payment_memo = _raw_pi_payment_amount
+PI_PAYMENT_AMOUNT = max(0.000001, PI_PAYMENT_AMOUNT)
+PI_PAYMENT_MEMO = (_raw_pi_payment_memo or "AI for — Testnet payment").strip()[:160]
+PI_PAYMENT_RUNTIME_ENABLED = bool(PI_PAYMENTS_ENABLED and PI_API_KEY and PI_PAYMENT_AMOUNT > 0)
 EMAIL_AUTH_ENABLED = os.environ.get("AI_FOR_EMAIL_AUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 AUTH_LINK_MAX_AGE = int(os.environ.get("AI_FOR_AUTH_LINK_MAX_AGE", "86400"))
 SMTP_HOST = os.environ.get("AI_FOR_SMTP_HOST", "").strip()
@@ -3324,7 +3352,48 @@ def _pin_json_to_ipfs(metadata, filename="ai-for-nft.json"):
     except Exception as e:print(f"IPFS pin error: {e}");return None,"ipfs_unavailable"
 
 def _nft_contract_status():
-    return {"configured":bool(NFT_CONTRACT_ID and NFT_RPC_URL),"contract_id":NFT_CONTRACT_ID,"network":NFT_CONTRACT_NETWORK,"rpc_configured":bool(NFT_RPC_URL),"note":"Contract signing/minting requires a dedicated server-side signer; no private wallet key is stored in the browser."}
+    return {
+        "configured": bool(NFT_APP_WALLET_SECRET and StellarServer and StellarKeypair and StellarAsset and StellarTransactionBuilder),
+        "contract_id": NFT_CONTRACT_ID,
+        "network": "testnet",
+        "rpc_configured": bool(NFT_HORIZON_URL),
+        "onchain_mode": "pi_native_unique_asset",
+        "issuer_secret_configured": bool(NFT_APP_WALLET_SECRET),
+        "stellar_sdk_available": bool(StellarServer),
+        "note": "Uses the existing AI for App Wallet as issuer; no browser key and no new wallet are created."
+    }
+
+def _nft_asset_code(project_id):
+    return ("AFN" + re.sub(r"[^A-Za-z0-9]", "", str(project_id))[-9:]).upper()[:12]
+
+def _nft_mint_native_asset(project, recipient_address):
+    if not NFT_APP_WALLET_SECRET:
+        return {"ok":False,"error":"nft_app_wallet_secret_not_configured"},503
+    if not all((StellarServer, StellarKeypair, StellarAsset, StellarTransactionBuilder)):
+        return {"ok":False,"error":"stellar_sdk_not_installed"},503
+    recipient=str(recipient_address or "").strip()
+    if not re.fullmatch(r"G[A-Z2-7]{55}", recipient):
+        return {"ok":False,"error":"invalid_pi_wallet_address"},400
+    try:
+        issuer=StellarKeypair.from_secret(NFT_APP_WALLET_SECRET)
+        server=StellarServer(NFT_HORIZON_URL)
+        issuer_address=issuer.public_key()
+        asset_code=_nft_asset_code(project.get("project_id"))
+        asset=StellarAsset(asset_code, issuer_address)
+        recipient_account=server.load_account(recipient)
+        trusted=any(str(b.get("asset_code") or "") == asset_code and str(b.get("asset_issuer") or "") == issuer_address for b in recipient_account.raw_data.get("balances", []))
+        if not trusted:
+            return {"ok":False,"error":"recipient_trustline_required","asset_code":asset_code,"issuer":issuer_address,"network":"testnet"},409
+        issuer_account=server.load_account(issuer_address)
+        tx=StellarTransactionBuilder(issuer_account, network_passphrase=NFT_NETWORK_PASSPHRASE, base_fee=server.fetch_base_fee()).append_payment_op(destination=recipient, asset=asset, amount="1").set_timeout(180).build()
+        tx.sign(issuer)
+        submitted=server.submit_transaction(tx)
+        tx_hash=str(submitted.get("hash") or "")
+        asset_id=asset_code+":"+issuer_address
+        return {"ok":True,"asset_code":asset_code,"issuer":issuer_address,"asset_id":asset_id,"recipient":recipient,"amount":"1","tx_hash":tx_hash,"network":"testnet","mode":"pi_native_unique_asset"},200
+    except Exception as e:
+        print(f"NFT native mint error: {e}")
+        return {"ok":False,"error":"nft_mint_failed","detail":str(e)[:180]},503
 
 def _nft_market_currency_allowed(currency):
     c=str(currency or '').strip().upper()
@@ -3715,7 +3784,91 @@ body{background:#f4f5f7!important;color:#111827!important}
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';const useBearer=!!token;opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':(tg?.initData||'')},useBearer&&token?{'Authorization':'Bearer '+token}:{},opts.headers||{});if(opts.body instanceof FormData)delete opts.headers['Content-Type'];try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}if(path==='/api/app/bootstrap'&&d?.user){window.__AI_FOR_SESSION_READY=true}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
-async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}
+async function testPiPayment(){
+  const msg=document.getElementById('paymentMsg');
+  if(!window.PI_PAYMENTS_ENABLED){
+    msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';
+    return;
+  }
+  if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){
+    msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';
+    return;
+  }
+  const token=()=>window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'';
+  const headers=()=>({'Content-Type':'application/json','Authorization':'Bearer '+token()});
+  const completeIncomplete=async payment=>{
+    const paymentId=String(payment?.identifier||'').trim();
+    const txid=String(payment?.transaction?.txid||'').trim();
+    if(!paymentId||!txid)return;
+    try{
+      const r=await fetch('/api/platform/pi/payment/complete',{
+        method:'POST',headers:headers(),
+        body:JSON.stringify({payment_id:paymentId,txid})
+      });
+      const d=await r.json().catch(()=>({}));
+      if(!r.ok||!d.ok)console.warn('Pi incomplete payment completion failed',d);
+    }catch(e){console.warn('Pi incomplete payment completion error',e)}
+  };
+  msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';
+  try{
+    const auth=await window.Pi.authenticate(['username','payments'],completeIncomplete);
+    if(!auth?.accessToken)throw new Error('pi_auth_failed');
+    window.__PI_ACCESS_TOKEN=auth.accessToken;
+    sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);
+
+    const loginResponse=await fetch('/api/platform/pi/login',{
+      method:'POST',headers:headers(),
+      body:JSON.stringify({access_token:auth.accessToken})
+    });
+    const login=await loginResponse.json().catch(()=>({}));
+    if(!loginResponse.ok||!login.ok)throw new Error(login.error||'pi_login_failed');
+
+    await new Promise((resolve,reject)=>{
+      window.Pi.createPayment(
+        {
+          amount:Number(window.PI_PAYMENT_AMOUNT),
+          memo:window.PI_PAYMENT_MEMO,
+          metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet',purpose:'user_to_app_payment'}
+        },
+        {
+          onReadyForServerApproval:async paymentId=>{
+            try{
+              const r=await fetch('/api/platform/pi/payment/approve',{
+                method:'POST',headers:headers(),
+                body:JSON.stringify({payment_id:paymentId})
+              });
+              const d=await r.json().catch(()=>({}));
+              if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed');
+            }catch(e){reject(e)}
+          },
+          onReadyForServerCompletion:async(paymentId,txid)=>{
+            try{
+              const r=await fetch('/api/platform/pi/payment/complete',{
+                method:'POST',headers:headers(),
+                body:JSON.stringify({payment_id:paymentId,txid})
+              });
+              const d=await r.json().catch(()=>({}));
+              if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');
+              resolve(d);
+            }catch(e){reject(e)}
+          },
+          onCancel:async paymentId=>{
+            try{
+              await fetch('/api/platform/pi/payment/cancel',{
+                method:'POST',headers:headers(),
+                body:JSON.stringify({payment_id:paymentId})
+              });
+            }finally{reject(new Error('payment_cancelled'))}
+          },
+          onError:error=>reject(error||new Error('payment_error'))
+        }
+      );
+    });
+    msg.textContent='✅ تم إكمال دفع Pi بنجاح.';
+  }catch(e){
+    msg.textContent='⚠️ '+(e?.message||e);
+  }
+}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
@@ -3733,10 +3886,11 @@ async function renderExternalApps(){
  r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
 }
 async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
-function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>🎨 مولد صورة NFT — AI مستقل</b><p class="small">مولد صور NFT مستقل عن مفاتيح الذكاء الاصطناعي النصي.</p><textarea id="nftImagePrompt" placeholder="اكتب وصف الصورة التي تريدها..." style="width:100%;min-height:80px;padding:12px;margin:7px 0;border-radius:10px"></textarea><button class="action green" onclick="generateNFTImage()">🎨 توليد الصورة</button><div id="nftImageResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
+function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>🎨 مولد صورة NFT — AI مستقل</b><p class="small">مولد صور NFT مستقل عن مفاتيح الذكاء الاصطناعي النصي.</p><textarea id="nftImagePrompt" placeholder="اكتب وصف الصورة التي تريدها..." style="width:100%;min-height:80px;padding:12px;margin:7px 0;border-radius:10px"></textarea><button class="action green" onclick="generateNFTImage()">🎨 توليد الصورة</button><div id="nftImageResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRecipient" placeholder="عنوان Pi Testnet للمستلم" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="mintCurrentNFT()">⛓️ Mint NFT على Pi Testnet</button><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
 async function generateNFTImage(){let p=document.getElementById("nftImagePrompt")?.value.trim(),r=document.getElementById("nftImageResult");if(!p){if(r)r.textContent="⚠️ اكتب وصف الصورة أولًا.";return}if(r)r.textContent="⏳ جاري توليد الصورة...";try{let d=await api("/api/app/nft/image",{method:"POST",body:JSON.stringify({prompt:p,width:1024,height:1024,steps:4})});if(!d.ok)throw new Error(d.error||"image_generation_failed");r.innerHTML=(d.image_url?"<img src=\""+esc(d.image_url)+"\" style=\"width:100%;border-radius:16px;margin-top:8px\">":"<div class=\"statusBox\">تم التوليد، لكن الخدمة لم تعد رابط عرض مباشر.</div>")+"<div class=\"small\">النموذج: "+esc(d.model||"open model")+"</div>"}catch(e){if(r)r.textContent="⚠️ "+(e.message||"تعذر توليد الصورة")}}
 async function loadNFTStatus(){try{let x=await api('/api/app/nft/status');document.getElementById('nftInfra').innerHTML='<div class="row">IPFS: <span class="'+(x.ipfs?.configured?'ok':'warn')+'">'+(x.ipfs?.configured?'🟢 جاهز':'🟡 يحتاج إعداد الخادم')+'</span></div><div class="row">Pi Blockchain Contract: <span class="'+(x.contract?.configured?'ok':'warn')+'">'+(x.contract?.configured?'🟢 RPC + Contract مضبوط':'🟡 يحتاج Contract/RPC')+'</span></div><div class="row">Marketplace Fee: <b>'+((x.marketplace?.fee_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Default Royalty: <b>'+((x.marketplace?.default_royalty_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Currency: <b>Pi</b> · ZYN: '+(x.marketplace?.zyn?.enabled?'🟢 جاهز بعد الاعتماد':'🟡 مؤجل حتى اعتماد Mainnet')+'</div><div class="row">Genesis: '+(x.genesis?.enabled?'🔒 للمنصة فقط':'🟡 غير مفعّل')+'</div>'}catch(e){document.getElementById('nftInfra').textContent='⚠️ تعذر فحص NFT الآن.'}}
 async function pinNFTMetadata(){let m=document.getElementById('nftMsg');let metadata={name:document.getElementById('nftName')?.value.trim()||'AI for NFT',description:document.getElementById('nftDescription')?.value.trim()||'',collection:document.getElementById('nftCollection')?.value.trim()||'',schema:'ai-for-nft-v3',blockchain:'Pi',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100)};m.textContent='⏳ جاري رفع Metadata إلى IPFS...';try{let d=await api('/api/app/nft/ipfs',{method:'POST',body:JSON.stringify({metadata})});m.innerHTML='<div class="statusBox">✅ IPFS: <b>'+esc(d.ipfs?.cid||'')+'</b><br>'+esc(d.ipfs?.uri||'')+'</div>'}catch(e){m.textContent='⚠️ '+(e.message||'ipfs_failed')}}
+async function mintCurrentNFT(){let m=document.getElementById('nftMsg'),id=window.__AI_FOR_NFT_PROJECT_ID||'',recipient=document.getElementById('nftRecipient')?.value.trim();if(!id){m.textContent='⚠️ احفظ المشروع أولًا.';return}if(!recipient){m.textContent='⚠️ أدخل عنوان Pi Testnet للمستلم.';return}m.textContent='⏳ جاري التحقق من Trustline وتنفيذ Mint على Pi Testnet...';try{let d=await api('/api/app/nft/projects/'+encodeURIComponent(id)+'/mint',{method:'POST',body:JSON.stringify({recipient_address:recipient})});if(!d.ok)throw new Error(d.error||'mint_failed');document.getElementById('nftAssetId').value=d.nft?.asset_id||'';m.innerHTML='<div class="statusBox">✅ تم Mint NFT على Pi Testnet.<br>Asset: <b>'+esc(d.nft?.asset_id||'')+'</b><br>TX: <b>'+esc(d.nft?.tx_hash||'')+'</b><br>المبلغ: 1 وحدة فريدة.</div>';loadNFTProjects();loadNFTStatus()}catch(e){m.textContent='⚠️ '+(e.message||'تعذر تنفيذ Mint. إذا ظهر recipient_trustline_required يجب إنشاء Trustline لهذا الأصل أولًا.')}}
 async function generateNFTMetadata(){let name=document.getElementById('nftName')?.value.trim()||'AI for NFT',description=document.getElementById('nftDescription')?.value.trim()||'',collection=document.getElementById('nftCollection')?.value.trim()||'';try{let d=await platformSvc('nft_metadata',{name,description,collection});document.getElementById('nftMsg').innerHTML='<div class="statusBox"><pre style="white-space:pre-wrap">'+esc(JSON.stringify(d.metadata,null,2))+'</pre></div>'}catch(e){document.getElementById('nftMsg').textContent='⚠️ تعذر إنشاء Metadata.'}}
 async function createNFTProject(){let m=document.getElementById('nftMsg');if(!m)return;m.textContent='⏳ جاري حفظ المسودة...';try{let d=await api('/api/app/nft/projects',{method:'POST',body:JSON.stringify({name:document.getElementById('nftName').value,collection_name:document.getElementById('nftCollection').value,description:document.getElementById('nftDescription').value,marketplace_url:'',genesis_enabled:false,genesis_benefits:'',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100),onchain_asset_id:document.getElementById('nftAssetId')?.value.trim()||''})});if(!d.ok)throw new Error(d.error||'save_failed');window.__AI_FOR_NFT_PROJECT_ID=d.project?.project_id||'';m.textContent='✅ تم حفظ مسودة NFT في PostgreSQL. استخدم زر نشر بجانب المشروع.';loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'')}}
 async function loadNFTProjects(){let r=document.getElementById('nftProjects');if(!r)return;try{let d=await api('/api/app/nft/projects');if(!d.ok)throw new Error(d.error||'load_failed');r.innerHTML=(d.projects||[]).length?(d.projects||[]).map(p=>`<div class="row">🖼️ <b>${esc(p.name||'بدون اسم')}</b> · ${esc(p.collection_name||'بدون مجموعة')} · ${esc(p.status)} · Royalty ${(Number(p.royalty_bps||0)/100).toFixed(2)}%${p.onchain_asset_id?' · On-chain':''}<button class="mini" style="float:left" onclick="publishMyNFT('${esc(p.project_id)}')">نشر</button></div>`).join(''):'<span class="small">لا توجد مسودات بعد.</span>'}catch(e){r.textContent='⚠️ '+(e.message||'')}}
@@ -4061,19 +4215,37 @@ def platform_pi_payment_config():
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
     return jsonify({
         "ok": True,
-        "enabled": bool(PI_PAYMENTS_ENABLED and PI_API_KEY and float(PI_PAYMENT_AMOUNT) > 0),
+        "enabled": PI_PAYMENT_RUNTIME_ENABLED,
         "sandbox": bool(PI_SANDBOX),
         "amount": PI_PAYMENT_AMOUNT,
         "memo": PI_PAYMENT_MEMO,
     })
 
 
+@app.route("/api/platform/pi/payment/diagnostics", methods=["GET"])
+def platform_pi_payment_diagnostics():
+    """Non-secret payment readiness check."""
+    account = _get_web_account_from_request()
+    if not account:
+        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
+    return jsonify({
+        "ok": True,
+        "payments_enabled": bool(PI_PAYMENTS_ENABLED),
+        "runtime_enabled": bool(PI_PAYMENT_RUNTIME_ENABLED),
+        "sandbox": bool(PI_SANDBOX),
+        "api_key_present": bool(PI_API_KEY),
+        "api_base": PI_API_BASE_URL,
+        "amount": PI_PAYMENT_AMOUNT,
+        "memo_configured": bool(PI_PAYMENT_MEMO),
+        "user_payment_model": "user_wallet_to_app_wallet",
+    })
+
 @app.route("/api/platform/pi/payment/approve", methods=["POST"])
 def platform_pi_payment_approve():
     account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if not PI_PAYMENTS_ENABLED:
+    if not PI_PAYMENT_RUNTIME_ENABLED:
         return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
     body = request.get_json(silent=True) or {}
     payment_id = str(body.get("payment_id") or "").strip()
@@ -4093,7 +4265,7 @@ def platform_pi_payment_complete():
     account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if not PI_PAYMENTS_ENABLED:
+    if not PI_PAYMENT_RUNTIME_ENABLED:
         return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
     body = request.get_json(silent=True) or {}
     payment_id = str(body.get("payment_id") or "").strip()
@@ -4117,7 +4289,7 @@ def platform_pi_payment_cancel():
     account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if not PI_PAYMENTS_ENABLED:
+    if not PI_PAYMENT_RUNTIME_ENABLED:
         return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
     body = request.get_json(silent=True) or {}
     payment_id = str(body.get("payment_id") or "").strip()
@@ -4312,7 +4484,7 @@ def platform_home():
     html = (PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
              .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
              .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
-             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
+             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if PI_PAYMENT_RUNTIME_ENABLED else "false")
              .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
              .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
@@ -4328,7 +4500,7 @@ def webapp():
     html = (WEBAPP_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
             .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
             .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
-            .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
+            .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if PI_PAYMENT_RUNTIME_ENABLED else "false")
             .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
             .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
@@ -4777,6 +4949,36 @@ def webapp_nft_ipfs():
         except Exception as e:print(f"NFT IPFS project update error: {e}")
         finally:_membership_db_release(conn)
     return jsonify({"ok":True,"ipfs":pinned})
+
+@app.route("/api/app/nft/projects/<project_id>/mint", methods=["POST"])
+def webapp_nft_mint(project_id):
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    body=request.get_json(silent=True) or {}
+    recipient=str(body.get("recipient_address") or "").strip()
+    conn=None
+    try:
+        conn=_membership_db_connect()
+        if not conn:return jsonify({"ok":False,"error":"database_unavailable"}),503
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM ai_for_nft_projects WHERE project_id=%s AND owner_identity=%s",(str(project_id),_webapp_identity_key(user)))
+            project=cur.fetchone()
+        if not project:return jsonify({"ok":False,"error":"nft_project_not_owned"}),404
+        if not project.get("ipfs_cid"):return jsonify({"ok":False,"error":"nft_ipfs_required"}),409
+        result,status=_nft_mint_native_asset(project,recipient)
+        if not result.get("ok"):return jsonify(result),status
+        meta=project.get("metadata") if isinstance(project.get("metadata"),dict) else {}
+        meta.update({"onchain_asset_id":result["asset_id"],"asset_code":result["asset_code"],"issuer":result["issuer"],"mint_recipient":result["recipient"],"mint_tx_hash":result["tx_hash"],"blockchain":"Pi","network":"testnet","token_amount":"1","onchain_mode":"pi_native_unique_asset"})
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE ai_for_nft_projects SET status='minted',onchain_asset_id=%s,contract_id=%s,contract_network='testnet',metadata=%s,updated_at=NOW() WHERE project_id=%s AND owner_identity=%s",(result["asset_id"],result["issuer"],json.dumps(meta,ensure_ascii=False),str(project_id),_webapp_identity_key(user)))
+        control_audit(user["id"],"nft_mint_pi_testnet",str(project_id),{"asset_id":result["asset_id"],"tx_hash":result["tx_hash"]})
+        return jsonify({"ok":True,"project_id":str(project_id),"nft":result}),200
+    except Exception as e:
+        print(f"NFT mint route error: {e}");return jsonify({"ok":False,"error":"nft_mint_failed"}),503
+    finally:_membership_db_release(conn)
 
 @app.route("/api/app/nft/status", methods=["GET"])
 def webapp_nft_status():
@@ -5264,7 +5466,7 @@ def owner_feature_tests(user):
     add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
     add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")
     add("pi_payment_api_key_configured", bool(PI_API_KEY) if PI_PAYMENTS_ENABLED else True, "Server-side Pi API key is configured when payments are enabled")
-    add("pi_payment_routes", all(name in app.view_functions for name in ("platform_pi_payment_config","platform_pi_payment_approve","platform_pi_payment_complete","platform_pi_payment_cancel")), "Pi U2A payment lifecycle routes are registered")
+    add("pi_payment_routes", all(name in app.view_functions for name in ("platform_pi_payment_config","platform_pi_payment_diagnostics","platform_pi_payment_approve","platform_pi_payment_complete","platform_pi_payment_cancel")), "Pi U2A payment lifecycle routes are registered")
     add("pi_payment_amount", PI_PAYMENT_AMOUNT > 0, f"configured amount={PI_PAYMENT_AMOUNT}")
     add("notifications_endpoint", "webapp_notifications" in app.view_functions, "Notifications endpoint registered")
     add("config_persistence", control_db_ready or not CONTROL_DB_REQUIRED, "Runtime controls have durable DB path when configured")
@@ -5291,7 +5493,8 @@ def owner_feature_tests(user):
         "webapp_external_app_open":"/api/app/external-apps/open",
         "webapp_nft_projects":"/api/app/nft/projects",
         "webapp_nft_image":"/api/app/nft/image",
-        "webapp_nft_marketplace_ai":"/api/app/nft/marketplace/ai"
+        "webapp_nft_marketplace_ai":"/api/app/nft/marketplace/ai",
+        "platform_pi_payment_diagnostics":"/api/platform/pi/payment/diagnostics"
     }
     for endpoint, path in required_routes.items():
         add("route:"+path, endpoint in app.view_functions, "Registered endpoint: "+endpoint)

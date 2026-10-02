@@ -214,25 +214,8 @@ NFT_ZYN_MAINNET_APPROVED = str(os.environ.get("NFT_ZYN_MAINNET_APPROVED", "false
 if NFT_ZYN_ENABLED and not NFT_ZYN_MAINNET_APPROVED:
     NFT_MARKETPLACE_CURRENCIES = [x for x in NFT_MARKETPLACE_CURRENCIES if x != "ZYN"] or ["PI"]
 PI_PAYMENTS_ENABLED = os.environ.get("PI_PAYMENTS_ENABLED", "true" if PI_SANDBOX else "false").strip().lower() in ("1", "true", "yes")
-
-# U2A payment configuration: the user signs from the user's own Pi wallet.
-# The app/developer wallet is the wallet registered for this Pi App; no second
-# user wallet or server-created wallet is introduced here.
-_raw_pi_payment_amount = os.environ.get("PI_PAYMENT_AMOUNT", "0.01").strip()
-_raw_pi_payment_memo = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()
-try:
-    PI_PAYMENT_AMOUNT = float(_raw_pi_payment_amount)
-except (TypeError, ValueError):
-    # Tolerate the common deployment mistake where amount and memo are swapped.
-    try:
-        PI_PAYMENT_AMOUNT = float(_raw_pi_payment_memo)
-    except (TypeError, ValueError):
-        PI_PAYMENT_AMOUNT = 0.01
-    if _raw_pi_payment_amount:
-        _raw_pi_payment_memo = _raw_pi_payment_amount
-PI_PAYMENT_AMOUNT = max(0.000001, PI_PAYMENT_AMOUNT)
-PI_PAYMENT_MEMO = (_raw_pi_payment_memo or "AI for — Testnet payment").strip()[:160]
-PI_PAYMENT_RUNTIME_ENABLED = bool(PI_PAYMENTS_ENABLED and PI_API_KEY and PI_PAYMENT_AMOUNT > 0)
+PI_PAYMENT_AMOUNT = float(os.environ.get("PI_PAYMENT_AMOUNT", "0.01"))
+PI_PAYMENT_MEMO = os.environ.get("PI_PAYMENT_MEMO", "AI for — Testnet payment").strip()[:160]
 EMAIL_AUTH_ENABLED = os.environ.get("AI_FOR_EMAIL_AUTH_ENABLED", "true").strip().lower() not in ("0", "false", "no")
 AUTH_LINK_MAX_AGE = int(os.environ.get("AI_FOR_AUTH_LINK_MAX_AGE", "86400"))
 SMTP_HOST = os.environ.get("AI_FOR_SMTP_HOST", "").strip()
@@ -3784,91 +3767,7 @@ body{background:#f4f5f7!important;color:#111827!important}
 <script>
 const tg=window.Telegram?.WebApp;let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){const controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';const useBearer=!!token;opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':(tg?.initData||'')},useBearer&&token?{'Authorization':'Bearer '+token}:{},opts.headers||{});if(opts.body instanceof FormData)delete opts.headers['Content-Type'];try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}if(path==='/api/app/bootstrap'&&d?.user){window.__AI_FOR_SESSION_READY=true}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}
-async function testPiPayment(){
-  const msg=document.getElementById('paymentMsg');
-  if(!window.PI_PAYMENTS_ENABLED){
-    msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';
-    return;
-  }
-  if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){
-    msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';
-    return;
-  }
-  const token=()=>window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'';
-  const headers=()=>({'Content-Type':'application/json','Authorization':'Bearer '+token()});
-  const completeIncomplete=async payment=>{
-    const paymentId=String(payment?.identifier||'').trim();
-    const txid=String(payment?.transaction?.txid||'').trim();
-    if(!paymentId||!txid)return;
-    try{
-      const r=await fetch('/api/platform/pi/payment/complete',{
-        method:'POST',headers:headers(),
-        body:JSON.stringify({payment_id:paymentId,txid})
-      });
-      const d=await r.json().catch(()=>({}));
-      if(!r.ok||!d.ok)console.warn('Pi incomplete payment completion failed',d);
-    }catch(e){console.warn('Pi incomplete payment completion error',e)}
-  };
-  msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';
-  try{
-    const auth=await window.Pi.authenticate(['username','payments'],completeIncomplete);
-    if(!auth?.accessToken)throw new Error('pi_auth_failed');
-    window.__PI_ACCESS_TOKEN=auth.accessToken;
-    sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);
-
-    const loginResponse=await fetch('/api/platform/pi/login',{
-      method:'POST',headers:headers(),
-      body:JSON.stringify({access_token:auth.accessToken})
-    });
-    const login=await loginResponse.json().catch(()=>({}));
-    if(!loginResponse.ok||!login.ok)throw new Error(login.error||'pi_login_failed');
-
-    await new Promise((resolve,reject)=>{
-      window.Pi.createPayment(
-        {
-          amount:Number(window.PI_PAYMENT_AMOUNT),
-          memo:window.PI_PAYMENT_MEMO,
-          metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet',purpose:'user_to_app_payment'}
-        },
-        {
-          onReadyForServerApproval:async paymentId=>{
-            try{
-              const r=await fetch('/api/platform/pi/payment/approve',{
-                method:'POST',headers:headers(),
-                body:JSON.stringify({payment_id:paymentId})
-              });
-              const d=await r.json().catch(()=>({}));
-              if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed');
-            }catch(e){reject(e)}
-          },
-          onReadyForServerCompletion:async(paymentId,txid)=>{
-            try{
-              const r=await fetch('/api/platform/pi/payment/complete',{
-                method:'POST',headers:headers(),
-                body:JSON.stringify({payment_id:paymentId,txid})
-              });
-              const d=await r.json().catch(()=>({}));
-              if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');
-              resolve(d);
-            }catch(e){reject(e)}
-          },
-          onCancel:async paymentId=>{
-            try{
-              await fetch('/api/platform/pi/payment/cancel',{
-                method:'POST',headers:headers(),
-                body:JSON.stringify({payment_id:paymentId})
-              });
-            }finally{reject(new Error('payment_cancelled'))}
-          },
-          onError:error=>reject(error||new Error('payment_error'))
-        }
-      );
-    });
-    msg.textContent='✅ تم إكمال دفع Pi بنجاح.';
-  }catch(e){
-    msg.textContent='⚠️ '+(e?.message||e);
-  }
-}
+async function testPiPayment(){const msg=document.getElementById('paymentMsg');if(!window.PI_PAYMENTS_ENABLED){msg.textContent='⚠️ Pi Payments غير مفعّل على الخادم.';return}if(!window.Pi||typeof window.Pi.authenticate!=='function'||typeof window.Pi.createPayment!=='function'){msg.textContent='⚠️ افتح AI for داخل Pi Browser لاستخدام Pi Payments.';return}msg.textContent='⏳ جاري تجهيز الدفع عبر Pi...';try{const auth=await window.Pi.authenticate(['username','payments'],async payment=>{const tx=payment&&payment.transaction&&payment.transaction.txid;if(payment?.identifier&&tx){await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:payment.identifier,txid:tx})})}});if(!auth?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=auth.accessToken;sessionStorage.setItem('ai_for_pi_access_token',auth.accessToken);const login=await fetch('/api/platform/pi/login',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+auth.accessToken,'X-Telegram-Init-Data':(tg?.initData||'')},body:JSON.stringify({access_token:auth.accessToken})}).then(r=>r.json());if(!login.ok)throw new Error(login.error||'pi_login_failed');await new Promise((resolve,reject)=>{window.Pi.createPayment({amount:Number(window.PI_PAYMENT_AMOUNT),memo:window.PI_PAYMENT_MEMO,metadata:{app:'ai-for',network:window.PI_SANDBOX?'testnet':'mainnet'}},{onReadyForServerApproval:async paymentId=>{try{const r=await fetch('/api/platform/pi/payment/approve',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'approval_failed')}catch(e){reject(e)}},onReadyForServerCompletion:async(paymentId,txid)=>{try{const r=await fetch('/api/platform/pi/payment/complete',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId,txid})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'completion_failed');resolve(d)}catch(e){reject(e)}},onCancel:async paymentId=>{try{await fetch('/api/platform/pi/payment/cancel',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+(window.__PI_ACCESS_TOKEN||sessionStorage.getItem('ai_for_pi_access_token')||'')},body:JSON.stringify({payment_id:paymentId})})}finally{reject(new Error('payment_cancelled'))}},onError:(error)=>reject(error||new Error('payment_error'))})});msg.textContent='✅ تم إكمال دفع Pi بنجاح.'}catch(e){msg.textContent='⚠️ '+(e?.message||e)}}
 function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.remove('active'));document.getElementById(id)?.classList.add('active')}
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
@@ -3944,7 +3843,7 @@ async function addFavorite(){let title=document.getElementById('favTitle')?.valu
 async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔔 الإشعارات</div><div id="notificationsList" class="statusBox">⏳ جاري التحميل...</div><button class="action dark" onclick="markAllNotificationsRead()">✓ تعليم الكل كمقروء</button></section>';try{let r=await fetch('/api/app/notifications',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'notifications_failed');let box=document.getElementById('notificationsList'),rows=d.notifications||[];box.innerHTML=rows.length?rows.map(n=>'<div class="row"><b>'+esc(n.title||'إشعار')+'</b><br><span class="small">'+esc(n.text||'')+'</span>'+(n.read?'':' <span class="badge">جديد</span>')+'</div>').join(''):'لا توجد إشعارات.';let badge=document.getElementById('notifyBadge');if(badge)badge.textContent=d.unread?('الإشعارات ('+d.unread+')'):'الإشعارات'}catch(e){document.getElementById('notificationsList').textContent='⚠️ تعذر تحميل الإشعارات.'}}
 async function markAllNotificationsRead(){try{await fetch('/api/app/notifications',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action:'read_all'})});await notificationsBox()}catch(e){}}
 async function loadWalletStatus(){let box=document.getElementById('walletBox');if(!box)return;try{let r=await fetch('/api/app/account/wallet',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_failed');box.innerHTML=d.linked&&d.wallet_address?'<b>👛 محفظة Pi المرتبطة</b><div class="small" style="word-break:break-all;margin-top:6px">'+esc(d.wallet_address)+'</div><span class="badge">مرتبطة</span>':'<b>👛 محفظتي</b><p class="small">اربط محفظة Pi المرتبطة بهويتك. لن نطلب أي مفتاح خاص أو عبارة سرية.</p><button class="action" onclick="linkUserWallet()">🟣 ربط محفظة Pi</button>'}catch(e){box.innerHTML='<b>👛 محفظتي</b><p class="small">اربط محفظة Pi من داخل Pi Browser. لن نطلب أي مفتاح خاص أو عبارة سرية.</p><button class="action" onclick="linkUserWallet()">🟣 ربط محفظة Pi</button>'}}
-async function linkUserWallet(){let box=document.getElementById('walletBox');if(!window.Pi?.authenticate){if(box)box.innerHTML='<div class="danger">⚠️ افتح AI for داخل Pi Browser لربط محفظة Pi.</div>';return}try{if(box)box.innerHTML='<div class="checking">⏳ جاري توثيق محفظة Pi...</div>';let a=await window.Pi.authenticate(['username','wallet_address'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let r=await fetch('/api/app/account/wallet',{method:'POST',headers:{...authHeaders(),'Authorization':'Bearer '+a.accessToken,'Content-Type':'application/json'},body:JSON.stringify({})}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_link_failed');await loadWalletStatus()}catch(e){if(box)box.innerHTML='<div class="danger">⚠️ '+esc(e.message||'تعذر ربط المحفظة')+'</div><button class="action" onclick="linkUserWallet()">إعادة المحاولة</button>'}}
+async function linkUserWallet(){let box=document.getElementById('walletBox');if(!window.Pi?.authenticate){if(box)box.innerHTML='<div class="danger">⚠️ افتح AI for داخل Pi Browser لربط محفظة Pi.</div>';return}try{if(box)box.innerHTML='<div class="checking">⏳ جاري توثيق محفظة Pi...</div>';let a=await window.Pi.authenticate(['wallet_address'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let r=await fetch('/api/app/account/wallet',{method:'POST',headers:{...authHeaders(),'Authorization':'Bearer '+a.accessToken,'Content-Type':'application/json'},body:JSON.stringify({})}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_link_failed');await loadWalletStatus()}catch(e){if(box)box.innerHTML='<div class="danger">⚠️ '+esc(e.message||'تعذر ربط المحفظة')+'</div><button class="action" onclick="linkUserWallet()">إعادة المحاولة</button>'}}
 function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row" style="display:flex;align-items:center;gap:12px">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox" id="walletBox"><b>👛 محفظتي</b><p class="small">جاري قراءة حالة محفظة Pi المرتبطة بالهوية...</p></div></section>';loadFavorites();loadIdentityStatus();loadProfilePhoto();loadWalletStatus()}
 async function loadProfilePhoto(){let box=document.getElementById('profileImageBox');if(!box)return;try{let r=await fetch('/api/app/account/photo?v='+Date.now(),{headers:authHeaders(),cache:'no-store'});if(!r.ok)throw new Error('no_photo');let blob=await r.blob();let im=new Image();im.className='profileAvatarLarge';im.onload=()=>{box.innerHTML='';box.appendChild(im)};im.src=URL.createObjectURL(blob);setHeaderAvatar(im.src)}catch(e){box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>';hideHeaderAvatar()}}
 async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f){if(r)r.textContent='⚠️ اختر صورة أولًا.';return}if(f.size>2*1024*1024){if(r)r.textContent='⚠️ الحد الأقصى للصورة 2MB.';return}if(r)r.textContent='⏳ جاري رفع الصورة...';try{let fd=new FormData();fd.append('photo',f);let h=authHeaders();delete h['Content-Type'];let res=await fetch('/api/app/account/photo',{method:'POST',headers:h,body:fd});let d=await res.json();if(!res.ok||!d.ok)throw new Error(d.error||'photo_upload_failed');if(r)r.innerHTML='<span class="ok">✅ تم حفظ الصورة الشخصية.</span>';await loadProfilePhoto()}catch(e){if(r)r.textContent='⚠️ '+(e.message||'تعذر رفع الصورة')}}
@@ -3954,7 +3853,7 @@ function hideHeaderAvatar(){let a=document.getElementById('headerAvatar');if(a)a
 
 async function loadIdentityStatus(){try{let d=await fetch('/api/platform/identity/status').then(r=>r.json());if(!d.ok)throw new Error(d.error);let ids=d.identities||[];document.getElementById('identityStatus').textContent='🔐 مزودو الدخول: '+(ids.map(x=>x.provider).join(' · ')||'لم يتم الربط بعد');document.getElementById('identityLinks').innerHTML=ids.length?ids.map(x=>'<div class="row">✓ '+esc(x.provider)+(x.provider_username?' — '+esc(x.provider_username):'')+'</div>').join(''):'<div>لم يتم ربط مزود إضافي بعد.</div>'}catch(e){document.getElementById('identityLinks').textContent='⚠️ تعذر قراءة حالة الربط.'}}
 async function updateProfile(){let r=document.getElementById('profileEditResult');r.textContent='⏳';try{let d=await fetch('/api/platform/profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({display_name:document.getElementById('editDisplayName').value,username:document.getElementById('editUsername').value})}).then(x=>x.json());if(!d.ok)throw new Error(d.error||'update_failed');r.innerHTML='<div class="statusBox">✅ تم حفظ التعديل.</div>';state.user.first_name=d.account.display_name;state.user.username=d.account.username;document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'')}catch(e){r.innerHTML='<div class="statusBox">⚠️ '+esc(e.message)+'</div>'}}
-async function linkPi(){if(!window.Pi?.authenticate){document.getElementById('linkResult').textContent='⚠️ افتح AI for داخل Pi Browser.';return}try{let a=await window.Pi.authenticate(['wallet_address'],()=>{});if(!a?.accessTokenthrow new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+a.accessToken},body:JSON.stringify({provider:'pi',access_token:a.accessToken})}).then(r=>r.json());if(!d.ok)throw new Error(d.error);document.getElementById('linkResult').textContent='✅ تم ربط Pi: @'+(d.account.username||'');accountBox()}catch(e){document.getElementById('linkResult').textContent='⚠️ '+e.message}}
+async function linkPi(){if(!window.Pi?.authenticate){document.getElementById('linkResult').textContent='⚠️ افتح AI for داخل Pi Browser.';return}try{let a=await window.Pi.authenticate(['username','wallet_address'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+a.accessToken},body:JSON.stringify({provider:'pi',access_token:a.accessToken})}).then(r=>r.json());if(!d.ok)throw new Error(d.error);document.getElementById('linkResult').textContent='✅ تم ربط Pi: @'+(d.account.username||'');accountBox()}catch(e){document.getElementById('linkResult').textContent='⚠️ '+e.message}}
 async function linkGoogle(){if(!window.google?.accounts?.id){let s=document.createElement('script');s.src='https://accounts.google.com/gsi/client';document.head.appendChild(s);await new Promise(r=>setTimeout(r,700))}if(!window.GOOGLE_CLIENT_ID||!window.google?.accounts?.id){document.getElementById('linkResult').textContent='⚠️ Google غير مفعّل.';return}window.google.accounts.id.initialize({client_id:window.GOOGLE_CLIENT_ID,callback:async r=>{let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider:'google',id_token:r.credential})}).then(x=>x.json());document.getElementById('linkResult').textContent=d.ok?'✅ تم ربط Google.':'⚠️ '+(d.error||'link_failed');if(d.ok)accountBox()}});window.google.accounts.id.prompt()}
 async function linkTelegram(){window.onTelegramAuth=async u=>{let d=await fetch('/api/platform/identity/link',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.assign({provider:'telegram'},u||{}))}).then(x=>x.json());document.getElementById('linkResult').textContent=d.ok?'✅ تم ربط Telegram.':'⚠️ '+(d.error||'link_failed');if(d.ok)accountBox()};let b=document.getElementById('tgLinkWidget');if(b)b.remove();b=document.createElement('div');b.id='tgLinkWidget';let sc=document.createElement('script');sc.async=true;sc.src='https://telegram.org/js/telegram-widget.js?22';sc.dataset.telegramLogin=window.TELEGRAM_BOT_USERNAME;sc.dataset.size='large';sc.dataset.userpic='false';sc.dataset.requestAccess='write';sc.dataset.onauth='onTelegramAuth(user)';b.appendChild(sc);document.getElementById('linkResult').appendChild(b)}
 
@@ -4215,37 +4114,19 @@ def platform_pi_payment_config():
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
     return jsonify({
         "ok": True,
-        "enabled": PI_PAYMENT_RUNTIME_ENABLED,
+        "enabled": bool(PI_PAYMENTS_ENABLED and PI_API_KEY and float(PI_PAYMENT_AMOUNT) > 0),
         "sandbox": bool(PI_SANDBOX),
         "amount": PI_PAYMENT_AMOUNT,
         "memo": PI_PAYMENT_MEMO,
     })
 
 
-@app.route("/api/platform/pi/payment/diagnostics", methods=["GET"])
-def platform_pi_payment_diagnostics():
-    """Non-secret payment readiness check."""
-    account = _get_web_account_from_request()
-    if not account:
-        return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    return jsonify({
-        "ok": True,
-        "payments_enabled": bool(PI_PAYMENTS_ENABLED),
-        "runtime_enabled": bool(PI_PAYMENT_RUNTIME_ENABLED),
-        "sandbox": bool(PI_SANDBOX),
-        "api_key_present": bool(PI_API_KEY),
-        "api_base": PI_API_BASE_URL,
-        "amount": PI_PAYMENT_AMOUNT,
-        "memo_configured": bool(PI_PAYMENT_MEMO),
-        "user_payment_model": "user_wallet_to_app_wallet",
-    })
-
 @app.route("/api/platform/pi/payment/approve", methods=["POST"])
 def platform_pi_payment_approve():
     account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if not PI_PAYMENT_RUNTIME_ENABLED:
+    if not PI_PAYMENTS_ENABLED:
         return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
     body = request.get_json(silent=True) or {}
     payment_id = str(body.get("payment_id") or "").strip()
@@ -4265,7 +4146,7 @@ def platform_pi_payment_complete():
     account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if not PI_PAYMENT_RUNTIME_ENABLED:
+    if not PI_PAYMENTS_ENABLED:
         return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
     body = request.get_json(silent=True) or {}
     payment_id = str(body.get("payment_id") or "").strip()
@@ -4289,7 +4170,7 @@ def platform_pi_payment_cancel():
     account = _get_web_account_from_request()
     if not account:
         return jsonify({"ok": False, "error": "pi_auth_required"}), 401
-    if not PI_PAYMENT_RUNTIME_ENABLED:
+    if not PI_PAYMENTS_ENABLED:
         return jsonify({"ok": False, "error": "pi_payments_disabled"}), 403
     body = request.get_json(silent=True) or {}
     payment_id = str(body.get("payment_id") or "").strip()
@@ -4484,7 +4365,7 @@ def platform_home():
     html = (PLATFORM_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
              .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
              .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
-             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if PI_PAYMENT_RUNTIME_ENABLED else "false")
+             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
              .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
              .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
@@ -4500,7 +4381,7 @@ def webapp():
     html = (WEBAPP_HTML.replace("__AI_FOR_PI_CLIENT_ID__", json.dumps(PI_CLIENT_ID)[1:-1])
             .replace("__AI_FOR_PI_SIGNIN_REDIRECT_URI__", json.dumps(redirect_uri)[1:-1])
             .replace("__AI_FOR_PI_SANDBOX__", "true" if PI_SANDBOX else "false")
-            .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if PI_PAYMENT_RUNTIME_ENABLED else "false")
+            .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
             .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
             .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
     return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
@@ -5466,7 +5347,7 @@ def owner_feature_tests(user):
     add("search_endpoint", callable(globals().get("search_official")), "Verified search function exists")
     add("pi_endpoint", "webapp_pi" in app.view_functions, "Pi endpoint registered")
     add("pi_payment_api_key_configured", bool(PI_API_KEY) if PI_PAYMENTS_ENABLED else True, "Server-side Pi API key is configured when payments are enabled")
-    add("pi_payment_routes", all(name in app.view_functions for name in ("platform_pi_payment_config","platform_pi_payment_diagnostics","platform_pi_payment_approve","platform_pi_payment_complete","platform_pi_payment_cancel")), "Pi U2A payment lifecycle routes are registered")
+    add("pi_payment_routes", all(name in app.view_functions for name in ("platform_pi_payment_config","platform_pi_payment_approve","platform_pi_payment_complete","platform_pi_payment_cancel")), "Pi U2A payment lifecycle routes are registered")
     add("pi_payment_amount", PI_PAYMENT_AMOUNT > 0, f"configured amount={PI_PAYMENT_AMOUNT}")
     add("notifications_endpoint", "webapp_notifications" in app.view_functions, "Notifications endpoint registered")
     add("config_persistence", control_db_ready or not CONTROL_DB_REQUIRED, "Runtime controls have durable DB path when configured")
@@ -5493,8 +5374,7 @@ def owner_feature_tests(user):
         "webapp_external_app_open":"/api/app/external-apps/open",
         "webapp_nft_projects":"/api/app/nft/projects",
         "webapp_nft_image":"/api/app/nft/image",
-        "webapp_nft_marketplace_ai":"/api/app/nft/marketplace/ai",
-        "platform_pi_payment_diagnostics":"/api/platform/pi/payment/diagnostics"
+        "webapp_nft_marketplace_ai":"/api/app/nft/marketplace/ai"
     }
     for endpoint, path in required_routes.items():
         add("route:"+path, endpoint in app.view_functions, "Registered endpoint: "+endpoint)

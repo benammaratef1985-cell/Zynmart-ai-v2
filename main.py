@@ -182,7 +182,7 @@ PI_API_BASE_URL = os.environ.get("PI_API_BASE_URL", "https://api.minepi.com/v2")
 # NFT infrastructure: optional, server-side only. No wallet secret is ever sent to the browser.
 NFT_IPFS_PROVIDER = os.environ.get("NFT_IPFS_PROVIDER", "pinata").strip().lower()
 NFT_IPFS_JWT = (os.environ.get("NFT_IPFS_JWT") or os.environ.get("PINATA_JWT") or "").strip()
-NFT_IPFS_URL = os.environ.get("NFT_IPFS_URL", NFT_IPFS_URL).strip()
+NFT_IPFS_URL = os.environ.get("NFT_IPFS_URL", "https://api.pinata.cloud/pinning/pinFileToIPFS").strip()
 NFT_MARKETPLACE_URL = os.environ.get("NFT_MARKETPLACE_URL", "").strip()
 NFT_CONTRACT_ID = os.environ.get("NFT_CONTRACT_ID", "").strip()
 NFT_CONTRACT_NETWORK = os.environ.get("NFT_CONTRACT_NETWORK", "testnet").strip().lower()

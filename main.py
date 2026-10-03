@@ -3864,7 +3864,9 @@ async function loadFavorites(){let box=document.getElementById('favList');if(!bo
 async function addFavorite(){let title=document.getElementById('favTitle')?.value.trim(),url=document.getElementById('favUrl')?.value.trim(),r=document.getElementById('favResult');if(!title){if(r)r.textContent='⚠️ اكتب عنوان العنصر.';return}try{let d=await api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op:'favorite_add',item_type:'general',item_key:(url||title).slice(0,300),title,url})});if(!d.ok)throw new Error(d.error||'favorite_failed');if(r)r.innerHTML='<span class="ok">✅ تم الحفظ.</span>';await loadFavorites()}catch(e){if(r)r.textContent='⚠️ '+(e.message||'تعذر الحفظ')}}
 async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔔 الإشعارات</div><div id="notificationsList" class="statusBox">⏳ جاري التحميل...</div><button class="action dark" onclick="markAllNotificationsRead()">✓ تعليم الكل كمقروء</button></section>';try{let r=await fetch('/api/app/notifications',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'notifications_failed');let box=document.getElementById('notificationsList'),rows=d.notifications||[];box.innerHTML=rows.length?rows.map(n=>'<div class="row"><b>'+esc(n.title||'إشعار')+'</b><br><span class="small">'+esc(n.text||'')+'</span>'+(n.read?'':' <span class="badge">جديد</span>')+'</div>').join(''):'لا توجد إشعارات.';let badge=document.getElementById('notifyBadge');if(badge)badge.textContent=d.unread?('الإشعارات ('+d.unread+')'):'الإشعارات'}catch(e){document.getElementById('notificationsList').textContent='⚠️ تعذر تحميل الإشعارات.'}}
 async function markAllNotificationsRead(){try{await fetch('/api/app/notifications',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action:'read_all'})});await notificationsBox()}catch(e){}}
-async function loadWalletStatus(){let box=document.getElementById('walletBox');if(!box)return;try{let r=await fetch('/api/app/account/wallet',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_failed');box.innerHTML=d.linked&&d.wallet_address?'<b>👛 محفظة Pi المرتبطة</b><div class="small" style="word-break:break-all;margin-top:6px">'+esc(d.wallet_address)+'</div><span class="badge">مرتبطة</span>':'<b>👛 محفظتي</b><p class="small">اربط محفظة Pi المرتبطة بهويتك. لن نطلب أي مفتاح خاص أو عبارة سرية.</p><button class="action" onclick="linkUserWallet()">🟣 ربط محفظة Pi</button>'}catch(e){box.innerHTML='<b>👛 محفظتي</b><p class="small">اربط محفظة Pi من داخل Pi Browser. لن نطلب أي مفتاح خاص أو عبارة سرية.</p><button class="action" onclick="linkUserWallet()">🟣 ربط محفظة Pi</button>'}}
+async function loadWalletStatus(){let box=document.getElementById('walletBox');if(!box)return;try{let r=await fetch('/api/app/account/wallet',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_failed');if(d.linked&&d.wallet_address){box.innerHTML='<b>👛 محفظة Pi المرتبطة</b><div class="small" style="word-break:break-all;margin-top:6px">'+esc(d.wallet_address)+'</div><span class="badge">مرتبطة ✓</span>'}else{box.innerHTML='<b>👛 محفظتي</b><p class="small">اربط محفظتك بإحدى الطريقتين:</p><button class="action" onclick="linkUserWallet()">🟣 ربط تلقائي عبر Pi</button><div style="margin-top:14px;padding-top:12px;border-top:1px solid #ddd"><b class="small">أو أدخل العنوان يدويًا:</b><input id="manualWallet" placeholder="GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" style="width:100%;margin-top:8px;padding:10px;font-size:12px" maxlength="56"><button class="action dark" onclick="linkWalletManual()">🔗 ربط وتحقق من الشبكة</button><div id="manualWalletResult" class="small" style="margin-top:6px"></div></div>'}}catch(e){box.innerHTML='<b>👛 محفظتي</b><p class="small">اربط محفظتك:</p><button class="action" onclick="linkUserWallet()">🟣 ربط تلقائي عبر Pi</button><div style="margin-top:14px;padding-top:12px;border-top:1px solid #ddd"><b class="small">أو أدخل العنوان يدويًا:</b><input id="manualWallet" placeholder="GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" style="width:100%;margin-top:8px;padding:10px;font-size:12px" maxlength="56"><button class="action dark" onclick="linkWalletManual()">🔗 ربط وتحقق من الشبكة</button><div id="manualWalletResult" class="small" style="margin-top:6px"></div></div>'}}
+
+async function linkWalletManual(){let inp=document.getElementById('manualWallet'),res=document.getElementById('manualWalletResult');if(!inp||!res)return;let addr=inp.value.trim().toUpperCase();if(!/^G[A-Z2-7]{55}$/.test(addr)){res.innerHTML='<span class="danger">⚠️ العنوان يجب أن يبدأ بـG ويكون 56 حرفًا</span>';return}res.innerHTML='⏳ جاري التحقق من الشبكة...';try{let r=await fetch('/api/app/account/wallet/manual',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({wallet_address:addr})});let d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'link_failed');res.innerHTML='<span class="ok">✅ تم الربط والتحقق من الشبكة</span>';setTimeout(()=>loadWalletStatus(),600)}catch(e){res.innerHTML='<span class="danger">⚠️ '+esc(e.message||'فشل')+'</span>'}}
 async function linkUserWallet(){let box=document.getElementById('walletBox');if(!window.Pi?.authenticate){if(box)box.innerHTML='<div class="danger">⚠️ افتح AI for داخل Pi Browser لربط محفظة Pi.</div>';return}try{if(box)box.innerHTML='<div class="checking">⏳ جاري توثيق محفظة Pi...</div>';let a=await window.Pi.authenticate(['username','payments','wallet_address'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let r=await fetch('/api/app/account/wallet',{method:'POST',headers:{...authHeaders(),'Authorization':'Bearer '+a.accessToken,'Content-Type':'application/json'},body:JSON.stringify({wallet_address:String(a.user?.wallet_address||a.user?.walletAddress||a.wallet_address||a.walletAddress||'').trim()})}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_link_failed');await loadWalletStatus()}catch(e){if(box)box.innerHTML='<div class="danger">⚠️ '+esc(e.message||'تعذر ربط المحفظة')+'</div><button class="action" onclick="linkUserWallet()">إعادة المحاولة</button>'}}
 function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row" style="display:flex;align-items:center;gap:12px">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox" id="walletBox"><b>👛 محفظتي</b><p class="small">جاري قراءة حالة محفظة Pi المرتبطة بالهوية...</p></div></section>';loadFavorites();loadIdentityStatus();loadProfilePhoto();loadWalletStatus()}
 async function loadProfilePhoto(){let box=document.getElementById('profileImageBox');if(!box)return;try{let r=await fetch('/api/app/account/photo?v='+Date.now(),{headers:authHeaders(),cache:'no-store'});if(!r.ok)throw new Error('no_photo');let blob=await r.blob();let im=new Image();im.className='profileAvatarLarge';im.onload=()=>{box.innerHTML='';box.appendChild(im)};im.src=URL.createObjectURL(blob);setHeaderAvatar(im.src)}catch(e){box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>';hideHeaderAvatar()}}
@@ -5137,6 +5139,71 @@ def _platform_messages(user):
         cur.execute("SELECT message_id,sender_identity,recipient_identity,body,created_at,read_at FROM ai_for_messages WHERE sender_identity=%s OR recipient_identity=%s ORDER BY created_at DESC LIMIT 100",(identity,identity))
         return [dict(x) for x in cur.fetchall()]
     return _platform_db_query(q) or []
+
+@app.route("/api/app/account/wallet/manual", methods=["POST"])
+def webapp_account_wallet_manual():
+    """Link a Pi wallet address by manual input with real blockchain verification.
+
+    This bypasses Pi SDK wallet_address scope limitations by validating the
+    address directly against the Pi Horizon API. The address is stored only
+    after the network confirms it exists and holds a valid account.
+    """
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    account_id = str(user.get("platform_account_id") or "").strip()
+    if not account_id:
+        return jsonify({"ok":False,"error":"account_required"}), 401
+    body = request.get_json(silent=True) or {}
+    wallet_address = str(body.get("wallet_address") or "").strip()
+    if not re.fullmatch(r"G[A-Z2-7]{55}", wallet_address):
+        return jsonify({"ok":False,"error":"invalid_pi_wallet_format",
+                        "hint":"Pi wallet address must start with G and be 56 characters"}), 400
+    # Verify on Pi Horizon (testnet or mainnet depending on env)
+    horizon_base = NFT_HORIZON_URL if NFT_HORIZON_URL else "https://api.testnet.minepi.com"
+    verified = False
+    detail = ""
+    try:
+        r = requests.get(horizon_base.rstrip("/") + "/accounts/" + wallet_address, timeout=10)
+        if r.status_code == 200:
+            verified = True
+            detail = "account_exists_on_pi_network"
+        else:
+            detail = f"pi_horizon_{r.status_code}"
+    except Exception as e:
+        detail = f"horizon_unreachable: {str(e)[:100]}"
+    if not verified:
+        return jsonify({"ok":False,"error":"wallet_not_verified_on_pi_network",
+                        "detail":detail,"network":"testnet" if "testnet" in horizon_base else "mainnet"}), 400
+    # Persist the verified address
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return jsonify({"ok":False,"error":"database_unavailable"}), 503
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT 1 FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' AND verified=TRUE LIMIT 1",
+                            (account_id,))
+                if not cur.fetchone():
+                    return jsonify({"ok":False,"error":"pi_identity_not_linked"}), 409
+                cur.execute("""UPDATE ai_for_identity_links
+                               SET wallet_address=%s, last_seen=NOW()
+                               WHERE account_id=%s AND provider='pi' AND verified=TRUE
+                               RETURNING provider_username""",
+                            (wallet_address[:160], account_id))
+                row = cur.fetchone()
+                if not row:
+                    return jsonify({"ok":False,"error":"pi_identity_not_linked"}), 409
+        control_audit(user.get("id", 0), "wallet_manual_link", account_id,
+                      {"wallet_address": wallet_address[:20]+"..."})
+        return jsonify({"ok":True,"wallet_address":wallet_address,
+                        "verified":True,"source":"manual_with_horizon_check"})
+    except Exception as e:
+        print(f"Manual wallet link error: {e}")
+        return jsonify({"ok":False,"error":"wallet_link_failed"}), 503
+    finally:
+        _membership_db_release(conn)
+
 
 @app.route("/api/app/account/wallet", methods=["GET","POST"])
 def webapp_account_wallet():

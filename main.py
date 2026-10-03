@@ -650,7 +650,7 @@ def register_platform_member(user, source="webapp", chat_id=None):
     uid = user.get("id") if isinstance(user, dict) else None
     if not uid:
         return False, False
-    if not membership_db_ready and not init_membership_db():
+    if not ensure_database_ready() or (not membership_db_ready and not init_membership_db()):
         return False, False
     now = datetime.now(ZoneInfo("Africa/Tunis"))
     conn = None
@@ -690,6 +690,8 @@ def register_platform_member(user, source="webapp", chat_id=None):
         _membership_db_release(conn)
 
 def get_platform_member(user_id):
+    try: ensure_database_ready()
+    except Exception: pass
     if not membership_db_ready or not user_id:
         return None
     conn=None
@@ -707,6 +709,8 @@ def get_platform_member(user_id):
         _membership_db_release(conn)
 
 def list_platform_members(limit=100, offset=0, search=""):
+    try: ensure_database_ready()
+    except Exception: pass
     if not membership_db_ready: return []
     conn=None
     try:
@@ -909,7 +913,7 @@ def _verify_email_code(account_id, code):
     finally:_membership_db_release(conn)
 
 def create_web_account(display_name="",username="",email="",password=""):
-    if not membership_db_ready and not init_membership_db():return None,"database_unavailable"
+    if not ensure_database_ready() or (not membership_db_ready and not init_membership_db()):return None,"database_unavailable"
     token=secrets.token_urlsafe(48); account_id=str(uuid.uuid4()); display_name=str(display_name or "").strip()[:80]; username=_normalize_web_username(username); email=_normalize_web_email(email)
     if username and not re.fullmatch(r"[a-z0-9_]{3,32}",username):return None,"invalid_username"
     if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):return None,"invalid_email"
@@ -1197,6 +1201,8 @@ def update_web_profile(account_id,display_name=None,username=None):
     finally:_membership_db_release(conn)
 
 def save_web_profile_photo(account_id, raw, mime):
+    try: ensure_database_ready()
+    except Exception: pass
     if not membership_db_ready or not account_id or not raw: return False
     conn=None
     try:
@@ -1213,6 +1219,8 @@ def save_web_profile_photo(account_id, raw, mime):
         _membership_db_release(conn)
 
 def get_web_profile_photo(account_id):
+    try: ensure_database_ready()
+    except Exception: pass
     if not membership_db_ready or not account_id:return None
     conn=None
     try:
@@ -1413,6 +1421,8 @@ def set_platform_member_role(user_id, role):
         _membership_db_release(conn)
 
 def save_profile_photo(user_id, raw, mime):
+    try: ensure_database_ready()
+    except Exception: pass
     if not membership_db_ready or not raw: return False
     conn=None
     try:
@@ -1429,6 +1439,8 @@ def save_profile_photo(user_id, raw, mime):
         _membership_db_release(conn)
 
 def get_profile_photo(user_id):
+    try: ensure_database_ready()
+    except Exception: pass
     if not membership_db_ready or not user_id:return None
     conn=None
     try:
@@ -3313,6 +3325,8 @@ def _nft_project_create(user, name='', description='', collection_name='', marke
     """Create an NFT Studio project while preserving the existing draft workflow."""
     identity = _webapp_identity_key(user); project_id = str(uuid.uuid4()); conn = None
     try:
+        try: ensure_database_ready()
+        except Exception: pass
         if not membership_db_ready: return {"ok": False, "error": "database_unavailable"}
         conn = _membership_db_connect()
         if not conn: return {"ok": False, "error": "database_unavailable"}
@@ -3334,6 +3348,8 @@ def _nft_project_create(user, name='', description='', collection_name='', marke
 def _nft_projects_list(user):
     identity=_webapp_identity_key(user); conn=None
     try:
+        try: ensure_database_ready()
+        except Exception: pass
         if not membership_db_ready:return {"ok":False,"error":"database_unavailable","projects":[]}
         conn=_membership_db_connect()
         if not conn:return {"ok":False,"error":"database_unavailable","projects":[]}

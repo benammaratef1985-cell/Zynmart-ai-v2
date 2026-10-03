@@ -3200,6 +3200,11 @@ def _webapp_auth():
     # be carried by the secure web session cookie or by the Pi SDK bearer token.
     channel = str(request.headers.get("X-AI-For-Channel", "")).strip().lower()
     account = _get_web_account_from_request()
+    if not account:
+        # Pi Browser sometimes drops the session cookie; use the Pi SDK token.
+        auth = str(request.headers.get("Authorization","")).strip()
+        if auth.lower().startswith("bearer "):
+            account = _web_account_from_pi_access_token(auth[7:].strip())
     if channel in ("pi", "telegram"):
         if account:
             # If this authenticated Pi account arrived through Telegram and the
@@ -4082,6 +4087,7 @@ def platform_pi_login():
                             meta_owner["telegram_bridge_id"] = str(OWNER_ID)
                             meta_owner["telegram_bridge_role"] = "owner"
                             meta_owner["pi_owner_uid"] = PI_OWNER_UID
+                            meta_owner["pi_uid"] = str(verified.get("uid") or "")
                             meta_owner["owner_verified_at"] = datetime.now(ZoneInfo("UTC")).isoformat()
                             cur_owner.execute("UPDATE ai_for_web_accounts SET metadata=%s,last_seen=NOW() WHERE account_id=%s AND status='active'", (json.dumps(meta_owner, ensure_ascii=False), str(account["account_id"])))
         except Exception as owner_bind_error:
@@ -4300,6 +4306,12 @@ def platform_identity_link():
 @app.route("/api/platform/identity/status", methods=["GET"])
 def platform_identity_status():
     account=_get_web_account_from_request()
+    if not account:
+        # Pi Browser WebView may drop the cookie between page loads; accept the
+        # Pi SDK bearer token as an alternate proof of identity.
+        auth = str(request.headers.get("Authorization","")).strip()
+        if auth.lower().startswith("bearer "):
+            account = _web_account_from_pi_access_token(auth[7:].strip())
     if not account:return jsonify({"ok":False,"error":"not_authenticated"}),401
     conn=None
     try:
@@ -4333,6 +4345,12 @@ def platform_register():
 @app.route("/api/platform/me", methods=["GET"])
 def platform_me():
     account = _get_web_account_from_request()
+    if not account:
+        # Same tolerant fallback as identity/status: allow Pi SDK bearer token
+        # when the WebView drops the session cookie.
+        auth = str(request.headers.get("Authorization","")).strip()
+        if auth.lower().startswith("bearer "):
+            account = _web_account_from_pi_access_token(auth[7:].strip())
     if not account:
         return jsonify({"ok": False, "error": "not_authenticated"}), 401
     return jsonify({"ok": True, "account": _web_account_public(account)})
@@ -4923,18 +4941,35 @@ def _platform_identity(user):
     return _webapp_identity_key(user)
 
 def _platform_db_query(fn):
-    conn=None
-    try:
-        conn=_membership_db_connect()
-        if not conn: return None
-        with conn:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                return fn(cur)
-    except Exception as e:
-        print(f"Platform DB error: {e}")
-        return None
-    finally:
-        _membership_db_release(conn)
+    """Central DB helper: retries once on transient connection failures,
+    surfaces the actual exception in logs, and always closes its connection."""
+    last_err = None
+    for attempt in range(2):
+        conn=None
+        try:
+            conn=_membership_db_connect()
+            if not conn:
+                last_err = "no_connection"
+                if attempt == 0:
+                    try: ensure_database_ready()
+                    except Exception: pass
+                    continue
+                return None
+            with conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    return fn(cur)
+        except Exception as e:
+            last_err = e
+            import traceback
+            print(f"Platform DB error [attempt {attempt+1}]: {e}")
+            traceback.print_exc()
+            if attempt == 0:
+                continue
+            return None
+        finally:
+            _membership_db_release(conn)
+    print(f"Platform DB final failure: {last_err}")
+    return None
 
 REPUTATION_EVENT_POINTS={"visit":1,"ai_use":2,"search_use":1,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":2,"message_send":1,"support_ticket":1,"quiz_correct":10}
 
@@ -4950,8 +4985,8 @@ def _record_reputation_event(user,event_type,source_key="",metadata=None,reward=
             if points:
                 cur.execute("INSERT INTO ai_for_rewards(identity_key,points) VALUES(%s,%s) ON CONFLICT(identity_key) DO UPDATE SET points=GREATEST(0,ai_for_rewards.points+%s),updated_at=NOW()",(identity,points,points))
                 cur.execute("INSERT INTO ai_for_reward_ledger(ledger_id,identity_key,event_type,points,source_key) VALUES(%s,%s,%s,%s,%s) ON CONFLICT(identity_key,event_type,source_key) DO NOTHING",(str(uuid.uuid4()),identity,event_type,points,source_key))
-        cur.execute("SELECT score,level FROM ai_for_reputation WHERE identity_key=%s",(identity,)); row=cur.fetchone() or {"score":0,"level":1}
-        return {"recorded":inserted,"points":points if inserted else 0,"score":int(row["score"]),"level":int(row["level"])}
+        cur.execute("SELECT score,level FROM ai_for_reputation WHERE identity_key=%s",(identity,)); row=cur.fetchone()
+        return {"recorded":inserted,"points":points if inserted else 0,"score":(int(row["score"]) if row and row.get("score") is not None else 0),"level":(int(row["level"]) if row and row.get("level") is not None else 1)}
     result=_platform_db_query(q); return {"ok":result is not None,**(result or {"recorded":False,"points":0,"score":0,"level":1})}
 
 def _reputation_snapshot(user):
@@ -4959,7 +4994,7 @@ def _reputation_snapshot(user):
     def q(cur):
         cur.execute("SELECT score,level,updated_at FROM ai_for_reputation WHERE identity_key=%s",(identity,)); row=cur.fetchone()
         cur.execute("SELECT event_type,points,created_at FROM ai_for_reputation_events WHERE identity_key=%s ORDER BY created_at DESC LIMIT 30",(identity,)); events=[dict(x) for x in cur.fetchall()]
-        return {"score":int(row["score"]) if row else 0,"level":int(row["level"]) if row else 1,"updated_at":row["updated_at"].isoformat() if row and row.get("updated_at") else None,"events":events}
+        return {"score":int(row["score"]) if row and row.get("score") is not None else 0,"level":int(row["level"]) if row and row.get("level") is not None else 1,"updated_at":row["updated_at"].isoformat() if row and row.get("updated_at") else None,"events":events}
     return _platform_db_query(q) or {"score":0,"level":1,"events":[]}
 
 def _zynmart_plus_snapshot(user):
@@ -5059,17 +5094,24 @@ def _platform_message_send(user, recipient, body):
             except Exception:
                 uid=0
             cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s LIMIT 1",(uid,))
-            row=cur.fetchone(); resolved=("tg:"+str(row["user_id"])) if row else None
+            row=cur.fetchone()
+            try: resolved=("tg:"+str(row["user_id"])) if row and row.get("user_id") is not None else None
+            except Exception: resolved=None
         elif recipient.isdigit():
             cur.execute("SELECT user_id FROM ai_for_members WHERE user_id=%s LIMIT 1",(int(recipient),))
-            row=cur.fetchone(); resolved=("tg:"+str(row["user_id"])) if row else None
+            row=cur.fetchone()
+            try: resolved=("tg:"+str(row["user_id"])) if row and row.get("user_id") is not None else None
+            except Exception: resolved=None
         else:
             cur.execute("SELECT user_id FROM ai_for_members WHERE lower(username)=lower(%s) LIMIT 1",(recipient,))
             row=cur.fetchone()
-            if row: resolved="tg:"+str(row["user_id"])
-            else:
+            try: resolved=("tg:"+str(row["user_id"])) if row and row.get("user_id") is not None else None
+            except Exception: resolved=None
+            if not resolved:
                 cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1",(recipient,))
-                row=cur.fetchone(); resolved=("web:"+str(row["account_id"])) if row else None
+                row=cur.fetchone()
+                try: resolved=("web:"+str(row["account_id"])) if row and row.get("account_id") is not None else None
+                except Exception: resolved=None
         if not resolved or resolved==identity: return None
         cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,resolved,body_text))
         return dict(cur.fetchone())
@@ -5104,6 +5146,16 @@ def webapp_account_wallet():
                 if verr or not verified: return jsonify({"ok":False,"error":verr or "pi_identity_missing"}),401
                 body=request.get_json(silent=True) or {}
                 wallet_address=str(verified.get("wallet_address") or body.get("wallet_address") or body.get("walletAddress") or "").strip()
+                # Final safety net: re-read Pi /v2/me when the first pass is empty
+                if not re.fullmatch(r"G[A-Z2-7]{55}", wallet_address):
+                    try:
+                        _extra = requests.get("https://api.minepi.com/v2/me",
+                                              headers={"Authorization": f"Bearer {token[7:].strip()}"},
+                                              timeout=6).json()
+                        _u = _extra.get("user") if isinstance(_extra.get("user"), dict) else _extra
+                        wallet_address = str(_u.get("wallet_address") or _u.get("walletAddress") or "").strip()
+                    except Exception:
+                        pass
                 if not re.fullmatch(r"G[A-Z2-7]{55}", wallet_address): return jsonify({"ok":False,"error":"wallet_scope_required"}),400
                 cur.execute("UPDATE ai_for_identity_links SET wallet_address=%s,provider_username=%s,last_seen=NOW() WHERE account_id=%s AND provider='pi' AND provider_subject=%s AND verified=TRUE RETURNING wallet_address,provider_username",(wallet_address[:160],str(verified.get("username") or "")[:80],account_id,str(verified["uid"])))
                 row=cur.fetchone()

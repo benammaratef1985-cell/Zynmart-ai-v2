@@ -604,13 +604,35 @@ def init_membership_db():
         _membership_db_release(conn)
 
 def ensure_database_ready():
-    """Retry DB initialization after transient Render/Postgres restarts."""
+    """Retry DB initialization after transient Render/Postgres restarts.
+
+    Also self-heals a stale `membership_db_ready=False` when the underlying
+    connection actually works (which happens if the initial startup pass failed
+    before the database was fully reachable on Render)."""
+    # Fast path: both flags are already True.
     if membership_db_ready and control_db_ready:
         return True
     with db_retry_lock:
-        ok = init_membership_db()
+        # If membership is marked False, but a live connection succeeds, heal the flag.
+        if not membership_db_ready:
+            _db_pool_init()
+            _probe = _membership_db_connect()
+            if _probe:
+                try:
+                    with _probe:
+                        with _probe.cursor() as _cur:
+                            _ensure_db_schema(_cur)
+                    global membership_db_ready, membership_db_error, db_last_ok_at
+                    membership_db_ready = True
+                    membership_db_error = ""
+                    db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
+                except Exception as _e:
+                    membership_db_error = str(_e)
+                finally:
+                    _membership_db_release(_probe)
+        ok = init_membership_db() or membership_db_ready
         init_control_db()
-        return bool(ok and membership_db_ready)
+        return bool(ok and membership_db_ready and control_db_ready)
 
 def register_platform_member(user, source="webapp", chat_id=None):
     """Register/update a platform member by immutable Telegram User ID."""
@@ -4947,6 +4969,16 @@ def webapp_db_health():
                 cur.execute("SELECT NOW(), current_database(), current_user")
                 row=cur.fetchone(); ping=bool(row)
                 dbinfo={"server_time":row[0].isoformat() if row else None,"database":row[1] if row else None,"user":row[2] if row else None}
+                # Self-heal: if the connection works, the membership flag is stale.
+                global membership_db_ready, membership_db_error, db_last_ok_at
+                if ping and not membership_db_ready:
+                    try:
+                        _ensure_db_schema(cur)
+                        membership_db_ready = True
+                        membership_db_error = ""
+                        db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
+                    except Exception as _e:
+                        membership_db_error = str(_e)
         else: dbinfo={}
     except Exception as e:
         error=str(e); dbinfo={}

@@ -4401,7 +4401,13 @@ def platform_home():
              .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
              .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
              .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
-    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+    return html, 200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-AI-For-Build": str(int(__import__("os").path.getmtime(__file__))),
+    }
 
 @app.route("/app", methods=["GET"])
 def webapp():
@@ -4417,7 +4423,13 @@ def webapp():
             .replace("__AI_FOR_PI_PAYMENTS_ENABLED__", "true" if (PI_PAYMENTS_ENABLED and bool(PI_API_KEY)) else "false")
             .replace("__AI_FOR_PI_PAYMENT_AMOUNT__", json.dumps(PI_PAYMENT_AMOUNT))
             .replace("__AI_FOR_PI_PAYMENT_MEMO__", json.dumps(PI_PAYMENT_MEMO)[1:-1]))
-    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"}
+    return html, 200, {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0, private",
+        "Pragma": "no-cache",
+        "Expires": "0",
+        "X-AI-For-Build": str(int(__import__("os").path.getmtime(__file__))),
+    }
 
 @app.route("/api/app/bootstrap", methods=["GET","POST"])
 def webapp_bootstrap():

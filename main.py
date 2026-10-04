@@ -608,6 +608,20 @@ def _ensure_db_schema(cur):
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_notif_recipient ON ai_for_community_notifications(recipient_identity, is_read, created_at DESC)")
+    # جدول إشعارات موحّد
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_notifications (
+        notification_id UUID PRIMARY KEY,
+        recipient_identity TEXT NOT NULL,
+        actor_identity TEXT NOT NULL,
+        actor_name TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL,
+        body TEXT NOT NULL DEFAULT '',
+        target_type TEXT NOT NULL DEFAULT '',
+        target_id TEXT NOT NULL DEFAULT '',
+        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_notifications_recipient ON ai_for_notifications(recipient_identity, is_read, created_at DESC)")
     # Views (unique per user per post)
     cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_views (
         post_id UUID NOT NULL,
@@ -4313,9 +4327,101 @@ async function sendComment(pid){
   }catch(e){alert('⚠️ تعذر إرسال التعليق: '+(e.message||''));}
 }
 
-function messagesBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الرسائل</button><section class="detail"><div class="sectionTitle">💬 رسائل AI for</div><input id="msgTo" placeholder="معرّف الحساب المستلم" style="width:100%;padding:12px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px"><textarea id="msgBody" placeholder="الرسالة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"></textarea><button class="action" onclick="sendPlatformMessage()">إرسال</button><div id="msgs" class="statusBox">⏳</div></section>`;loadMessages()}
-async function loadMessages(){try{let d=await platformSvc('messages');document.getElementById('msgs').innerHTML=(d.messages||[]).map(m=>'<div class="row"><b>'+esc(m.sender_identity)+'</b> → '+esc(m.recipient_identity)+'<br>'+esc(m.body)+'<div class="small">'+esc(m.created_at||'')+'</div></div>').join('')||'لا توجد رسائل.'}catch(e){document.getElementById('msgs').textContent='⚠️ تعذر تحميل الرسائل.'}}
-async function sendPlatformMessage(){let to=document.getElementById('msgTo').value.trim(),body=document.getElementById('msgBody').value.trim();if(!to||!body)return;try{await platformSvc('message_send',{recipient:to,body});document.getElementById('msgBody').value='';loadMessages()}catch(e){alert('⚠️ تعذر إرسال الرسالة.')}}
+function messagesBox(){
+document.getElementById('view').innerHTML=`
+<button class="back" onclick="goHome()">← الرسائل</button>
+<section class="detail">
+  <div class="sectionTitle" style="display:flex;align-items:center;justify-content:space-between">
+    <span>💬 الرسائل</span>
+    <button class="mini" style="background:#a66cff;color:#fff;border:0;border-radius:20px;padding:6px 14px;font-weight:700" onclick="newConversationPrompt()">✏️ جديد</button>
+  </div>
+  <input id="convSearch" placeholder="ابحث بالاسم أو @username..." style="width:100%;margin-top:8px;padding:12px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:14px;font-size:14px" oninput="searchUsers()">
+  <div id="userSearchResults" style="margin-top:6px"></div>
+  <div id="convList" style="margin-top:14px"><div class="statusBox">⏳ جاري التحميل...</div></div>
+</section>`;
+loadConversations();}
+
+async function loadConversations(){
+  let host=document.getElementById('convList');if(!host)return;
+  try{
+    let d=await platformSvc('conversations_list');
+    if(!d||!d.ok)throw new Error((d&&d.error)||'load_failed');
+    let rows=d.conversations||[];
+    if(!rows.length){host.innerHTML='<div class="statusBox">لا توجد محادثات بعد.<br><span class="small">ابدأ محادثة جديدة بالزر أعلى الصفحة</span></div>';return}
+    host.innerHTML=rows.map(c=>{
+      let avatar=avatarHtml(c.other_identity,c.other_name,48);
+      let unread=c.unread>0?'<span style="background:#ff5f70;color:#fff;font-size:11px;padding:2px 7px;border-radius:12px;margin-right:auto;font-weight:700">'+c.unread+'</span>':'';
+      return '<div class="statusBox" style="cursor:pointer;padding:12px;margin-bottom:8px" onclick="openConversation(\''+esc(c.other_identity)+'\',\''+esc(c.other_name).replace(/\\/g,'')+'\')"><div style="display:flex;align-items:center;gap:12px">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(c.other_name||'عضو')+'</b>'+unread+'</div><div class="small" style="opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(c.last_message||'')+'</div></div><span class="small" style="opacity:.5">'+esc(timeAgo(c.last_at))+'</span></div></div>';
+    }).join('');
+  }catch(e){host.textContent='⚠️ تعذر التحميل: '+(e.message||'');}
+}
+
+let __searchTimer=null;
+function searchUsers(){
+  clearTimeout(__searchTimer);
+  __searchTimer=setTimeout(async function(){
+    let q=document.getElementById('convSearch').value.trim();
+    let box=document.getElementById('userSearchResults');
+    if(q.length<2){box.innerHTML='';return}
+    try{
+      let r=await fetch('/api/users/search?q='+encodeURIComponent(q),{headers:authHeaders(),cache:'no-store'});
+      let d=await r.json();
+      let rows=(d&&d.users)||[];
+      box.innerHTML=rows.map(u=>{
+        let nm=u.display_name||u.username;
+        return '<div class="statusBox" style="padding:10px;margin-top:6px;cursor:pointer" onclick="openConversation(\''+esc(u.identity)+'\',\''+esc(nm).replace(/\\/g,'')+'\')"><div style="display:flex;align-items:center;gap:10px">'+avatarHtml(u.identity,nm,36)+'<div><b>'+esc(nm)+'</b><div class="small">@'+esc(u.username||'')+'</div></div></div></div>';
+      }).join('') || '<div class="small" style="margin-top:6px">لا نتائج</div>';
+    }catch(e){box.innerHTML='<div class="small">⚠️ تعذر البحث</div>';}
+  },350);
+}
+
+async function openConversation(otherIdentity, otherName){
+  document.getElementById('view').innerHTML=`
+  <button class="back" onclick="messagesBox()">← المحادثات</button>
+  <section class="detail">
+    <div style="display:flex;align-items:center;gap:10px;padding:6px 0">`+avatarHtml(otherIdentity,otherName,40)+`<b style="font-size:17px">`+esc(otherName)+`</b></div>
+    <div id="chatWindow" style="background:#f4f5f7;border-radius:16px;padding:12px;min-height:340px;max-height:60vh;overflow-y:auto;margin-top:8px"><div class="small">⏳</div></div>
+    <div style="display:flex;gap:6px;margin-top:10px">
+      <input id="msgInput" placeholder="اكتب رسالة..." style="flex:1;padding:12px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:14px">
+      <button class="action" style="width:auto;padding:10px 20px;border-radius:22px;background:#a66cff" onclick="sendDM(\''+esc(otherIdentity)+'\')">إرسال</button>
+    </div>
+  </section>`;
+  await loadConversation(otherIdentity);
+}
+
+async function loadConversation(otherIdentity){
+  let win=document.getElementById('chatWindow');if(!win)return;
+  try{
+    let d=await platformSvc('conversation_get',{other:otherIdentity});
+    if(!d||!d.ok)throw new Error(d.error||'load_failed');
+    let rows=d.messages||[];
+    if(!rows.length){win.innerHTML='<div class="small" style="text-align:center;padding:20px">لا رسائل بعد. ابدأ المحادثة!</div>';return}
+    win.innerHTML=rows.map(m=>{
+      let mine=m.mine;
+      let align=mine?'flex-end':'flex-start';
+      let bg=mine?'#a66cff':'#fff';
+      let color=mine?'#fff':'#111827';
+      return '<div style="display:flex;justify-content:'+align+';margin:6px 0"><div style="max-width:78%;background:'+bg+';color:'+color+';padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,.06)"><div style="white-space:pre-wrap">'+esc(m.body)+'</div><div style="font-size:10px;opacity:.6;margin-top:3px">'+esc(timeAgo(m.created_at))+'</div></div></div>';
+    }).join('');
+    win.scrollTop=win.scrollHeight;
+  }catch(e){win.innerHTML='<div class="small">⚠️ تعذر التحميل</div>';}
+}
+
+async function sendDM(otherIdentity){
+  let inp=document.getElementById('msgInput');if(!inp||!inp.value.trim())return;
+  let text=inp.value.trim();inp.value='';
+  try{
+    let d=await platformSvc('message_send',{recipient:otherIdentity,body:text});
+    if(!d||!d.ok)throw new Error(d.error||'send_failed');
+    await loadConversation(otherIdentity);
+  }catch(e){alert('تعذر الإرسال: '+(e.message||''));}
+}
+
+function newConversationPrompt(){
+  document.getElementById('convSearch').focus();
+}
+
+
 function plusBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← ZYNMART+</button><section class="detail"><div class="sectionTitle">⭐ ZYNMART+</div><div id="plusState" class="statusBox">⏳ جاري قراءة حالة العضوية...</div><div class="statusBox"><b>منظومة ZYNMART+</b><div class="row">👤 العضوية مرتبطة بهوية الحساب</div><div class="row">🤖 مزايا AI المتقدمة — مرتبطة بحالة العضوية</div><div class="row">🖼️ Marketplace وNFT — مزايا مرتبطة بالمنظومة</div><div class="row">🎁 Rewards وReputation — مرتبطة بنشاط الحساب</div><div class="row">🔐 حالة العضوية ومدة الصلاحية محفوظتان في PostgreSQL</div></div></section>`;platformSvc('zynmart_plus').then(d=>{let p=d.plus||{};document.getElementById('plusState').innerHTML='<div class="row">الحالة: <b>'+esc(p.active?'مفعّلة':'غير مفعّلة للحساب الحالي')+'</b></div><div class="row">المستوى: <b>'+esc(p.tier||'free')+'</b></div>'+(p.started_at?'<div class="row">البداية: '+esc(p.started_at)+'</div>':'')+(p.expires_at?'<div class="row">الانتهاء: '+esc(p.expires_at)+'</div>':'')}).catch(()=>document.getElementById('plusState').textContent='⚠️ تعذر قراءة حالة ZYNMART+ الآن.')}
 function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط والسمعة</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi. السمعة تُبنى من نشاطات واضحة وقابلة للتدقيق.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b><br>سمعة الحساب: <b>'+esc(d.reputation?.score||0)+'</b> · المستوى '+esc(d.reputation?.level||1)+'<br>ZYNMART+: <b>'+esc(d.plus?.active?'مفعّل':'غير مفعّل')+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
 function funBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الترفيه</button><section class="detail"><div class="sectionTitle">🎮 الترفيه</div><div class="statusBox"><b>✅ اختبار سريع</b><p>ما هو اختصار HTTP؟</p><button class="mini" onclick="quiz('a')">HyperText Transfer Process</button><button class="mini" onclick="quiz('b')">HyperText Transfer Protocol</button><div id="quizResult"></div></div><div class="statusBox"><b>❌⭕ XO ضد الحاسوب</b><div id="xoBoard" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;max-width:260px"></div><div class="toolbar" style="margin-top:10px"><button class="mini" onclick="xoReset()">🔄 إعادة</button></div><div id="xoStatus" class="small" style="margin-top:8px">دورك: X</div></div><div class="statusBox"><b>✊✋✌️ حجر ورقة مقص</b><div class="toolbar" style="margin-top:10px"><button class="mini" onclick="rps('rock')">✊ حجر</button><button class="mini" onclick="rps('paper')">✋ ورقة</button><button class="mini" onclick="rps('scissors')">✌️ مقص</button></div><div id="rpsResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>🧠 لعبة الذاكرة (4×4)</b><div id="memGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px"></div><div class="toolbar" style="margin-top:10px"><button class="mini" onclick="memReset()">🔄 إعادة</button></div><div id="memStatus" class="small" style="margin-top:8px">المحاولات: 0</div></div></section>`;xoReset();memReset()}
@@ -4333,8 +4439,88 @@ function memFlip(i){if(__mem[i]===null||__memFlipped.includes(i)||__memFlipped.l
 
 async function loadFavorites(){let box=document.getElementById('favList');if(!box)return;try{let d=await api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op:'favorites'})});if(!d.ok)throw new Error(d.error||'favorites_failed');let rows=d.favorites||[];box.innerHTML=rows.length?rows.map(x=>'<div class="row">❤️ '+esc(x.title||x.item_key||'عنصر')+(x.url?' · <a href="'+esc(x.url)+'" target="_blank" rel="noopener noreferrer">فتح</a>':'')+'</div>').join(''):'لا توجد عناصر محفوظة بعد.'}catch(e){box.textContent='⚠️ تعذر قراءة المفضلة.'}}
 async function addFavorite(){let title=document.getElementById('favTitle')?.value.trim(),url=document.getElementById('favUrl')?.value.trim(),r=document.getElementById('favResult');if(!title){if(r)r.textContent='⚠️ اكتب عنوان العنصر.';return}try{let d=await api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op:'favorite_add',item_type:'general',item_key:(url||title).slice(0,300),title,url})});if(!d.ok)throw new Error(d.error||'favorite_failed');if(r)r.innerHTML='<span class="ok">✅ تم الحفظ.</span>';await loadFavorites()}catch(e){if(r)r.textContent='⚠️ '+(e.message||'تعذر الحفظ')}}
-async function notificationsBox(){setNav('n-notify');document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔔 الإشعارات</div><div id="notificationsList" class="statusBox">⏳ جاري التحميل...</div><button class="action dark" onclick="markAllNotificationsRead()">✓ تعليم الكل كمقروء</button></section>';try{let r=await fetch('/api/app/notifications',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'notifications_failed');let box=document.getElementById('notificationsList'),rows=d.notifications||[];box.innerHTML=rows.length?rows.map(n=>'<div class="row"><b>'+esc(n.title||'إشعار')+'</b><br><span class="small">'+esc(n.text||'')+'</span>'+(n.read?'':' <span class="badge">جديد</span>')+'</div>').join(''):'لا توجد إشعارات.';let badge=document.getElementById('notifyBadge');if(badge)badge.textContent=d.unread?('الإشعارات ('+d.unread+')'):'الإشعارات'}catch(e){document.getElementById('notificationsList').textContent='⚠️ تعذر تحميل الإشعارات.'}}
-async function markAllNotificationsRead(){try{await fetch('/api/app/notifications',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({action:'read_all'})});await notificationsBox()}catch(e){}}
+async function notificationsBox(){
+setNav('n-notify');
+document.getElementById('view').innerHTML=`
+<button class="back" onclick="goHome()">← الرئيسية</button>
+<section class="detail">
+  <div class="sectionTitle" style="display:flex;align-items:center;justify-content:space-between">
+    <span>🔔 الإشعارات</span>
+    <button class="mini" style="background:#a66cff;color:#fff;border:0;border-radius:20px;padding:6px 14px;font-weight:700" onclick="markAllNotifRead()">✓ الكل مقروء</button>
+  </div>
+  <div id="notifList" style="margin-top:12px"><div class="statusBox">⏳ جاري التحميل...</div></div>
+</section>`;
+loadNotifications();}
+
+async function loadNotifications(){
+  let host=document.getElementById('notifList');if(!host)return;
+  try{
+    let r=await fetch('/api/notifications/list',{headers:authHeaders(),cache:'no-store'});
+    let d=await r.json();
+    let rows=(d&&d.notifications)||[];
+    if(!rows.length){host.innerHTML='<div class="statusBox">لا توجد إشعارات.</div>';return}
+    host.innerHTML=rows.map(n=>renderNotification(n)).join('');
+    // نُحدّث شارة العداد
+    updateNotifBadge(d.unread);
+  }catch(e){host.textContent='⚠️ تعذر تحميل الإشعارات: '+(e.message||'');}
+}
+
+function renderNotification(n){
+  let kind=n.kind||'';
+  let icon='🔔';
+  if(kind==='comment')icon='💬';
+  else if(kind==='mention')icon='@';
+  else if(kind==='message')icon='✉️';
+  else if(kind==='like'||kind==='react')icon='❤️';
+  else if(kind==='follow')icon='👤';
+  let bg=n.is_read?'#fff':'#f4ecff';
+  let dot=n.is_read?'':'<span style="width:10px;height:10px;background:#a66cff;border-radius:50%;display:inline-block"></span>';
+  let dataTarget='';
+  if(n.target_type==='post'&&n.target_id)dataTarget=' onclick="openNotifTarget(this)" data-post="'+esc(n.target_id)+'"';
+  else if(n.target_type==='message'&&n.target_id)dataTarget=' onclick="openNotifTarget(this)" data-dm="'+esc(n.target_id)+'"';
+  let nm=n.actor_name||'عضو';
+  return '<div class="statusBox" data-nid="'+esc(n.id)+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+bg+'"'+dataTarget+'><div style="display:flex;gap:12px;align-items:center">'+avatarHtml(n.actor_identity,nm,40)+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(nm)+'</b> '+dot+'</div><div class="small" style="margin-top:2px">'+icon+' '+esc(n.body||'')+'</div><div class="small" style="opacity:.55;margin-top:2px">'+esc(timeAgo(n.created_at))+'</div></div></div></div>';
+}
+
+async function markAllNotifRead(){
+  try{
+    let r=await fetch('/api/notifications/read',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({})});
+    if(r.ok){loadNotifications();updateNotifBadge(0);}
+  }catch(e){}
+}
+
+async function openNotifTarget(el){
+  let postId=el.dataset.post;
+  let dmTarget=el.dataset.dm;
+  // نعلّم الإشعار كمقروء
+  let nid=el.dataset.nid;
+  try{if(nid){fetch('/api/notifications/read',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({id:nid})});}}catch(_){}
+  if(postId){
+    // نفتح Community
+    openSection('community');
+    // ننتظر قليلًا ثم نمرر إلى المنشور
+    setTimeout(function(){let t=document.querySelector('[data-post="'+postId+'"]');if(t)t.scrollIntoView({behavior:'smooth',block:'center'});},800);
+  }else if(dmTarget){
+    openConversation(dmTarget,dmTarget);
+  }
+}
+
+async function updateNotifBadge(count){
+  try{
+    let el=document.getElementById('notifyBadge');
+    if(el){el.textContent=count>0?('الإشعارات ('+count+')'):'الإشعارات';}
+  }catch(_){}
+}
+
+async function refreshNotifBadge(){
+  try{
+    let r=await fetch('/api/notifications/unread_count',{headers:authHeaders(),cache:'no-store'});
+    let d=await r.json();
+    if(d&&d.ok)updateNotifBadge(d.unread);
+  }catch(_){}
+}
+
+
 async function loadWalletStatus(){let box=document.getElementById('walletBox');if(!box)return;try{let r=await fetch('/api/app/account/wallet',{headers:authHeaders(),cache:'no-store'}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_failed');if(d.linked&&d.wallet_address){box.innerHTML='<b>👛 محفظة Pi المرتبطة</b><div class="small" style="word-break:break-all;margin-top:6px">'+esc(d.wallet_address)+'</div><span class="badge">مرتبطة ✓</span>'}else{box.innerHTML='<b>👛 محفظتي</b><p class="small">اربط محفظتك بإحدى الطريقتين:</p><button class="action" onclick="linkUserWallet()">🟣 ربط تلقائي عبر Pi</button><div style="margin-top:14px;padding-top:12px;border-top:1px solid #ddd"><b class="small">أو أدخل العنوان يدويًا:</b><input id="manualWallet" placeholder="GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" style="width:100%;margin-top:8px;padding:10px;font-size:12px" maxlength="56"><button class="action dark" onclick="linkWalletManual()">🔗 ربط وتحقق من الشبكة</button><div id="manualWalletResult" class="small" style="margin-top:6px"></div></div>'}}catch(e){box.innerHTML='<b>👛 محفظتي</b><p class="small">اربط محفظتك:</p><button class="action" onclick="linkUserWallet()">🟣 ربط تلقائي عبر Pi</button><div style="margin-top:14px;padding-top:12px;border-top:1px solid #ddd"><b class="small">أو أدخل العنوان يدويًا:</b><input id="manualWallet" placeholder="GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX" style="width:100%;margin-top:8px;padding:10px;font-size:12px" maxlength="56"><button class="action dark" onclick="linkWalletManual()">🔗 ربط وتحقق من الشبكة</button><div id="manualWalletResult" class="small" style="margin-top:6px"></div></div>'}}
 
 async function linkWalletManual(){let inp=document.getElementById('manualWallet'),res=document.getElementById('manualWalletResult');if(!inp||!res)return;let addr=inp.value.trim().toUpperCase();if(!/^G[A-Z2-7]{55}$/.test(addr)){res.innerHTML='<span class="danger">⚠️ العنوان يجب أن يبدأ بـG ويكون 56 حرفًا</span>';return}res.innerHTML='⏳ جاري التحقق من الشبكة...';try{let r=await fetch('/api/app/account/wallet/manual',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({wallet_address:addr})});let d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'link_failed');res.innerHTML='<span class="ok">✅ تم الربط والتحقق من الشبكة</span>';setTimeout(()=>loadWalletStatus(),600)}catch(e){res.innerHTML='<span class="danger">⚠️ '+esc(e.message||'فشل')+'</span>'}}
@@ -4412,7 +4598,8 @@ async function emergency(){try{let d=await api('/api/app/emergency');alert(d.tex
 async function ownerTests(){let r=document.getElementById('ownerTestsResult');if(!r)return;r.textContent='⏳ جاري تنفيذ مركز الاختبار الشامل...';try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'test'})});let z=d.summary||{};let head=(d.ok?'🟢 الاختبار الشامل ناجح':'🔴 توجد اختبارات تحتاج مراجعة')+'<br><b>النتيجة: '+esc(z.passed||0)+' / '+esc(z.total||0)+' ناجحة</b><br><span class="small">وقت التنفيذ: '+esc(d.executed_at||'—')+'</span><hr style="border:0;border-top:1px solid #3d321b;margin:10px 0">';r.innerHTML=head+(d.tests||[]).map(x=>'<div class="row">'+ (x.ok?'✅ ':'❌ ')+esc(x.name)+' — '+esc(typeof x.detail==='object'?JSON.stringify(x.detail):x.detail)+'</div>').join('')}catch(e){r.textContent='⚠️ تعذر تشغيل الاختبارات: '+(e.message||'')}}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 function openPiPlatform(){const url=location.origin+'/platform';try{if(tg?.openLink){tg.openLink(url,{try_instant_view:false});return}}catch(_){}try{window.open(url,'_blank','noopener,noreferrer')}catch(_){location.href=url}}
-async function start(){try{try{let me=await api('/api/platform/me').catch(()=>null);if(me&&me.ok&&me.account&&me.account.account_id){/* account already verified; nothing to persist here */}}catch(_){}let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();}applyTheme();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');loadProfilePhoto();renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(e?.message==='pi_auth_required'){title='تسجيل الدخول عبر Pi مطلوب';msg='تم فتح المنصة من Telegram، لكن تصفح المنصة وتوثيق الهوية يتطلبان تسجيل الدخول بهوية Pi.';document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🟣</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><button class="action" onclick="openPiPlatform()">🟣 فتح AI for في Pi Browser</button><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">Pi Identity: <span class="danger">مطلوبة</span></div><div class="row">طريقة الدخول: <span class="info">Pi Browser</span></div><div class="row">HTTP: '+esc(e?.status||'401')+'</div><div class="row">الخطأ: pi_auth_required</div></div></div>';return}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من الهوية';msg='يجب تسجيل الدخول والتحقق من هوية Pi قبل استخدام المنصة.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
+async function start(){try{
+  try{setInterval(refreshNotifBadge,30000);refreshNotifBadge();}catch(_){}try{let me=await api('/api/platform/me').catch(()=>null);if(me&&me.ok&&me.account&&me.account.account_id){/* account already verified; nothing to persist here */}}catch(_){}let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();}applyTheme();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');loadProfilePhoto();renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(e?.message==='pi_auth_required'){title='تسجيل الدخول عبر Pi مطلوب';msg='تم فتح المنصة من Telegram، لكن تصفح المنصة وتوثيق الهوية يتطلبان تسجيل الدخول بهوية Pi.';document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🟣</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><button class="action" onclick="openPiPlatform()">🟣 فتح AI for في Pi Browser</button><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">Pi Identity: <span class="danger">مطلوبة</span></div><div class="row">طريقة الدخول: <span class="info">Pi Browser</span></div><div class="row">HTTP: '+esc(e?.status||'401')+'</div><div class="row">الخطأ: pi_auth_required</div></div></div>';return}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من الهوية';msg='يجب تسجيل الدخول والتحقق من هوية Pi قبل استخدام المنصة.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
 </script></body></html>
 '''
 
@@ -5460,6 +5647,76 @@ def webapp_db_health():
     finally: _membership_db_release(conn)
     return jsonify({"ok":bool(ok and ping),"membership":membership_service_status(),"control":{"persistent":bool(control_db_ready),"error":control_db_error},"ping":ping,"db":dbinfo,"schema_trace":schema_trace,"checked_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()})
 
+def _notify(cur, recipient_identity, actor_identity, actor_name, kind, body="", target_type="", target_id=""):
+    """Insert a notification row (idempotent within cur)."""
+    if not recipient_identity or recipient_identity == actor_identity:
+        return None
+    nid = str(uuid.uuid4())
+    cur.execute("""INSERT INTO ai_for_notifications(notification_id,recipient_identity,actor_identity,actor_name,kind,body,target_type,target_id) 
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s) RETURNING notification_id""",
+                (nid, recipient_identity, actor_identity, (actor_name or "")[:80], kind[:40], (body or "")[:500], target_type[:40], target_id[:200]))
+    return nid
+
+
+def _extract_mentions(text):
+    """Return list of @usernames in text."""
+    import re as _re
+    if not text: return []
+    return list({m.lower() for m in _re.findall(r"@([A-Za-z0-9_]{3,32})", text)})
+
+
+def _identity_by_username(username):
+    """Return the identity (web:UUID or tg:ID) for a given @username."""
+    uname = str(username or "").strip().lstrip("@").lower()
+    if not uname: return None
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn: return None
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1", (uname,))
+            row = cur.fetchone()
+            if row:
+                # نجرب إرجاع pi:UID إن وُجد
+                cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (str(row["account_id"]),))
+                pi_row = cur.fetchone()
+                if pi_row:
+                    return "pi:" + str(pi_row["provider_subject"])
+                return "web:" + str(row["account_id"])
+            cur.execute("SELECT user_id FROM ai_for_members WHERE lower(username)=lower(%s) LIMIT 1", (uname,))
+            row = cur.fetchone()
+            if row: return "tg:" + str(row["user_id"])
+            return None
+    except Exception as e:
+        print(f"_identity_by_username error: {e}")
+        return None
+    finally:
+        _membership_db_release(conn)
+
+
+def _display_name_by_identity(cur, identity):
+    """Get display name for any identity (pi:, web:, tg:)."""
+    try:
+        identity = str(identity or "")
+        if identity.startswith("pi:"):
+            cur.execute("""SELECT COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''),'عضو') AS nm 
+                           FROM ai_for_identity_links l JOIN ai_for_web_accounts w ON w.account_id=l.account_id 
+                           WHERE l.provider='pi' AND l.provider_subject=%s LIMIT 1""", (identity[3:],))
+            r = cur.fetchone()
+            return r.get("nm") if r else "عضو"
+        if identity.startswith("web:"):
+            cur.execute("SELECT COALESCE(NULLIF(display_name,''),NULLIF(username,''),'عضو') AS nm FROM ai_for_web_accounts WHERE account_id=%s LIMIT 1", (identity[4:],))
+            r = cur.fetchone()
+            return r.get("nm") if r else "عضو"
+        if identity.startswith("tg:"):
+            cur.execute("SELECT COALESCE(NULLIF(TRIM(CONCAT(COALESCE(first_name,''),' ',COALESCE(last_name,''))),''),NULLIF(username,''),'عضو') AS nm FROM ai_for_members WHERE user_id=%s LIMIT 1", (identity[3:],))
+            r = cur.fetchone()
+            return r.get("nm") if r else "عضو"
+    except Exception:
+        pass
+    return "عضو"
+
+
 def _platform_identity(user):
     """Unified identity: Pi UID takes precedence for Mainnet-ready stability."""
     if user.get("pi_uid"):
@@ -5694,6 +5951,11 @@ def _platform_message_send(user, recipient, body):
                 except Exception: resolved=None
         if not resolved or resolved==identity: return None
         cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,resolved,body_text))
+        # إشعار للمستقبل
+        try:
+            _notify(cur, resolved, identity, _display_name_by_identity(cur, identity), "message", f"أرسل لك رسالة: {body_text[:80]}", "message", resolved)
+        except Exception:
+            pass
         return dict(cur.fetchone())
     return _platform_db_query(q)
 
@@ -5856,11 +6118,28 @@ def webapp_platform_services():
         body_text = str(body.get("body","")).strip()[:2000]
         if not post_id or not body_text: return jsonify({"ok":False,"error":"post_id_and_body_required"}),400
         identity = _platform_identity(user)
+        actor_name = user.get("first_name") or user.get("username") or "عضو"
         cid = str(uuid.uuid4())
         def q_cmt(cur):
             cur.execute("INSERT INTO ai_for_community_comments(comment_id,post_id,author_identity,body) VALUES(%s,%s,%s,%s) RETURNING comment_id,created_at", (cid, post_id, identity, body_text))
             row = dict(cur.fetchone())
             cur.execute("UPDATE ai_for_community_posts SET comment_count=comment_count+1 WHERE post_id=%s", (post_id,))
+            # إشعار لصاحب المنشور
+            try:
+                cur.execute("SELECT author_identity FROM ai_for_community_posts WHERE post_id=%s", (post_id,))
+                pr = cur.fetchone()
+                if pr and str(pr.get("author_identity") or "") != identity:
+                    _notify(cur, str(pr["author_identity"]), identity, actor_name, "comment", f"علّق على منشورك: {body_text[:80]}", "post", post_id)
+            except Exception as _e2:
+                pass
+            # إشعارات @mention
+            try:
+                for uname in _extract_mentions(body_text)[:5]:
+                    rid = _identity_by_username(uname)
+                    if rid and rid != identity:
+                        _notify(cur, rid, identity, actor_name, "mention", f"أشار إليك في تعليق: {body_text[:80]}", "post", post_id)
+            except Exception as _e3:
+                pass
             return row
         r = _platform_db_query(q_cmt)
         return jsonify({"ok":r is not None, "comment":r})
@@ -5995,16 +6274,72 @@ def webapp_platform_services():
         except Exception: pass
         return jsonify({"ok":True, **r})
     if op=="community_post":
-        row=_platform_post_create(user,body.get("body",""),body.get("image_url",""))
+        post_body = body.get("body","")
+        row=_platform_post_create(user,post_body,body.get("image_url",""))
         if not row:
             return jsonify({"ok":False,"error":"community_post_failed","reason":"database_unavailable_or_empty_body"}),503
         _record_reputation_event(user,"community_post",str(row.get("post_id") or uuid.uuid4()))
+        # نُعالج @mentions — إشعار لكل مُشار إليه
+        try:
+            mentions = _extract_mentions(post_body)
+            actor_identity = _platform_identity(user)
+            actor_name = user.get("first_name") or user.get("username") or "عضو"
+            if mentions:
+                _c = _membership_db_connect()
+                if _c:
+                    try:
+                        with _c:
+                            with _c.cursor() as _cur:
+                                for uname in mentions[:10]:
+                                    rid = _identity_by_username(uname)
+                                    if rid and rid != actor_identity:
+                                        _notify(_cur, rid, actor_identity, actor_name, "mention", f"أشار إليك في منشور: {post_body[:80]}", "post", str(row.get("post_id") or ""))
+                    finally:
+                        _membership_db_release(_c)
+        except Exception as _me:
+            print(f"mentions post error: {_me}")
         return jsonify({"ok":True,"post":row})
     if op=="message_send":
         row=_platform_message_send(user,body.get("recipient"),body.get("body",""));
         if row: _record_reputation_event(user,"message_send",str(row.get("message_id") or uuid.uuid4()))
         return jsonify({"ok":bool(row),"message":row})
     if op=="messages": return jsonify({"ok":True,"messages":_platform_messages(user)})
+    if op=="conversations_list":
+        identity = _platform_identity(user)
+        def q_conv(cur):
+            cur.execute("""SELECT other, MAX(created_at) AS last_at, COUNT(*) FILTER (WHERE is_unread) AS unread FROM (
+                    SELECT CASE WHEN sender_identity=%s THEN recipient_identity ELSE sender_identity END AS other,
+                           created_at, (sender_identity <> %s AND read_at IS NULL) AS is_unread
+                    FROM ai_for_messages
+                    WHERE sender_identity=%s OR recipient_identity=%s
+                ) AS t GROUP BY other ORDER BY last_at DESC LIMIT 50""",
+                        (identity, identity, identity, identity))
+            convs = []
+            for r in cur.fetchall():
+                other = str(r["other"])
+                # نأخذ آخر رسالة
+                cur.execute("""SELECT body FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at DESC LIMIT 1""",
+                            (identity, other, other, identity))
+                last = cur.fetchone()
+                # نجلب اسم/صورة الطرف الآخر
+                nm = _display_name_by_identity(cur, other)
+                convs.append({"other_identity": other, "other_name": nm, "last_message": (last or {}).get("body") or "", "last_at": r["last_at"].isoformat() if r.get("last_at") else None, "unread": int(r.get("unread") or 0)})
+            return convs
+        rows = _platform_db_query(q_conv) or []
+        return jsonify({"ok": True, "conversations": rows})
+    if op=="conversation_get":
+        identity = _platform_identity(user)
+        other = str(body.get("other") or "").strip()
+        if not other: return jsonify({"ok":False,"error":"other_required"}),400
+        def q_get(cur):
+            cur.execute("""SELECT sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at ASC LIMIT 200""",
+                        (identity, other, other, identity))
+            msgs = [{"body": r["body"], "created_at": r["created_at"].isoformat() if r.get("created_at") else None, "mine": r["sender_identity"] == identity} for r in cur.fetchall()]
+            # نعلّم كل الرسائل الواردة كمقروءة
+            cur.execute("UPDATE ai_for_messages SET read_at=NOW() WHERE sender_identity=%s AND recipient_identity=%s AND read_at IS NULL", (other, identity))
+            return msgs
+        msgs = _platform_db_query(q_get) or []
+        return jsonify({"ok": True, "messages": msgs})
     if op=="rewards":
         pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0),"reputation":_reputation_snapshot(user),"plus":_zynmart_plus_snapshot(user)})
     if op=="reputation": return jsonify({"ok":True,"reputation":_reputation_snapshot(user)})
@@ -6383,13 +6718,17 @@ def community_avatar(identity):
         if not conn:
             return ("", 404)
         with conn.cursor() as cur:
-            if identity.startswith("web:"):
+            if identity.startswith("pi:"):
+                cur.execute("""SELECT w.profile_photo, w.profile_photo_mime FROM ai_for_identity_links l JOIN ai_for_web_accounts w ON w.account_id=l.account_id AND w.status='active' WHERE l.provider='pi' AND l.provider_subject=%s LIMIT 1""", (identity[3:],))
+                row = cur.fetchone()
+            elif identity.startswith("web:"):
                 cur.execute("SELECT profile_photo, profile_photo_mime FROM ai_for_web_accounts WHERE account_id=%s AND status='active' LIMIT 1", (identity[4:],))
+                row = cur.fetchone()
             elif identity.startswith("tg:"):
                 cur.execute("SELECT profile_photo, profile_photo_mime FROM ai_for_members WHERE user_id=%s LIMIT 1", (identity[3:],))
+                row = cur.fetchone()
             else:
                 return ("", 404)
-            row = cur.fetchone()
             # إذا كانت صورة web فاشلة، نحاول عبر identity_links
             if (not row or not row[0]) and identity.startswith("web:"):
                 try:
@@ -6407,6 +6746,73 @@ def community_avatar(identity):
         return ("", 404)
     finally:
         _membership_db_release(conn)
+
+
+@app.route("/api/notifications/list", methods=["GET"])
+def api_notifications_list():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    identity = _platform_identity(user)
+    def q(cur):
+        cur.execute("""SELECT notification_id, actor_name, actor_identity, kind, body, target_type, target_id, is_read, created_at
+                       FROM ai_for_notifications WHERE recipient_identity=%s ORDER BY created_at DESC LIMIT 80""", (identity,))
+        return [{"id": str(r["notification_id"]), "actor_name": r["actor_name"], "actor_identity": r["actor_identity"],
+                 "kind": r["kind"], "body": r["body"], "target_type": r["target_type"], "target_id": r["target_id"],
+                 "is_read": bool(r["is_read"]), "created_at": r["created_at"].isoformat() if r.get("created_at") else None} for r in cur.fetchall()]
+    rows = _platform_db_query(q) or []
+    unread = sum(1 for r in rows if not r["is_read"])
+    return jsonify({"ok": True, "notifications": rows, "unread": unread})
+
+
+@app.route("/api/notifications/read", methods=["POST"])
+def api_notifications_read():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    identity = _platform_identity(user)
+    body = request.get_json(silent=True) or {}
+    nid = str(body.get("id") or "").strip()
+    def q(cur):
+        if nid:
+            cur.execute("UPDATE ai_for_notifications SET is_read=TRUE WHERE recipient_identity=%s AND notification_id=%s", (identity, nid))
+        else:
+            cur.execute("UPDATE ai_for_notifications SET is_read=TRUE WHERE recipient_identity=%s", (identity,))
+        return True
+    _platform_db_query(q)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/notifications/unread_count", methods=["GET"])
+def api_notifications_unread():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    identity = _platform_identity(user)
+    def q(cur):
+        cur.execute("SELECT COUNT(*) AS n FROM ai_for_notifications WHERE recipient_identity=%s AND is_read=FALSE", (identity,))
+        r = cur.fetchone() or {}
+        return int(r.get("n") or 0)
+    n = _platform_db_query(q) or 0
+    return jsonify({"ok": True, "unread": n})
+
+
+@app.route("/api/users/search", methods=["GET"])
+def api_users_search():
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    q_ = str(request.args.get("q") or "").strip().lstrip("@").lower()
+    if len(q_) < 2:
+        return jsonify({"ok": True, "users": []})
+    def q(cur):
+        cur.execute("""SELECT w.account_id, w.username, w.display_name,
+                       (SELECT provider_subject FROM ai_for_identity_links WHERE account_id=w.account_id AND provider='pi' LIMIT 1) AS pi_uid
+                       FROM ai_for_web_accounts w WHERE w.status='active' AND (lower(w.username) LIKE %s OR lower(w.display_name) LIKE %s) LIMIT 10""",
+                    ('%'+q_+'%', '%'+q_+'%'))
+        out = []
+        for r in cur.fetchall():
+            ident = ("pi:"+str(r["pi_uid"])) if r.get("pi_uid") else ("web:"+str(r["account_id"]))
+            out.append({"identity": ident, "username": r.get("username") or "", "display_name": r.get("display_name") or ""})
+        return out
+    rows = _platform_db_query(q) or []
+    return jsonify({"ok": True, "users": rows})
 
 
 @app.route("/api/community/stats", methods=["GET"])

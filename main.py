@@ -4385,6 +4385,7 @@ async function openConversation(otherIdentity, otherName){
       <input id="msgInput" placeholder="اكتب رسالة..." style="flex:1;padding:12px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:14px">
       <button class="action" style="width:auto;padding:10px 20px;border-radius:22px;background:#a66cff" onclick="sendDM(\''+esc(otherIdentity)+'\')">إرسال</button>
     </div>
+    <button class="mini" style="margin-top:8px;background:#f4f5f7" onclick="debugDM(\''+esc(otherIdentity)+'\')">🔍 اختبار الإرسال</button>
   </section>`;
   await loadConversation(otherIdentity);
 }
@@ -4405,6 +4406,15 @@ async function loadConversation(otherIdentity){
     }).join('');
     win.scrollTop=win.scrollHeight;
   }catch(e){win.innerHTML='<div class="small">⚠️ تعذر التحميل</div>';}
+}
+
+async function debugDM(other){
+  try{
+    let r = await platformSvc('message_send',{recipient:other,body:'TEST'});
+    alert('RESULT: '+JSON.stringify(r));
+  }catch(e){
+    alert('ERROR: '+(e.message||String(e)));
+  }
 }
 
 async function sendDM(otherIdentity){

@@ -5167,7 +5167,7 @@ def webapp_wallet():
 
 @app.route("/api/app/db/health", methods=["GET"])
 def webapp_db_health():
-    global control_db_error, control_db_ready
+    global membership_db_ready, membership_db_error, db_last_ok_at, control_db_ready, control_db_error
     user, err, code = _webapp_auth()
     if err: return err, code
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
@@ -5315,12 +5315,12 @@ def _platform_community_posts(limit=50):
     def q(cur):
         cur.execute("""SELECT p.post_id,p.author_identity,p.body,p.created_at,p.likes,
             CASE
-                WHEN p.author_identity LIKE 'web:%' AND w.account_id IS NOT NULL
+                WHEN p.author_identity LIKE 'web:%%' AND w.account_id IS NOT NULL
                     THEN COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''), 'AI for user')
                 ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''),' ',COALESCE(m.last_name,''))),''),NULLIF(m.username,''),'عضو AI for')
             END AS author_name,
             CASE
-                WHEN p.author_identity LIKE 'web:%' AND w.account_id IS NOT NULL THEN COALESCE(w.username,'')
+                WHEN p.author_identity LIKE 'web:%%' AND w.account_id IS NOT NULL THEN COALESCE(w.username,'')
                 ELSE COALESCE(m.username,'')
             END AS author_username
             FROM ai_for_community_posts p

@@ -4072,14 +4072,18 @@ function timeAgo(t){
 
 function avatarHtml(identity, name, size){
   size=size||44;
-  let initial=(name||'?').trim().charAt(0).toUpperCase();
+  let initial=(name||'?').trim().charAt(0).toUpperCase()||'?';
   let colors=['#a66cff','#31e981','#39d9ff','#ff5f70','#f5c84b','#e94eff'];
-  let hash=0;for(let i=0;i<(identity||'').length;i++){hash=(hash*31+identity.charCodeAt(i))>>>0}
+  let hash=0;let s=(identity||'x');for(let i=0;i<s.length;i++){hash=(hash*31+s.charCodeAt(i))>>>0}
   let bg=colors[hash%colors.length];
-  // صورة حقيقية إذا وُجدت، وإلا حرف أول بلون ثابت
-  let url='/api/community/avatar/'+encodeURIComponent(identity||'');
-  return '<img src="'+url+'" onerror="this.replaceWith(document.createRange().createContextualFragment(\'<div style=\"width:'+size+'px;height:'+size+'px;border-radius:50%;background:'+bg+';display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:'+Math.floor(size/2)+'px\">'+esc(initial)+'</div>\'))" style="width:'+size+'px;height:'+size+'px;border-radius:50%;object-fit:cover;background:'+bg+'">';
+  let url='/api/community/avatar/'+encodeURIComponent(identity||'x');
+  let fs=Math.floor(size/2);
+  // fallback: حرف أول بلون ثابت عبر CSS class data-avatar-fallback
+  return '<span class="afb" data-size="'+size+'" data-bg="'+bg+'" data-init="'+esc(initial)+'" style="display:inline-block;width:'+size+'px;height:'+size+'px;border-radius:50%;background:'+bg+';color:#fff;font-weight:800;font-size:'+fs+'px;line-height:'+size+'px;text-align:center;overflow:hidden;position:relative"><img src="'+url+'" style="width:100%;height:100%;object-fit:cover;display:block;position:absolute;top:0;left:0" onerror="window.__afbFallback&&window.__afbFallback(this)"><span class="afb-letter" style="position:absolute;top:0;left:0;width:100%;height:100%">'+esc(initial)+'</span></span>';
 }
+
+// Global fallback handler — يُخفي الصورة المكسورة ويُظهر الحرف الأول
+window.__afbFallback=function(img){try{img.style.display='none';let p=img.parentElement;if(p){let l=p.querySelector('.afb-letter');if(l)l.style.display='block';}}catch(e){}};
 
 function communityBox(){
 document.getElementById('view').innerHTML=`
@@ -4099,7 +4103,7 @@ document.getElementById('view').innerHTML=`
 
   <div id="posts"><div class="statusBox">⏳ جاري التحميل...</div></div>
 
-  <button class="action" id="fab" style="position:fixed;bottom:90px;left:20px;width:56px;height:56px;border-radius:50%;font-size:24px;padding:0;box-shadow:0 6px 20px rgba(166,108,255,.5);z-index:50" onclick="document.getElementById('postBody').focus();window.scrollTo(0,0)">✏️</button>
+  <button class="action" id="fab" style="position:fixed;bottom:90px;left:20px;width:56px;height:56px;border-radius:50%;font-size:24px;padding:0;box-shadow:0 6px 20px rgba(166,108,255,.5);z-index:50;touch-action:none;cursor:grab" onclick="if(!window.__fabMoved){document.getElementById('postBody').focus();window.scrollTo({top:0,behavior:'smooth'});}">✏️</button>
 </section>`;
 loadPosts();
 loadStats();}
@@ -4111,6 +4115,48 @@ async function loadStats(){
     if(d&&d.ok){let el=document.getElementById('cmStats');if(el)el.textContent='📝 '+d.posts+' · 👥 '+d.authors+' · ❤️ '+d.likes;}
   }catch(_){}
 }
+
+// FAB draggable — يحفظ الموضع ويسمح بتحريكه في أي مكان
+(function initFab(){
+  setTimeout(function(){
+    let fab=document.getElementById('fab');if(!fab)return;
+    // استعادة الموضع المحفوظ
+    try{let saved=localStorage.getItem('ai_for_fab_pos');if(saved){let p=JSON.parse(saved);fab.style.bottom='auto';fab.style.left=p.x+'px';fab.style.top=p.y+'px';}}catch(_){}
+    let dragging=false,moved=false,sx=0,sy=0,ox=0,oy=0;
+    function start(e){
+      let t=e.touches?e.touches[0]:e;dragging=true;moved=false;sx=t.clientX;sy=t.clientY;
+      let r=fab.getBoundingClientRect();ox=r.left;oy=r.top;
+      fab.style.cursor='grabbing';
+    }
+    function move(e){
+      if(!dragging)return;
+      let t=e.touches?e.touches[0]:e;
+      let dx=t.clientX-sx,dy=t.clientY-sy;
+      if(Math.abs(dx)>6||Math.abs(dy)>6)moved=true;
+      if(moved){
+        e.preventDefault();
+        let nx=Math.max(6,Math.min(window.innerWidth-62,ox+dx));
+        let ny=Math.max(70,Math.min(window.innerHeight-80,oy+dy));
+        fab.style.bottom='auto';fab.style.left=nx+'px';fab.style.top=ny+'px';
+      }
+    }
+    function end(){
+      if(!dragging)return;
+      dragging=false;fab.style.cursor='grab';
+      window.__fabMoved=moved;
+      if(moved){
+        try{let r=fab.getBoundingClientRect();localStorage.setItem('ai_for_fab_pos',JSON.stringify({x:r.left,y:r.top}))}catch(_){}
+        setTimeout(()=>window.__fabMoved=false,300);
+      }
+    }
+    fab.addEventListener('touchstart',start,{passive:true});
+    fab.addEventListener('touchmove',move,{passive:false});
+    fab.addEventListener('touchend',end);
+    fab.addEventListener('mousedown',start);
+    document.addEventListener('mousemove',move);
+    document.addEventListener('mouseup',end);
+  },300);
+})();
 
 async function loadPosts(){
   let host=document.getElementById('posts');if(!host)return;
@@ -4126,7 +4172,7 @@ async function loadPosts(){
 function renderPostCard(p){
   let pid=p.post_id;
   let identity=p.author_identity||'';
-  let name=p.author_name||'عضو';
+  let name=(p.author_name&&p.author_name.trim())?p.author_name:'عضو';
   let user=p.author_username?('@'+p.author_username):'';
   let time=timeAgo(p.created_at);
   let verified=p.author_verified?'<span style="color:#39d9ff;font-size:14px" title="موثّق">✓</span>':'';

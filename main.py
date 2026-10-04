@@ -562,6 +562,14 @@ def _ensure_db_schema(cur):
         PRIMARY KEY (post_id, user_identity)
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_likes_post ON ai_for_community_likes(post_id)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_reactions (
+        post_id UUID NOT NULL,
+        user_identity TEXT NOT NULL,
+        reaction TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (post_id, user_identity)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_reactions_post ON ai_for_community_reactions(post_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_likes_user ON ai_for_community_likes(user_identity)")
     # Comments
     cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_comments (
@@ -5468,6 +5476,21 @@ def _platform_community_posts(limit=50, viewer_identity=""):
             for r in rows:
                 r["viewer_liked"] = str(r["post_id"]) in liked
                 r["viewer_bookmarked"] = str(r["post_id"]) in bookmarked
+        # نُضيف رابط الصورة + verified لكل منشور
+        for r in rows:
+            ident = str(r.get("author_identity") or "")
+            r["author_avatar_url"] = "/api/community/avatar/" + ident if ident else ""
+            r["author_verified"] = False
+        # verified: نقرأه من profiles (اختياري — للأعضاء المميزين)
+        if rows:
+            idents = list({r["author_identity"] for r in rows if r.get("author_identity")})
+            try:
+                cur.execute("SELECT user_identity FROM ai_for_community_profiles WHERE verified=TRUE AND user_identity = ANY(%s)", (idents,))
+                verified_set = {str(x["user_identity"]) for x in cur.fetchall()}
+                for r in rows:
+                    r["author_verified"] = str(r.get("author_identity") or "") in verified_set
+            except Exception:
+                pass
         return rows
     return _platform_db_query(q) or []
 
@@ -6160,6 +6183,53 @@ def webapp_diag():
     finally:
         _membership_db_release(conn)
     return jsonify({"ok": True, "diag": diag})
+
+
+@app.route("/api/community/avatar/<path:identity>", methods=["GET"])
+def community_avatar(identity):
+    """Serve a user avatar (or 404) for any community identity.
+    - `web:UUID` -> ai_for_web_accounts.profile_photo
+    - `tg:ID`    -> ai_for_members.profile_photo
+    Returns 404 when no photo is set, so the UI can show a letter fallback.
+    """
+    from flask import send_file
+    identity = str(identity)[:200]
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return ("", 404)
+        with conn.cursor() as cur:
+            if identity.startswith("web:"):
+                cur.execute("SELECT profile_photo, profile_photo_mime FROM ai_for_web_accounts WHERE account_id=%s AND status='active' LIMIT 1", (identity[4:],))
+            elif identity.startswith("tg:"):
+                cur.execute("SELECT profile_photo, profile_photo_mime FROM ai_for_members WHERE user_id=%s LIMIT 1", (identity[3:],))
+            else:
+                return ("", 404)
+            row = cur.fetchone()
+        if not row or not row[0]:
+            return ("", 404)
+        return send_file(io.BytesIO(bytes(row[0])), mimetype=row[1] or "image/jpeg", max_age=300, download_name="avatar")
+    except Exception as e:
+        print(f"Avatar fetch error: {e}")
+        return ("", 404)
+    finally:
+        _membership_db_release(conn)
+
+
+@app.route("/api/community/stats", methods=["GET"])
+def community_stats():
+    """Quick stats for the community header."""
+    def q(cur):
+        cur.execute("SELECT COUNT(*) FROM ai_for_community_posts WHERE is_deleted=FALSE")
+        posts = int(cur.fetchone()[0])
+        cur.execute("SELECT COALESCE(SUM(likes),0) FROM ai_for_community_posts WHERE is_deleted=FALSE")
+        likes = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(DISTINCT author_identity) FROM ai_for_community_posts WHERE is_deleted=FALSE")
+        authors = int(cur.fetchone()[0])
+        return {"posts": posts, "likes": likes, "authors": authors}
+    stats = _platform_db_query(q) or {"posts": 0, "likes": 0, "authors": 0}
+    return jsonify({"ok": True, **stats})
 
 
 @app.route("/api/app/emergency", methods=["GET"])

@@ -5731,6 +5731,49 @@ def webapp_external_app_open(app_id):
     if not row: return jsonify({"ok":False,"error":"app_unavailable"}),404
     return jsonify({"ok":True,"url":row.get("canonical_url")})
 
+@app.route("/api/app/_diag", methods=["GET"])
+def webapp_diag():
+    """Diagnostic endpoint — authenticated users only. Returns ground truth."""
+    user, err, code = _webapp_auth()
+    if err: return err, code
+    diag = {"membership_db_ready": bool(membership_db_ready),
+            "control_db_ready": bool(control_db_ready),
+            "membership_db_error": str(membership_db_error or "")[:300],
+            "pool_exists": membership_db_pool is not None}
+    # Attempt actual DB operations to prove connection
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM ai_for_community_posts")
+                diag["community_posts_count"] = int(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(*) FROM ai_for_web_accounts")
+                diag["web_accounts_count"] = int(cur.fetchone()[0])
+                cur.execute("SELECT COUNT(*) FROM ai_for_members")
+                diag["members_count"] = int(cur.fetchone()[0])
+                # Now actually insert a test row and see if it persists
+                import uuid as _uuid
+                test_id = str(_uuid.uuid4())
+                cur.execute("INSERT INTO ai_for_community_posts(post_id, author_identity, body) VALUES(%s,%s,%s) RETURNING post_id", (test_id, "diag:test", "DIAGNOSTIC_TEST_ROW"))
+                inserted = cur.fetchone()
+                diag["test_insert_ok"] = bool(inserted)
+                cur.execute("SELECT COUNT(*) FROM ai_for_community_posts")
+                diag["community_posts_count_after_insert"] = int(cur.fetchone()[0])
+                # Immediately delete the test row so we don't pollute the DB
+                cur.execute("DELETE FROM ai_for_community_posts WHERE post_id=%s", (test_id,))
+                diag["test_cleanup_ok"] = True
+        else:
+            diag["connect"] = "failed"
+    except Exception as e:
+        import traceback as _tb
+        diag["diag_exception"] = str(e)[:500]
+        diag["diag_trace"] = _tb.format_exc()[-800:]
+    finally:
+        _membership_db_release(conn)
+    return jsonify({"ok": True, "diag": diag})
+
+
 @app.route("/api/app/emergency", methods=["GET"])
 def webapp_emergency():
     user, err, code = _webapp_auth()

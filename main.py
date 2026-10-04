@@ -4391,11 +4391,19 @@ async function openConversation(otherIdentity, otherName){
     <div id="chatWindow" style="background:#f4f5f7;border-radius:16px;padding:12px;min-height:340px;max-height:60vh;overflow-y:auto;margin-top:8px"><div class="small">⏳</div></div>
     <div style="display:flex;gap:6px;margin-top:10px">
       <input id="msgInput" placeholder="اكتب رسالة..." style="flex:1;padding:12px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:14px">
-      <button class="action" style="width:auto;padding:10px 20px;border-radius:22px;background:#a66cff" onclick="sendDM(\''+esc(otherIdentity)+'\')">إرسال</button>
+      <button class="action" style="width:auto;padding:10px 20px;border-radius:22px;background:#a66cff" id="sendDMbtn">إرسال</button>
     </div>
-    <button class="mini" style="margin-top:8px;background:#f4f5f7" onclick="debugDM(\''+esc(otherIdentity)+'\')">🔍 اختبار الإرسال</button>
+    <button class="mini" style="margin-top:8px;background:#f4f5f7" id="debugDMbtn">🔍 اختبار الإرسال</button>
   </section>`;
-  await loadConversation(otherIdentity);
+  // نربط الأزرار عبر JavaScript بعد بنائها (لتجنب مشكلة النطاق)
+  setTimeout(function(){
+    var sb=document.getElementById('sendDMbtn');
+    if(sb){sb.onclick=function(){sendDM(otherIdentity);};}
+    var db=document.getElementById('debugDMbtn');
+    if(db){db.onclick=function(){debugDM(otherIdentity);};}
+    var inp=document.getElementById('msgInput');
+    if(inp){inp.addEventListener('keydown',function(ev){if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();sendDM(otherIdentity);}});}
+  },100);
 }
 
 async function loadConversation(otherIdentity){

@@ -5310,32 +5310,46 @@ def _platform_favorites(user):
         return [dict(x) for x in cur.fetchall()]
     return _platform_db_query(q) or []
 
-def _platform_community_posts(limit=50):
-    """Resolve each post author from the verified PostgreSQL identity."""
+def _platform_community_posts(limit=50, viewer_identity=""):
+    """Community feed with author names, images, viewer-liked/bookmarked flags."""
+    limit = max(1, min(int(limit), 100))
     def q(cur):
-        cur.execute("""SELECT p.post_id,p.author_identity,p.body,p.created_at,p.likes,
-            CASE
-                WHEN p.author_identity LIKE 'web:%%' AND w.account_id IS NOT NULL
-                    THEN COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''), 'AI for user')
-                ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''),' ',COALESCE(m.last_name,''))),''),NULLIF(m.username,''),'عضو AI for')
-            END AS author_name,
-            CASE
-                WHEN p.author_identity LIKE 'web:%%' AND w.account_id IS NOT NULL THEN COALESCE(w.username,'')
-                ELSE COALESCE(m.username,'')
-            END AS author_username
+        cur.execute("""SELECT p.post_id, p.author_identity, p.body, p.created_at, p.updated_at,
+                              p.likes, p.comment_count, p.share_count, p.image_url, p.post_type,
+                CASE
+                    WHEN p.author_identity LIKE 'web:%%' THEN COALESCE(NULLIF(w.display_name,''), NULLIF(w.username,''), 'AI for user')
+                    ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''), ' ', COALESCE(m.last_name,''))),''), NULLIF(m.username,''), 'عضو AI for')
+                END AS author_name,
+                CASE
+                    WHEN p.author_identity LIKE 'web:%%' THEN COALESCE(w.username,'')
+                    ELSE COALESCE(m.username,'')
+                END AS author_username
             FROM ai_for_community_posts p
             LEFT JOIN ai_for_web_accounts w ON p.author_identity='web:'||w.account_id::text AND w.status='active'
             LEFT JOIN ai_for_members m ON p.author_identity='tg:'||m.user_id::text
-            ORDER BY p.created_at DESC LIMIT %s""",(max(1,min(int(limit),100)),))
-        return [dict(x) for x in cur.fetchall()]
+            WHERE p.is_deleted = FALSE
+            ORDER BY p.created_at DESC LIMIT %s""", (limit,))
+        rows = [dict(x) for x in cur.fetchall()]
+        # نجلب حالة الإعجاب/الحفظ للمشاهد الحالي
+        if viewer_identity and rows:
+            post_ids = [r["post_id"] for r in rows]
+            cur.execute("SELECT post_id FROM ai_for_community_likes WHERE user_identity=%s AND post_id = ANY(%s)", (viewer_identity, post_ids))
+            liked = {str(x["post_id"]) for x in cur.fetchall()}
+            cur.execute("SELECT post_id FROM ai_for_community_bookmarks WHERE user_identity=%s AND post_id = ANY(%s)", (viewer_identity, post_ids))
+            bookmarked = {str(x["post_id"]) for x in cur.fetchall()}
+            for r in rows:
+                r["viewer_liked"] = str(r["post_id"]) in liked
+                r["viewer_bookmarked"] = str(r["post_id"]) in bookmarked
+        return rows
     return _platform_db_query(q) or []
 
-def _platform_post_create(user, body):
+def _platform_post_create(user, body, image_url=""):
     body=str(body or "").strip()[:5000]
-    if not body: return None
+    image_url=str(image_url or "").strip()[:1000]
+    if not body and not image_url: return None
     identity=_platform_identity(user); pid=str(uuid.uuid4())
     def q(cur):
-        cur.execute("INSERT INTO ai_for_community_posts(post_id,author_identity,body) VALUES(%s,%s,%s) RETURNING post_id,author_identity,body,created_at,likes",(pid,identity,str(body)[:5000]))
+        cur.execute("INSERT INTO ai_for_community_posts(post_id,author_identity,body,image_url) VALUES(%s,%s,%s,%s) RETURNING post_id,author_identity,body,created_at,likes,image_url,comment_count,share_count",(pid,identity,str(body)[:5000],image_url))
         return dict(cur.fetchone())
     return _platform_db_query(q)
 
@@ -5515,9 +5529,139 @@ def webapp_platform_services():
         ok=_platform_favorite(user,str(body.get("item_type","general"))[:50],str(body.get("item_key",""))[:300],remove=True)
         return jsonify({"ok":ok})
     if op=="favorites": return jsonify({"ok":True,"favorites":_platform_favorites(user)})
-    if op=="community_list": return jsonify({"ok":True,"posts":_platform_community_posts()})
+    if op=="community_list":
+        return jsonify({"ok":True,"posts":_platform_community_posts(viewer_identity=_platform_identity(user))})
+    if op=="community_like":
+        post_id = str(body.get("post_id","")).strip()
+        if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400
+        identity = _platform_identity(user)
+        def q_like(cur):
+            cur.execute("SELECT 1 FROM ai_for_community_likes WHERE post_id=%s AND user_identity=%s", (post_id, identity))
+            if cur.fetchone():
+                cur.execute("DELETE FROM ai_for_community_likes WHERE post_id=%s AND user_identity=%s", (post_id, identity))
+                cur.execute("UPDATE ai_for_community_posts SET likes=GREATEST(0,likes-1) WHERE post_id=%s", (post_id,))
+                return {"liked": False}
+            cur.execute("INSERT INTO ai_for_community_likes(post_id,user_identity) VALUES(%s,%s)", (post_id, identity))
+            cur.execute("UPDATE ai_for_community_posts SET likes=likes+1 WHERE post_id=%s", (post_id,))
+            return {"liked": True}
+        r = _platform_db_query(q_like)
+        return jsonify({"ok":r is not None, **(r or {})})
+    if op=="community_comment":
+        post_id = str(body.get("post_id","")).strip()
+        body_text = str(body.get("body","")).strip()[:2000]
+        if not post_id or not body_text: return jsonify({"ok":False,"error":"post_id_and_body_required"}),400
+        identity = _platform_identity(user)
+        cid = str(uuid.uuid4())
+        def q_cmt(cur):
+            cur.execute("INSERT INTO ai_for_community_comments(comment_id,post_id,author_identity,body) VALUES(%s,%s,%s,%s) RETURNING comment_id,created_at", (cid, post_id, identity, body_text))
+            row = dict(cur.fetchone())
+            cur.execute("UPDATE ai_for_community_posts SET comment_count=comment_count+1 WHERE post_id=%s", (post_id,))
+            return row
+        r = _platform_db_query(q_cmt)
+        return jsonify({"ok":r is not None, "comment":r})
+    if op=="community_comments_list":
+        post_id = str(body.get("post_id","")).strip()
+        if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400
+        def q_cls(cur):
+            cur.execute("""SELECT c.comment_id, c.author_identity, c.body, c.created_at,
+                    CASE
+                        WHEN c.author_identity LIKE 'web:%%' THEN COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''),'AI for user')
+                        ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''),' ',COALESCE(m.last_name,''))),''),NULLIF(m.username,''),'عضو AI for')
+                    END AS author_name
+                FROM ai_for_community_comments c
+                LEFT JOIN ai_for_web_accounts w ON c.author_identity='web:'||w.account_id::text AND w.status='active'
+                LEFT JOIN ai_for_members m ON c.author_identity='tg:'||m.user_id::text
+                WHERE c.post_id=%s AND c.is_deleted=FALSE ORDER BY c.created_at ASC LIMIT 100""", (post_id,))
+            return [dict(x) for x in cur.fetchall()]
+        rows = _platform_db_query(q_cls) or []
+        return jsonify({"ok":True, "comments":rows})
+    if op=="community_delete_post":
+        post_id = str(body.get("post_id","")).strip()
+        if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400
+        identity = _platform_identity(user)
+        is_owner = _webapp_is_owner(user)
+        is_admin = _webapp_is_admin(user)
+        def q_del(cur):
+            cur.execute("SELECT author_identity FROM ai_for_community_posts WHERE post_id=%s AND is_deleted=FALSE", (post_id,))
+            row = cur.fetchone()
+            if not row: return {"error":"not_found"}
+            if not (is_owner or is_admin or str(row["author_identity"])==identity):
+                return {"error":"forbidden"}
+            cur.execute("UPDATE ai_for_community_posts SET is_deleted=TRUE, updated_at=NOW() WHERE post_id=%s", (post_id,))
+            return {"deleted": True, "by_privileged": bool(is_owner or is_admin)}
+        r = _platform_db_query(q_del)
+        if not r: return jsonify({"ok":False,"error":"db_unavailable"}),503
+        if r.get("error")=="forbidden": return jsonify({"ok":False,"error":"forbidden"}),403
+        if r.get("error")=="not_found": return jsonify({"ok":False,"error":"not_found"}),404
+        return jsonify({"ok":True, **r})
+    if op=="community_delete_comment":
+        comment_id = str(body.get("comment_id","")).strip()
+        post_id = str(body.get("post_id","")).strip()
+        if not comment_id: return jsonify({"ok":False,"error":"comment_id_required"}),400
+        identity = _platform_identity(user)
+        is_owner = _webapp_is_owner(user)
+        is_admin = _webapp_is_admin(user)
+        def q_dc(cur):
+            cur.execute("SELECT author_identity,post_id FROM ai_for_community_comments WHERE comment_id=%s AND is_deleted=FALSE", (comment_id,))
+            row = cur.fetchone()
+            if not row: return {"error":"not_found"}
+            if not (is_owner or is_admin or str(row["author_identity"])==identity):
+                return {"error":"forbidden"}
+            cur.execute("UPDATE ai_for_community_comments SET is_deleted=TRUE WHERE comment_id=%s", (comment_id,))
+            cur.execute("UPDATE ai_for_community_posts SET comment_count=GREATEST(0,comment_count-1) WHERE post_id=%s", (str(row["post_id"]),))
+            return {"deleted": True}
+        r = _platform_db_query(q_dc)
+        if not r: return jsonify({"ok":False,"error":"db_unavailable"}),503
+        if r.get("error")=="forbidden": return jsonify({"ok":False,"error":"forbidden"}),403
+        if r.get("error")=="not_found": return jsonify({"ok":False,"error":"not_found"}),404
+        return jsonify({"ok":True, **r})
+    if op=="community_bookmark":
+        post_id = str(body.get("post_id","")).strip()
+        if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400
+        identity = _platform_identity(user)
+        def q_bm(cur):
+            cur.execute("SELECT 1 FROM ai_for_community_bookmarks WHERE user_identity=%s AND post_id=%s", (identity, post_id))
+            if cur.fetchone():
+                cur.execute("DELETE FROM ai_for_community_bookmarks WHERE user_identity=%s AND post_id=%s", (identity, post_id))
+                return {"bookmarked": False}
+            cur.execute("INSERT INTO ai_for_community_bookmarks(user_identity,post_id) VALUES(%s,%s)", (identity, post_id))
+            return {"bookmarked": True}
+        r = _platform_db_query(q_bm)
+        return jsonify({"ok":r is not None, **(r or {})})
+    # صلاحيات سري (للمالك فقط — لا تظهر بالواجه العامة)
+    if op=="community_admin_add":
+        if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
+        target = str(body.get("username","")).strip().lstrip("@").lower()
+        if not target: return jsonify({"ok":False,"error":"username_required"}),400
+        def q_aa(cur):
+            cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE lower(username)=lower(%s) AND status='active' LIMIT 1", (target,))
+            row = cur.fetchone()
+            if not row: return {"error":"user_not_found"}
+            cur.execute("UPDATE ai_for_web_accounts SET role='admin' WHERE account_id=%s", (str(row["account_id"]),))
+            return {"username": target, "role": "admin"}
+        r = _platform_db_query(q_aa)
+        if not r: return jsonify({"ok":False,"error":"db_unavailable"}),503
+        if r.get("error")=="user_not_found": return jsonify({"ok":False,"error":"user_not_found"}),404
+        try: control_audit(user["id"], "community_admin_add", target, {})
+        except Exception: pass
+        return jsonify({"ok":True, **r})
+    if op=="community_admin_remove":
+        if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
+        target = str(body.get("username","")).strip().lstrip("@").lower()
+        if not target: return jsonify({"ok":False,"error":"username_required"}),400
+        def q_ar(cur):
+            cur.execute("UPDATE ai_for_web_accounts SET role='member' WHERE lower(username)=lower(%s) AND status='active' RETURNING account_id", (target,))
+            row = cur.fetchone()
+            if not row: return {"error":"user_not_found"}
+            return {"username": target, "role": "member"}
+        r = _platform_db_query(q_ar)
+        if not r: return jsonify({"ok":False,"error":"db_unavailable"}),503
+        if r.get("error")=="user_not_found": return jsonify({"ok":False,"error":"user_not_found"}),404
+        try: control_audit(user["id"], "community_admin_remove", target, {})
+        except Exception: pass
+        return jsonify({"ok":True, **r})
     if op=="community_post":
-        row=_platform_post_create(user,body.get("body",""))
+        row=_platform_post_create(user,body.get("body",""),body.get("image_url",""))
         if not row:
             return jsonify({"ok":False,"error":"community_post_failed","reason":"database_unavailable_or_empty_body"}),503
         _record_reputation_event(user,"community_post",str(row.get("post_id") or uuid.uuid4()))

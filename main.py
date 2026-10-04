@@ -554,6 +554,7 @@ PERSISTENCE_PROBE_KEY = 'render_persistence_probe'
 
 def _persistence_probe(mode='status'):
     """Prepare/verify a durable marker in PostgreSQL; never use local files for the marker."""
+    global membership_db_error
     conn = None
     try:
         conn = _membership_db_connect()
@@ -634,6 +635,8 @@ def ensure_database_ready():
     Also self-heals a stale `membership_db_ready=False` when the underlying
     connection actually works (which happens if the initial startup pass failed
     before the database was fully reachable on Render)."""
+    global control_db_ready
+    global membership_db_ready, membership_db_error, db_last_ok_at
     # Fast path: both flags are already True.
     if membership_db_ready and control_db_ready:
         return True
@@ -647,7 +650,6 @@ def ensure_database_ready():
                     with _probe:
                         with _probe.cursor() as _cur:
                             _ensure_db_schema(_cur)
-                    global membership_db_ready, membership_db_error, db_last_ok_at
                     membership_db_ready = True
                     membership_db_error = ""
                     db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
@@ -662,10 +664,13 @@ def ensure_database_ready():
 
 def register_platform_member(user, source="webapp", chat_id=None):
     """Register/update a platform member by immutable Telegram User ID."""
+    global membership_db_error, membership_db_ready
     uid = user.get("id") if isinstance(user, dict) else None
     if not uid:
         return False, False
-    if not ensure_database_ready() or (not membership_db_ready and not init_membership_db()):
+    if not ensure_database_ready():
+        return None, "database_unavailable"
+    if not membership_db_ready and not init_membership_db():
         return False, False
     now = datetime.now(ZoneInfo("Africa/Tunis"))
     conn = None
@@ -705,6 +710,7 @@ def register_platform_member(user, source="webapp", chat_id=None):
         _membership_db_release(conn)
 
 def get_platform_member(user_id):
+    global membership_db_ready
     try: ensure_database_ready()
     except Exception: pass
     if not membership_db_ready or not user_id:
@@ -724,6 +730,7 @@ def get_platform_member(user_id):
         _membership_db_release(conn)
 
 def list_platform_members(limit=100, offset=0, search=""):
+    global membership_db_ready
     try: ensure_database_ready()
     except Exception: pass
     if not membership_db_ready: return []
@@ -928,7 +935,11 @@ def _verify_email_code(account_id, code):
     finally:_membership_db_release(conn)
 
 def create_web_account(display_name="",username="",email="",password=""):
-    if not ensure_database_ready() or (not membership_db_ready and not init_membership_db()):return None,"database_unavailable"
+    global membership_db_ready
+    if not ensure_database_ready():
+        return None, "database_unavailable"
+    if not membership_db_ready and not init_membership_db():
+        return None, "database_unavailable"
     token=secrets.token_urlsafe(48); account_id=str(uuid.uuid4()); display_name=str(display_name or "").strip()[:80]; username=_normalize_web_username(username); email=_normalize_web_email(email)
     if username and not re.fullmatch(r"[a-z0-9_]{3,32}",username):return None,"invalid_username"
     if email and not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+",email):return None,"invalid_email"
@@ -952,6 +963,7 @@ def create_web_account(display_name="",username="",email="",password=""):
     finally:_membership_db_release(conn)
 
 def get_web_account(token):
+    global membership_db_ready
     if not token or not membership_db_ready:return None
     conn=None
     try:
@@ -1216,6 +1228,7 @@ def update_web_profile(account_id,display_name=None,username=None):
     finally:_membership_db_release(conn)
 
 def save_web_profile_photo(account_id, raw, mime):
+    global membership_db_ready
     try: ensure_database_ready()
     except Exception: pass
     if not membership_db_ready or not account_id or not raw: return False
@@ -1234,6 +1247,7 @@ def save_web_profile_photo(account_id, raw, mime):
         _membership_db_release(conn)
 
 def get_web_profile_photo(account_id):
+    global membership_db_ready
     try: ensure_database_ready()
     except Exception: pass
     if not membership_db_ready or not account_id:return None
@@ -1394,6 +1408,7 @@ def _bind_telegram_admin_bridge(account_id, init_data):
 
 def membership_service_status():
     """Return a safe, JSON-serializable snapshot of the membership database service."""
+    global db_last_ok_at, membership_db_error, membership_db_ready
     return {
         "required": bool(MEMBERSHIP_DB_REQUIRED),
         "ready": bool(membership_db_ready),
@@ -1436,6 +1451,7 @@ def set_platform_member_role(user_id, role):
         _membership_db_release(conn)
 
 def save_profile_photo(user_id, raw, mime):
+    global membership_db_ready
     try: ensure_database_ready()
     except Exception: pass
     if not membership_db_ready or not raw: return False
@@ -1454,6 +1470,7 @@ def save_profile_photo(user_id, raw, mime):
         _membership_db_release(conn)
 
 def get_profile_photo(user_id):
+    global membership_db_ready
     try: ensure_database_ready()
     except Exception: pass
     if not membership_db_ready or not user_id:return None
@@ -1508,6 +1525,7 @@ def init_control_db():
         _control_db_release(conn)
 
 def control_db_get(key, default=None):
+    global control_db_ready
     if not control_db_ready: return default
     conn=None
     try:
@@ -1523,6 +1541,7 @@ def control_db_get(key, default=None):
         _control_db_release(conn)
 
 def control_db_set(key, value):
+    global control_db_ready
     if not control_db_ready:return False
     conn=None
     try:
@@ -1538,6 +1557,7 @@ def control_db_set(key, value):
         _control_db_release(conn)
 
 def control_audit(actor_user_id, action, target="", details=None):
+    global control_db_ready
     if not control_db_ready:return False
     conn=None
     try:
@@ -1553,6 +1573,7 @@ def control_audit(actor_user_id, action, target="", details=None):
         _control_db_release(conn)
 
 def persist_runtime_config():
+    global control_db_ready
     if not control_db_ready:
         return False
     payload={
@@ -2286,6 +2307,7 @@ def extract_target(text):
     return m.group(1) if m else None
 
 def find_user_by_username(username):
+    global membership_db_ready
     wanted=str(username or "").lower().lstrip("@")
     if not wanted or not membership_db_ready:return None
     conn=None
@@ -2749,6 +2771,7 @@ def daily_item_text(name):
     return f"{labels.get(name,name)}\nالوقت: {item.get('time','')}\nالنص: {item.get('text','')}"
 
 def _broadcast_recipients():
+    global membership_db_ready
     ids=set()
     if membership_db_ready:
         conn=None
@@ -3338,6 +3361,7 @@ def _webapp_set_menu_button():
 
 def _nft_project_create(user, name='', description='', collection_name='', marketplace_url='', genesis_enabled=False, genesis_benefits='', royalty_bps=NFT_DEFAULT_ROYALTY_BPS, onchain_asset_id=''):
     """Create an NFT Studio project while preserving the existing draft workflow."""
+    global membership_db_ready
     identity = _webapp_identity_key(user); project_id = str(uuid.uuid4()); conn = None
     try:
         try: ensure_database_ready()
@@ -3361,6 +3385,7 @@ def _nft_project_create(user, name='', description='', collection_name='', marke
     finally: _membership_db_release(conn)
 
 def _nft_projects_list(user):
+    global membership_db_ready
     identity=_webapp_identity_key(user); conn=None
     try:
         try: ensure_database_ready()
@@ -3765,6 +3790,7 @@ def _webapp_identity_key(user_or_id):
     return "tg:" + str(user_or_id)
 
 def _webapp_history(uid, conversation_id):
+    global membership_db_ready
     identity_key = _webapp_identity_key(uid)
     cid = str(conversation_id or "default")[:100]
     conn = None
@@ -3786,6 +3812,7 @@ def _webapp_history(uid, conversation_id):
         return list(webapp_conversations.get(key, []))
 
 def _webapp_save_history(uid, conversation_id, history):
+    global membership_db_ready
     identity_key = _webapp_identity_key(uid)
     cid = str(conversation_id or "default")[:100]
     trimmed=list(history[-WEBAPP_MAX_HISTORY:])
@@ -3814,6 +3841,7 @@ def _webapp_save_history(uid, conversation_id, history):
     return saved
 
 def _webapp_new_conversation(uid, conversation_id):
+    global membership_db_ready
     identity_key=_webapp_identity_key(uid)
     cid=str(conversation_id or "default")[:100]
     conn=None
@@ -4979,6 +5007,7 @@ def webapp_nft_image():
 
 @app.route("/api/app/nft/ipfs", methods=["POST"])
 def webapp_nft_ipfs():
+    global membership_db_ready
     user, err, code=_webapp_auth()
     if err:return err,code
     denied=_webapp_require_section(user,"nft")
@@ -5054,6 +5083,7 @@ def webapp_wallet():
 
 @app.route("/api/app/db/health", methods=["GET"])
 def webapp_db_health():
+    global control_db_error, control_db_ready
     user, err, code = _webapp_auth()
     if err: return err, code
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
@@ -5068,7 +5098,6 @@ def webapp_db_health():
                 row=cur.fetchone(); ping=bool(row)
                 dbinfo={"server_time":row[0].isoformat() if row else None,"database":row[1] if row else None,"user":row[2] if row else None}
                 # Self-heal: if the connection works, the membership flag is stale.
-                global membership_db_ready, membership_db_error, db_last_ok_at
                 if ping and not membership_db_ready:
                     try:
                         _ensure_db_schema(cur)
@@ -5444,6 +5473,7 @@ def webapp_owner_private():
     # Owner Settings are available to the original Telegram Owner identity
     # and to the verified Pi account securely bridged from that identity.
     # Telegram remains transport only; Pi is the platform authentication.
+    global control_db_error, control_db_ready
     channel = str(request.headers.get("X-AI-For-Channel", "")).strip().lower()
     if channel not in ("telegram", "pi"):
         return jsonify({"ok":False,"error":"not_found"}),404
@@ -5615,6 +5645,7 @@ def webapp_owner_private():
 
 def owner_feature_tests(user):
     """Owner-only deterministic health/structure tests; never reports unexecuted live probes as passed."""
+    global control_db_error, control_db_ready, membership_db_ready
     tests=[]
     def add(name, ok, detail): tests.append({"name":name,"ok":bool(ok),"detail":str(detail)})
     add("owner_identity", _webapp_is_owner(user), "Verified Owner identity is enforced by the original Telegram Owner ID or its signed Pi bridge")
@@ -5734,6 +5765,7 @@ def webapp_external_app_open(app_id):
 @app.route("/api/app/_diag", methods=["GET"])
 def webapp_diag():
     """Diagnostic endpoint — authenticated users only. Returns ground truth."""
+    global control_db_ready, membership_db_error, membership_db_ready
     user, err, code = _webapp_auth()
     if err: return err, code
     diag = {"membership_db_ready": bool(membership_db_ready),

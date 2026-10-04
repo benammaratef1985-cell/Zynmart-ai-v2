@@ -4412,9 +4412,21 @@ async function sendDM(otherIdentity){
   if(!inp||!inp.value.trim())return;
   let text=inp.value.trim();
   inp.value='';
+  // عرض فوري (optimistic) في المحادثة قبل انتظار الخادم
+  try{
+    let win=document.getElementById('chatWindow');
+    if(win){
+      let now='<div style="display:flex;justify-content:flex-end;margin:6px 0"><div style="max-width:78%;background:#a66cff;color:#fff;padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5"><div style="white-space:pre-wrap">'+esc(text)+'</div><div style="font-size:10px;opacity:.6;margin-top:3px">الآن</div></div></div>';
+      // نُزيل مؤشر "لا رسائل" إن وُجد
+      if(win.textContent.indexOf('لا رسائل')>=0){win.innerHTML='';}
+      win.insertAdjacentHTML('beforeend',now);
+      win.scrollTop=win.scrollHeight;
+    }
+  }catch(_){}
   try{
     let d=await platformSvc('message_send',{recipient:otherIdentity,body:text});
     if(!d||!d.ok)throw new Error((d&&d.error)||'send_failed');
+    // نُحدّث كامل المحادثة بعد تأكيد الخادم
     await loadConversation(otherIdentity);
     inp.focus();
   }catch(e){alert('⚠️ تعذر الإرسال: '+(e.message||''));}

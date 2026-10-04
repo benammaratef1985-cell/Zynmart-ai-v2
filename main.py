@@ -539,6 +539,90 @@ def _ensure_db_schema(cur):
     cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_nft_image_jobs (job_id UUID PRIMARY KEY, identity_key TEXT NOT NULL, prompt TEXT NOT NULL, model TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'created', image_url TEXT NOT NULL DEFAULT '', image_cid TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW())""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_support_identity ON ai_for_support_tickets(identity_key, updated_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_recent ON ai_for_community_posts(created_at DESC)")
+    # ============================================================
+    # Community Phase 1: richer posts + social layer
+    # ============================================================
+    # Upgrade posts table (safe, idempotent)
+    for stmt in [
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS image_url TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ",
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS comment_count BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS share_count BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS views_count BIGINT NOT NULL DEFAULT 0",
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE ai_for_community_posts ADD COLUMN IF NOT EXISTS post_type TEXT NOT NULL DEFAULT 'text'",
+    ]:
+        try: cur.execute(stmt)
+        except Exception as e: print(f"Community alter warning: {e}")
+    # Likes
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_likes (
+        post_id UUID NOT NULL,
+        user_identity TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (post_id, user_identity)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_likes_post ON ai_for_community_likes(post_id)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_likes_user ON ai_for_community_likes(user_identity)")
+    # Comments
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_comments (
+        comment_id UUID PRIMARY KEY,
+        post_id UUID NOT NULL,
+        author_identity TEXT NOT NULL,
+        body TEXT NOT NULL,
+        is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_comments_post ON ai_for_community_comments(post_id, created_at DESC)")
+    # Follows
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_follows (
+        follower_identity TEXT NOT NULL,
+        following_identity TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (follower_identity, following_identity)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_follows_following ON ai_for_community_follows(following_identity)")
+    # Bookmarks
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_bookmarks (
+        user_identity TEXT NOT NULL,
+        post_id UUID NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_identity, post_id)
+    )""")
+    # Notifications
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_notifications (
+        notification_id UUID PRIMARY KEY,
+        recipient_identity TEXT NOT NULL,
+        actor_identity TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        post_id UUID,
+        comment_id UUID,
+        is_read BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_notif_recipient ON ai_for_community_notifications(recipient_identity, is_read, created_at DESC)")
+    # Views (unique per user per post)
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_views (
+        post_id UUID NOT NULL,
+        user_identity TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (post_id, user_identity)
+    )""")
+    # Hashtags
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_hashtags (
+        post_id UUID NOT NULL,
+        tag TEXT NOT NULL,
+        PRIMARY KEY (post_id, tag)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_hashtags_tag ON ai_for_community_hashtags(tag, post_id)")
+    # User profile extension
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_profiles (
+        user_identity TEXT PRIMARY KEY,
+        bio TEXT NOT NULL DEFAULT '',
+        website TEXT NOT NULL DEFAULT '',
+        location TEXT NOT NULL DEFAULT '',
+        verified BOOLEAN NOT NULL DEFAULT FALSE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_pair ON ai_for_messages(sender_identity, recipient_identity, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_recipient ON ai_for_messages(recipient_identity, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_reputation_events_identity_time ON ai_for_reputation_events(identity_key, created_at DESC)")

@@ -5963,7 +5963,7 @@ def _platform_message_send(user, recipient, body):
     if not recipient or not body_text: return None
     def q(cur):
         resolved=None
-        # دعم pi:UID — البحث في ai_for_identity_links
+        # دعم pi:UID — البحث في ai_for_identity_links ثم التحويل إلى web:UUID
         if recipient.startswith("pi:"):
             pi_uid = recipient[3:]
             cur.execute("""SELECT w.account_id FROM ai_for_identity_links l 
@@ -5973,7 +5973,7 @@ def _platform_message_send(user, recipient, body):
             if row:
                 # نُحوّل إلى web:UUID لأن جدول الرسائل لا يعرف pi:
                 resolved = "web:" + str(row["account_id"])
-        if not resolved and recipient.startswith("web:"):
+        elif recipient.startswith("web:"):
             cur.execute("SELECT account_id FROM ai_for_web_accounts WHERE account_id=%s AND status='active' LIMIT 1",(recipient[4:],))
             row=cur.fetchone(); resolved=recipient if row else None
         elif recipient.startswith("tg:"):

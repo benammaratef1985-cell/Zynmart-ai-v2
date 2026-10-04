@@ -4025,6 +4025,14 @@ body{background:#f4f5f7!important;color:#111827!important}
 <nav class="bottom"><button class="nav active" id="n-home" onclick="goHome()"><b>⌂</b>الرئيسية</button><button class="nav" id="n-ai" onclick="openSection('ai')"><b>🤖</b>AI</button><button class="nav" id="n-search" onclick="openSection('search')"><b>🔎</b>بحث</button><button class="nav" id="n-notify" onclick="notificationsBox()"><b>🔔</b><span id="notifyBadge">الإشعارات</span></button><button class="nav" id="n-more" onclick="more()"><b>▦</b>المزيد</button><button class="nav" id="n-admin" onclick="admin()"><b>⚙️</b>الإدارة</button><button class="nav" id="n-account" onclick="accountBox()"><b>👤</b>الحساب</button></nav>
 <script>
 const tg=window.Telegram?.WebApp;
+// Global error handler — يُظهر أي خطأ JS
+window.__onerrorSet=1;
+window.onerror=function(msg,src,line,col,err){
+  try{alert('JS_ERROR: '+msg+' at '+line+':'+col);}catch(_){}
+};
+window.addEventListener('unhandledrejection',function(ev){
+  try{alert('PROMISE_ERROR: '+(ev.reason&&ev.reason.message||ev.reason));}catch(_){}
+});
 // AI_FOR_FETCH_PATCH: force no-store for every API call from Pi Browser.
 (function(){const _f=window.fetch;window.fetch=function(u,o){try{o=o||{};const uu=String(typeof u==='string'?u:(u&&u.url)||'');if(uu.indexOf('/api/')>=0){o.cache='no-store';o.credentials=o.credentials||'same-origin';o.headers=Object.assign({'Cache-Control':'no-cache','Pragma':'no-cache'},o.headers||{});}}catch(e){}return _f.call(this,u,o);};})();let state=null;let conversationId='';try{conversationId=localStorage.getItem('ai_for_conversation_id')||('c_'+Date.now());try{localStorage.setItem('ai_for_conversation_id',conversationId)}catch(_){}}catch(_){conversationId='c_'+Date.now();}if(tg){tg.ready();tg.expand();}
 async function api(path,opts={}){const controller=new AbortController();opts.cache='no-store';opts.credentials='same-origin';const timeout=setTimeout(()=>controller.abort(),15000);opts.signal=opts.signal||controller.signal;const channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';const token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';const useBearer=!!token;const piUid=(()=>{try{return localStorage.getItem('ai_for_pi_uid')||''}catch(_){return ''}})();opts.headers=Object.assign({'Content-Type':'application/json','X-AI-For-Channel':channel,'X-Telegram-Init-Data':(tg?.initData||'')},piUid?{'X-AI-For-Pi-Uid':piUid}:{},useBearer&&token?{'Authorization':'Bearer '+token}:{},opts.headers||{});if(opts.body instanceof FormData)delete opts.headers['Content-Type'];try{let r=await fetch(path,opts);let d={};try{d=await r.json()}catch(e){d={}}if(!r.ok){let e=new Error(d.error||('http_'+r.status));e.status=r.status;e.payload=d;throw e}if(path==='/api/app/bootstrap'&&d?.user){window.__AI_FOR_SESSION_READY=true}return d}catch(e){if(e?.name==='AbortError'){let x=new Error('request_timeout');x.status=504;throw x}throw e}finally{clearTimeout(timeout)}}

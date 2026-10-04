@@ -4408,11 +4408,19 @@ async function loadConversation(otherIdentity){
 }
 
 async function sendDM(otherIdentity){
-  let inp=document.getElementById('msgInput');if(!inp||!inp.value.trim())return;
-  let text=inp.value.trim();inp.value='';
+  let inp=document.getElementById('msgInput');
+  if(!inp||!inp.value.trim())return;
+  let text=inp.value.trim();
+  inp.value='';
   try{
-    let d=await platformSvc('message_send',{recipient:otherIdentity,body:text});
-    if(!d||!d.ok)throw new Error(d.error||'send_failed');
+    let r=await fetch('/api/app/platform-services',{
+      method:'POST',
+      headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
+      cache:'no-store',
+      body:JSON.stringify({op:'message_send',recipient:otherIdentity,body:text})
+    });
+    let d=await r.json();
+    if(!r.ok||!d||!d.ok)throw new Error((d&&d.error)||'send_failed');
     await loadConversation(otherIdentity);
   }catch(e){alert('تعذر الإرسال: '+(e.message||''));}
 }
@@ -6149,10 +6157,13 @@ def webapp_platform_services():
         def q_cls(cur):
             cur.execute("""SELECT c.comment_id, c.author_identity, c.body, c.created_at,
                     CASE
-                        WHEN c.author_identity LIKE 'web:%%' THEN COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''),'AI for user')
-                        ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''),' ',COALESCE(m.last_name,''))),''),NULLIF(m.username,''),'عضو AI for')
+                        WHEN c.author_identity LIKE 'pi:%%' AND wp.account_id IS NOT NULL THEN COALESCE(NULLIF(wp.display_name,''),NULLIF(wp.username,''),'عضو')
+                        WHEN c.author_identity LIKE 'web:%%' AND w.account_id IS NOT NULL THEN COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''),'عضو')
+                        ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''),' ',COALESCE(m.last_name,''))),''),NULLIF(m.username,''),'عضو')
                     END AS author_name
                 FROM ai_for_community_comments c
+                LEFT JOIN ai_for_identity_links il ON il.provider='pi' AND il.provider_subject = SUBSTRING(c.author_identity FROM 4)
+                LEFT JOIN ai_for_web_accounts wp ON wp.account_id = il.account_id AND wp.status='active'
                 LEFT JOIN ai_for_web_accounts w ON c.author_identity='web:'||w.account_id::text AND w.status='active'
                 LEFT JOIN ai_for_members m ON c.author_identity='tg:'||m.user_id::text
                 WHERE c.post_id=%s AND c.is_deleted=FALSE ORDER BY c.created_at ASC LIMIT 100""", (post_id,))

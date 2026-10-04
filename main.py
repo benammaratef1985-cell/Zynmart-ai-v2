@@ -5044,6 +5044,7 @@ def webapp_db_health():
     if not _webapp_is_owner(user): return jsonify({"ok":False,"error":"not_found"}),404
     ok=ensure_database_ready()
     conn=None; ping=False; error=membership_db_error
+    schema_trace = ""
     try:
         conn=_membership_db_connect()
         if conn:
@@ -5061,11 +5062,13 @@ def webapp_db_health():
                         db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
                     except Exception as _e:
                         membership_db_error = str(_e)
+                        import traceback as _tb
+                        schema_trace = _tb.format_exc()[-800:]
         else: dbinfo={}
     except Exception as e:
         error=str(e); dbinfo={}
     finally: _membership_db_release(conn)
-    return jsonify({"ok":bool(ok and ping),"membership":membership_service_status(),"control":{"persistent":bool(control_db_ready),"error":control_db_error},"ping":ping,"db":dbinfo,"checked_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()})
+    return jsonify({"ok":bool(ok and ping),"membership":membership_service_status(),"control":{"persistent":bool(control_db_ready),"error":control_db_error},"ping":ping,"db":dbinfo,"schema_trace":schema_trace,"checked_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()})
 
 def _platform_identity(user):
     return _webapp_identity_key(user)

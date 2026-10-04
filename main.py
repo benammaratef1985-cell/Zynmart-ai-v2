@@ -4104,7 +4104,8 @@ async function createPost(){
     document.getElementById('postBody').value='';
     document.getElementById('postImageUrl').value='';
     if(m)m.innerHTML='<span class="ok">✅ تم النشر.</span>';
-    await loadPosts();
+    // ننتظر قليلًا ثم نُحدّث القائمة
+    setTimeout(()=>{try{loadPosts()}catch(_){}},300);
   }catch(e){if(m)m.textContent='⚠️ تعذر النشر: '+(e.message||'');}
 }
 
@@ -4141,28 +4142,41 @@ async function deletePost(btn){
 }
 
 async function loadComments(pid){
-  let area=document.getElementById('cmt-'+pid);
-  if(!area)return;
-  if(area.style.display==='block'){area.style.display='none';return}
-  area.style.display='block';
-  area.innerHTML='<div class="small">⏳...</div>';
   try{
+    let area=document.getElementById('cmt-'+pid);
+    if(!area)return;
+    if(area.style.display==='block' && area.dataset.loaded==='1'){
+      area.style.display='none';
+      return;
+    }
+    area.style.display='block';
+    if(area.dataset.loaded==='1')return;
+    area.innerHTML='<div class="small">⏳ جاري التحميل...</div>';
     let d=await platformSvc('community_comments_list',{post_id:pid});
     let rows=(d&&d.comments)||[];
     let html=rows.map(c=>'<div style="padding:6px 0;border-top:1px solid #1c2a39"><b>'+esc(c.author_name||'')+'</b> <span class="small">'+esc((c.created_at||'').slice(0,16).replace('T',' '))+'</span><div>'+esc(c.body||'')+'</div></div>').join('')||'<div class="small">لا تعليقات بعد.</div>';
-    area.innerHTML=html+'<div class="toolbar" style="margin-top:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:10px;font-size:13px"><button class="mini" onclick="sendComment(\''+esc(pid)+'\')">إرسال</button></div>';
-  }catch(e){area.innerHTML='<div class="small">⚠️</div>';}
+    area.innerHTML=html+'<div class="toolbar" style="margin-top:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:10px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(pid)+'\')">إرسال</button></div>';
+    area.dataset.loaded='1';
+  }catch(e){console.warn('loadComments error', e);}
 }
 
 async function sendComment(pid){
   let inp=document.getElementById('cmt-input-'+pid);
   if(!inp||!inp.value.trim())return;
+  let text=inp.value.trim();
+  inp.value='';
   try{
-    let d=await platformSvc('community_comment',{post_id:pid,body:inp.value.trim()});
-    if(!d||!d.ok)throw new Error(d.error);
-    await loadComments(pid);
-    await loadPosts();
-  }catch(e){alert('تعذر إرسال التعليق');}
+    let d=await platformSvc('community_comment',{post_id:pid,body:text});
+    if(!d||!d.ok)throw new Error(d.error||'comment_failed');
+    // نُحدّث منطقة التعليقات فقط — بدون reload للواجهة
+    let area=document.getElementById('cmt-'+pid);
+    if(area){
+      let newCmt='<div style="padding:6px 0;border-top:1px solid #1c2a39"><b>'+(state.user.first_name||'أنت')+'</b> <span class="small">الآن</span><div>'+esc(text)+'</div></div>';
+      // نُدرج قبل حقل الإدخال
+      let inputRow=area.querySelector('.toolbar');
+      if(inputRow)inputRow.insertAdjacentHTML('beforebegin',newCmt);
+    }
+  }catch(e){alert('⚠️ تعذر إرسال التعليق: '+(e.message||''));}
 }
 
 function messagesBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الرسائل</button><section class="detail"><div class="sectionTitle">💬 رسائل AI for</div><input id="msgTo" placeholder="معرّف الحساب المستلم" style="width:100%;padding:12px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px"><textarea id="msgBody" placeholder="الرسالة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"></textarea><button class="action" onclick="sendPlatformMessage()">إرسال</button><div id="msgs" class="statusBox">⏳</div></section>`;loadMessages()}

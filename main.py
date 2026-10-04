@@ -4056,20 +4056,61 @@ async function timeRun(){let r=document.getElementById('timeResult');try{let d=a
 async function currencyRun(){let r=document.getElementById('currencyResult');try{let d=await toolCall({op:'currency',amount:Number(document.getElementById('curAmount').value),base:document.getElementById('curBase').value,target:document.getElementById('curTarget').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' '+esc(d.target||'')+'<div class="small">المصدر: '+esc(d.source||'')+' · '+esc(d.date||'')+'</div></div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحصول على سعر العملة.</div>'}}
 async function translateRun(){let r=document.getElementById('transResult');try{let d=await toolCall({op:'translate',text:document.getElementById('transText').value,target:document.getElementById('targetLang').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذرت الترجمة.</div>'}}
 async function platformSvc(op,body={}){return api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op,...body})})}
+function timeAgo(t){
+  if(!t)return '';
+  try{
+    let d=new Date(t); if(isNaN(d.getTime()))return esc(t.slice(0,16).replace('T',' '));
+    let diff=Math.floor((Date.now()-d.getTime())/1000);
+    if(diff<60)return 'الآن';
+    if(diff<3600)return 'منذ '+Math.floor(diff/60)+' د';
+    if(diff<86400)return 'منذ '+Math.floor(diff/3600)+' س';
+    if(diff<172800)return 'أمس';
+    if(diff<604800)return 'منذ '+Math.floor(diff/86400)+' أيام';
+    return d.toLocaleDateString('ar-TN',{day:'numeric',month:'short',year:'numeric'});
+  }catch(_){return esc(String(t).slice(0,16).replace('T',' '));}
+}
+
+function avatarHtml(identity, name, size){
+  size=size||44;
+  let initial=(name||'?').trim().charAt(0).toUpperCase();
+  let colors=['#a66cff','#31e981','#39d9ff','#ff5f70','#f5c84b','#e94eff'];
+  let hash=0;for(let i=0;i<(identity||'').length;i++){hash=(hash*31+identity.charCodeAt(i))>>>0}
+  let bg=colors[hash%colors.length];
+  // صورة حقيقية إذا وُجدت، وإلا حرف أول بلون ثابت
+  let url='/api/community/avatar/'+encodeURIComponent(identity||'');
+  return '<img src="'+url+'" onerror="this.replaceWith(document.createRange().createContextualFragment(\'<div style=\"width:'+size+'px;height:'+size+'px;border-radius:50%;background:'+bg+';display:flex;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:'+Math.floor(size/2)+'px\">'+esc(initial)+'</div>\'))" style="width:'+size+'px;height:'+size+'px;border-radius:50%;object-fit:cover;background:'+bg+'">';
+}
+
 function communityBox(){
 document.getElementById('view').innerHTML=`
 <button class="back" onclick="goHome()">← المجتمع</button>
 <section class="detail">
-  <div class="sectionTitle">👥 مجتمع AI for</div>
+  <div class="sectionTitle" style="display:flex;align-items:center;justify-content:space-between">
+    <span>👥 مجتمع AI for</span>
+    <span id="cmStats" class="small" style="font-weight:600"></span>
+  </div>
+
   <div class="filebox">
     <textarea id="postBody" placeholder="شارك رأيك، فكرة، أو خبر..." style="width:100%;min-height:90px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea>
     <input id="postImageUrl" placeholder="رابط صورة (اختياري)" style="width:100%;margin-top:8px;padding:10px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;font-size:13px">
     <button class="action" onclick="createPost()">📤 نشر</button>
     <div id="postMsg" class="small" style="margin-top:6px"></div>
   </div>
+
   <div id="posts"><div class="statusBox">⏳ جاري التحميل...</div></div>
+
+  <button class="action" id="fab" style="position:fixed;bottom:90px;left:20px;width:56px;height:56px;border-radius:50%;font-size:24px;padding:0;box-shadow:0 6px 20px rgba(166,108,255,.5);z-index:50" onclick="document.getElementById('postBody').focus();window.scrollTo(0,0)">✏️</button>
 </section>`;
-loadPosts();}
+loadPosts();
+loadStats();}
+
+async function loadStats(){
+  try{
+    let r=await fetch('/api/community/stats',{cache:'no-store'});
+    let d=await r.json();
+    if(d&&d.ok){let el=document.getElementById('cmStats');if(el)el.textContent='📝 '+d.posts+' · 👥 '+d.authors+' · ❤️ '+d.likes;}
+  }catch(_){}
+}
 
 async function loadPosts(){
   let host=document.getElementById('posts');if(!host)return;
@@ -4084,20 +4125,23 @@ async function loadPosts(){
 
 function renderPostCard(p){
   let pid=p.post_id;
-  let name=p.author_name||'عضو AI for';
-  let user=p.author_username?'@'+p.author_username:'';
-  let time=(p.created_at||'').replace('T',' ').slice(0,16);
+  let identity=p.author_identity||'';
+  let name=p.author_name||'عضو';
+  let user=p.author_username?('@'+p.author_username):'';
+  let time=timeAgo(p.created_at);
+  let verified=p.author_verified?'<span style="color:#39d9ff;font-size:14px" title="موثّق">✓</span>':'';
   let img=p.image_url?'<img src="'+esc(p.image_url)+'" style="width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-top:10px">':'';
   let liked=p.viewer_liked?'❤️':'🤍';
   let bm=p.viewer_bookmarked?'🔖':'📑';
-  let likeBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleLike(this)">'+liked+' <span class="lk">'+Number(p.likes||0)+'</span></button>';
-  let cmtBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="loadComments(\''+esc(pid)+'\')">💬 '+Number(p.comment_count||0)+'</button>';
-  let bmBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleBookmark(this)">'+bm+'</button>';
-  let shareBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="sharePost(this)">🔗</button>';
+  let avatar=avatarHtml(identity,name,44);
+  let likeBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleLike(this)" style="border-radius:20px;padding:6px 12px">'+liked+' <span class="lk">'+Number(p.likes||0)+'</span></button>';
+  let cmtBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="loadComments(\''+esc(pid)+'\')" style="border-radius:20px;padding:6px 12px">💬 '+Number(p.comment_count||0)+'</button>';
+  let bmBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleBookmark(this)" style="border-radius:20px;padding:6px 12px">'+bm+'</button>';
+  let shareBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="sharePost(this)" style="border-radius:20px;padding:6px 12px">🔗</button>';
   let canDel=(state.role==='owner'||state.role==='admin');
   if(!canDel&&state.user.username&&p.author_username===state.user.username)canDel=true;
-  let delBtn=canDel?'<button class="mini danger" data-pid="'+esc(pid)+'" onclick="deletePost(this)">🗑️</button>':'';
-  return '<div class="statusBox"><div style="display:flex;align-items:center;gap:10px"><div style="width:40px;height:40px;border-radius:50%;background:#a66cff;display:flex;align-items:center;justify-content:center;font-size:20px">👤</div><div style="flex:1"><b>'+esc(name)+'</b><div class="small">'+esc(user)+' · '+esc(time)+'</div></div></div>'+img+'<div class="row" style="margin-top:8px;white-space:pre-wrap">'+esc(p.body||'')+'</div><div class="toolbar" style="margin-top:10px">'+likeBtn+' '+cmtBtn+' '+bmBtn+' '+shareBtn+' '+delBtn+'</div><div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
+  let delBtn=canDel?'<button class="mini" data-pid="'+esc(pid)+'" onclick="deletePost(this)" style="border-radius:20px;padding:6px 12px;color:#ff8793">🗑️</button>':'';
+  return '<div class="statusBox" style="padding:14px 16px;border-radius:18px;margin-bottom:12px"><div style="display:flex;align-items:flex-start;gap:12px">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b style="font-size:15px">'+esc(name)+'</b> '+verified+'<span class="small" style="opacity:.7">'+esc(user)+'</span><span class="small" style="opacity:.55">·</span><span class="small" style="opacity:.7">'+esc(time)+'</span></div></div></div>'+img+'<div style="margin-top:10px;white-space:pre-wrap;line-height:1.7;font-size:15px">'+esc(p.body||'')+'</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1px solid #1c2a39">'+likeBtn+' '+cmtBtn+' '+bmBtn+' '+shareBtn+' '+delBtn+'</div><div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
 }
 
 async function createPost(){
@@ -4112,8 +4156,7 @@ async function createPost(){
     document.getElementById('postBody').value='';
     document.getElementById('postImageUrl').value='';
     if(m)m.innerHTML='<span class="ok">✅ تم النشر.</span>';
-    // ننتظر قليلًا ثم نُحدّث القائمة
-    setTimeout(()=>{try{loadPosts()}catch(_){}},300);
+    setTimeout(()=>{try{loadPosts();loadStats()}catch(_){}},300);
   }catch(e){if(m)m.textContent='⚠️ تعذر النشر: '+(e.message||'');}
 }
 
@@ -4123,6 +4166,7 @@ async function toggleLike(btn){
     if(!d||!d.ok)throw new Error(d.error);
     let span=btn.querySelector('.lk');let cur=Number(span.textContent||0);
     btn.innerHTML=(d.liked?'❤️ ':'🤍 ')+'<span class="lk">'+Math.max(0,cur+(d.liked?1:-1))+'</span>';
+    btn.style.transform='scale(1.15)';setTimeout(()=>btn.style.transform='',180);
   }catch(e){alert('تعذر الإعجاب');}
 }
 
@@ -4145,7 +4189,8 @@ async function deletePost(btn){
   try{
     let d=await platformSvc('community_delete_post',{post_id:btn.dataset.pid});
     if(!d||!d.ok)throw new Error(d.error||'failed');
-    await loadPosts();
+    btn.closest('.statusBox').style.opacity='0.4';
+    setTimeout(()=>{try{loadPosts();loadStats()}catch(_){}},300);
   }catch(e){alert('تعذر المسح: '+(e.message||''));}
 }
 
@@ -4153,17 +4198,14 @@ async function loadComments(pid){
   try{
     let area=document.getElementById('cmt-'+pid);
     if(!area)return;
-    if(area.style.display==='block' && area.dataset.loaded==='1'){
-      area.style.display='none';
-      return;
-    }
+    if(area.style.display==='block' && area.dataset.loaded==='1'){area.style.display='none';return}
     area.style.display='block';
     if(area.dataset.loaded==='1')return;
     area.innerHTML='<div class="small">⏳ جاري التحميل...</div>';
     let d=await platformSvc('community_comments_list',{post_id:pid});
     let rows=(d&&d.comments)||[];
-    let html=rows.map(c=>'<div style="padding:6px 0;border-top:1px solid #1c2a39"><b>'+esc(c.author_name||'')+'</b> <span class="small">'+esc((c.created_at||'').slice(0,16).replace('T',' '))+'</span><div>'+esc(c.body||'')+'</div></div>').join('')||'<div class="small">لا تعليقات بعد.</div>';
-    area.innerHTML=html+'<div class="toolbar" style="margin-top:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:10px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(pid)+'\')">إرسال</button></div>';
+    let html=rows.map(c=>'<div style="padding:10px 0;border-top:1px solid #1c2a39;display:flex;gap:10px">'+avatarHtml(c.author_identity||'',c.author_name||'?',32)+'<div style="flex:1"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(c.author_name||'')+'</b><span class="small" style="opacity:.6">'+esc(timeAgo(c.created_at))+'</span></div><div style="margin-top:4px;white-space:pre-wrap;line-height:1.6">'+esc(c.body||'')+'</div></div></div>').join('')||'<div class="small">لا تعليقات بعد. كن أول من يعلّق!</div>';
+    area.innerHTML=html+'<div class="toolbar" style="margin-top:8px;display:flex;gap:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:10px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:10px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(pid)+'\')" style="border-radius:10px">إرسال</button></div>';
     area.dataset.loaded='1';
   }catch(e){console.warn('loadComments error', e);}
 }
@@ -4176,11 +4218,9 @@ async function sendComment(pid){
   try{
     let d=await platformSvc('community_comment',{post_id:pid,body:text});
     if(!d||!d.ok)throw new Error(d.error||'comment_failed');
-    // نُحدّث منطقة التعليقات فقط — بدون reload للواجهة
     let area=document.getElementById('cmt-'+pid);
     if(area){
-      let newCmt='<div style="padding:6px 0;border-top:1px solid #1c2a39"><b>'+(state.user.first_name||'أنت')+'</b> <span class="small">الآن</span><div>'+esc(text)+'</div></div>';
-      // نُدرج قبل حقل الإدخال
+      let newCmt='<div style="padding:10px 0;border-top:1px solid #1c2a39;display:flex;gap:10px">'+avatarHtml(state.user.platform_account_id?'web:'+state.user.platform_account_id:'tg:'+state.user.id,state.user.first_name||'أنت',32)+'<div style="flex:1"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(state.user.first_name||'أنت')+'</b><span class="small" style="opacity:.6">الآن</span></div><div style="margin-top:4px;white-space:pre-wrap;line-height:1.6">'+esc(text)+'</div></div></div>';
       let inputRow=area.querySelector('.toolbar');
       if(inputRow)inputRow.insertAdjacentHTML('beforebegin',newCmt);
     }

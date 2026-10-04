@@ -5447,9 +5447,9 @@ def _platform_community_posts(limit=50, viewer_identity=""):
         # نجلب حالة الإعجاب/الحفظ للمشاهد الحالي
         if viewer_identity and rows:
             post_ids = [r["post_id"] for r in rows]
-            cur.execute("SELECT post_id FROM ai_for_community_likes WHERE user_identity=%s AND post_id = ANY(%s)", (viewer_identity, post_ids))
+            cur.execute("SELECT post_id::text AS pid FROM ai_for_community_likes WHERE user_identity=%s AND post_id::text = ANY(%s)", (viewer_identity, [str(x) for x in post_ids]))
             liked = {str(x["post_id"]) for x in cur.fetchall()}
-            cur.execute("SELECT post_id FROM ai_for_community_bookmarks WHERE user_identity=%s AND post_id = ANY(%s)", (viewer_identity, post_ids))
+            cur.execute("SELECT post_id::text AS pid FROM ai_for_community_bookmarks WHERE user_identity=%s AND post_id::text = ANY(%s)", (viewer_identity, [str(x) for x in post_ids]))
             bookmarked = {str(x["post_id"]) for x in cur.fetchall()}
             for r in rows:
                 r["viewer_liked"] = str(r["post_id"]) in liked

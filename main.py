@@ -5421,6 +5421,9 @@ def webapp_db_health():
     return jsonify({"ok":bool(ok and ping),"membership":membership_service_status(),"control":{"persistent":bool(control_db_ready),"error":control_db_error},"ping":ping,"db":dbinfo,"schema_trace":schema_trace,"checked_at":datetime.now(ZoneInfo("Africa/Tunis")).isoformat()})
 
 def _platform_identity(user):
+    """Unified identity: Pi UID takes precedence for Mainnet-ready stability."""
+    if user.get("pi_uid"):
+        return "pi:" + str(user["pi_uid"])
     return _webapp_identity_key(user)
 
 def _platform_db_query(fn):
@@ -5539,16 +5542,19 @@ def _platform_community_posts(limit=50, viewer_identity=""):
         cur.execute("""SELECT p.post_id, p.author_identity, p.body, p.created_at, p.updated_at,
                               p.likes, p.comment_count, p.share_count, p.image_url, p.post_type,
                 CASE
-                    WHEN p.author_identity LIKE 'web:%%' THEN COALESCE(NULLIF(w.display_name,''), NULLIF(w.username,''), 'AI for user')
-                    ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''), ' ', COALESCE(m.last_name,''))),''), NULLIF(m.username,''), 'عضو AI for')
+                    WHEN p.author_identity LIKE 'pi:%%' AND wp.account_id IS NOT NULL THEN COALESCE(NULLIF(wp.display_name,''), NULLIF(wp.username,''), 'عضو')
+                    WHEN p.author_identity LIKE 'web:%%' THEN COALESCE(NULLIF(w.display_name,''), NULLIF(w.username,''), 'عضو')
+                    ELSE COALESCE(NULLIF(TRIM(CONCAT(COALESCE(m.first_name,''), ' ', COALESCE(m.last_name,''))),''), NULLIF(m.username,''), 'عضو')
                 END AS author_name,
                 CASE
+                    WHEN p.author_identity LIKE 'pi:%%' AND wp.account_id IS NOT NULL THEN COALESCE(wp.username,'')
                     WHEN p.author_identity LIKE 'web:%%' THEN COALESCE(w.username,'')
                     ELSE COALESCE(m.username,'')
                 END AS author_username
             FROM ai_for_community_posts p
             LEFT JOIN ai_for_web_accounts w ON p.author_identity='web:'||w.account_id::text AND w.status='active'
             LEFT JOIN ai_for_members m ON p.author_identity='tg:'||m.user_id::text
+            LEFT JOIN ai_for_web_accounts wp ON p.author_identity='pi:'||(wp.metadata->>'pi_uid') AND wp.status='active'
             WHERE p.is_deleted = FALSE
             ORDER BY p.created_at DESC LIMIT %s""", (limit,))
         rows = [dict(x) for x in cur.fetchall()]

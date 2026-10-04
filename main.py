@@ -3975,6 +3975,25 @@ WEBAPP_HTML = r'''<!doctype html>
 <html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no"><meta name="theme-color" content="#080b12"><title>AI for</title><script src="https://telegram.org/js/telegram-web-app.js"></script><script>window.PI_CLIENT_ID="__AI_FOR_PI_CLIENT_ID__";window.PI_SIGNIN_REDIRECT_URI="__AI_FOR_PI_SIGNIN_REDIRECT_URI__";window.PI_PAYMENTS_ENABLED=__AI_FOR_PI_PAYMENTS_ENABLED__;window.PI_PAYMENT_AMOUNT=__AI_FOR_PI_PAYMENT_AMOUNT__;window.PI_PAYMENT_MEMO="__AI_FOR_PI_PAYMENT_MEMO__";window.PI_SANDBOX=__AI_FOR_PI_SANDBOX__;</script><script src="https://sdk.minepi.com/pi-sdk.js"></script><script>window.__PI_INIT_PROMISE=Promise.resolve();try{if(window.Pi&&typeof window.Pi.init==='function'){window.__PI_INIT_PROMISE=Promise.resolve(window.Pi.init({version:"2.0",sandbox:__AI_FOR_PI_SANDBOX__}));}}catch(e){console.warn("Pi SDK init unavailable",e);}</script>
 <style>
 :root{--bg:#030303;--panel:#0a0a0a;--panel2:#11100d;--panel3:#17130b;--text:#fffdf5;--muted:#b9ad92;--gold:#f5c84b;--purple:#a66cff;--green:#31e981;--cyan:#39d9ff;--red:#ff5f70;--line:#5a4820;--shadow:0 16px 45px rgba(0,0,0,.35)}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 50% -10%,#2a210b 0,#0b0a07 38%,var(--bg) 78%);color:var(--text);font-family:"Segoe UI",Arial,"Noto Sans Arabic",sans-serif;min-height:100vh}.app{max-width:820px;margin:auto;padding-bottom:96px}.top{position:sticky;top:0;z-index:20;background:rgba(7,10,16,.92);backdrop-filter:blur(16px);padding:12px 15px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}.brand{font-size:21px;font-weight:900;letter-spacing:.2px;flex:1}.sub{font-size:11px;color:var(--muted);margin-top:3px}.iconbtn{background:var(--panel2);border:1px solid var(--line);border-radius:13px;padding:9px 12px;color:var(--text)}.hero{padding:22px 16px 10px}.hero h1{margin:0 0 7px;font-size:29px}.hero p{margin:0;color:var(--muted);line-height:1.7}.banner{margin:10px 16px;padding:17px;border:1px solid #2c3d55;border-radius:20px;background:linear-gradient(135deg,#101b2a,#0c121c);box-shadow:var(--shadow)}.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:12px;padding:12px 16px}.card{position:relative;background:linear-gradient(160deg,var(--panel3),var(--panel));border:1px solid var(--line);border-radius:21px;padding:16px;min-height:145px;text-align:right;cursor:pointer;transition:.15s;box-shadow:0 8px 22px rgba(0,0,0,.28)}.card:active{transform:scale(.98)}.card .ico{font-size:31px}.card h3{margin:10px 0 6px;font-size:17px;font-weight:900;color:var(--text);text-shadow:0 1px 2px rgba(0,0,0,.65)}.card p{margin:0;color:#f3eee2;font-size:12px;line-height:1.5}.ownerSettingRow{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid #3d321b}.ownerSettingRow:last-child{border-bottom:0}.ownerSettingInfo{min-width:0;flex:1}.ownerSettingTitle{font-size:17px;font-weight:900;color:var(--text);margin-bottom:4px}.ownerState{display:inline-block;margin-top:7px;padding:4px 8px;border-radius:9px;font-size:11px;font-weight:800}.ownerOpen{background:#063b25;color:#6dffb2}.ownerLocked{background:#3a2e0c;color:#ffd84d}.ownerToggle{min-width:78px;color:var(--text)!important;font-weight:900!important}.ownerSectionHead{font-size:18px;font-weight:900;color:var(--text);margin-bottom:6px}.nav,#n-account{color:var(--text);font-family:inherit}.badge{display:inline-block;margin-top:10px;padding:4px 8px;border-radius:10px;font-size:11px;background:#073d27;color:#5dffac}.soon{background:#3a2e0c;color:#ffd84d}.external{background:#062e3a;color:#55ddff}.logo{width:44px;height:44px;border-radius:12px;object-fit:cover;border:1px solid #4cff88;box-shadow:0 0 18px #1fff7350}.bottom{position:fixed;bottom:0;left:0;right:0;z-index:30;background:rgba(7,10,16,.97);border-top:1px solid var(--line);display:flex;justify-content:space-around;padding:9px 5px calc(9px + env(safe-area-inset-bottom))}.nav{background:none;padding:5px 8px;min-width:15%;color:#8fa0b4;font-size:11px}.nav.active{color:var(--gold)}.nav b{display:block;font-size:20px;margin-bottom:3px}.back{margin:14px 16px;background:var(--panel2);border:1px solid var(--line);padding:10px 14px;border-radius:13px}.detail{padding:8px 16px}.sectionTitle{font-size:25px;font-weight:900;margin:14px 0 8px}.statusBox{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:15px;margin:10px 0;box-shadow:0 8px 24px #0003}.row{padding:10px 0;border-bottom:1px solid #1c2a39}.row:last-child{border-bottom:0}.ok{color:var(--green)}.warn{color:#ffd84d}.info{color:var(--cyan)}.center{text-align:center;padding:55px 20px}.loader{font-size:35px}.action{width:100%;background:linear-gradient(135deg,#6e42c7,#a66cff);padding:13px;border-radius:14px;margin-top:10px;font-weight:800}.action.green{background:linear-gradient(135deg,#08763d,#1bc86e)}.action.dark{background:var(--panel2);border:1px solid var(--line)}textarea{resize:vertical}.chat{display:flex;flex-direction:column;gap:9px;margin-top:12px}.msg{max-width:92%;padding:12px 14px;border-radius:17px;line-height:1.65;font-size:14px;white-space:pre-wrap}.msg.user{align-self:flex-start;background:#24354b}.msg.ai{align-self:flex-end;background:#1c1730;border:1px solid #3b2b5d}.filebox{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:12px;margin-top:10px}.toolbar{display:flex;gap:8px;flex-wrap:wrap}.mini{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:8px 10px;color:var(--text);font-size:12px}.checking{display:inline-flex;gap:7px;align-items:center;color:var(--muted);font-size:12px}.metricGrid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}.metric{background:#0b1119;border:1px solid var(--line);border-radius:16px;padding:13px}.metric b{display:block;font-size:20px;margin-top:4px}.small{font-size:11px;color:var(--muted);line-height:1.6}.danger{color:#ff8793}.safe{border-color:#235c40}.autocore{background:radial-gradient(circle at 70% 10%,#182d3c 0,#0c131c 55%);border-color:#2b6b85}.zyn{background:radial-gradient(circle at 70% 10%,#143a24 0,#0c1510 58%);border-color:#2c6e45}@media(max-width:420px){.grid{gap:9px;padding:10px}.card{padding:13px;min-height:132px}.hero h1{font-size:24px}.metricGrid{grid-template-columns:1fr 1fr}}</style>
+<style>
+/* Community Modern Styles */
+.cmt-row{display:flex;gap:10px;padding:10px 0;border-top:1px solid #e5e7eb}
+.cmt-row:first-child{border-top:0}
+.cmt-bubble{background:#f4f5f7;border-radius:14px;padding:8px 12px;flex:1}
+.cmt-head{display:flex;align-items:center;gap:6px;margin-bottom:2px}
+.cmt-name{font-weight:700;font-size:13px}
+.cmt-time{font-size:11px;color:#9aa0a6}
+.cmt-body{font-size:14px;line-height:1.5;color:#111827;white-space:pre-wrap;margin-top:2px}
+.cmt-actions{display:flex;gap:14px;padding:4px 0 0 44px;font-size:12px;color:#667085}
+.cmt-actions button{background:none;border:0;color:#667085;font-size:12px;padding:2px 4px;cursor:pointer}
+.reactions-bar{display:flex;gap:6px;flex-wrap:wrap;margin-top:12px;padding-top:10px;border-top:1px solid #e5e7eb}
+.reaction-btn{background:transparent;border:0;font-size:20px;padding:4px 8px;border-radius:20px;cursor:pointer;transition:transform .15s}
+.reaction-btn:hover{background:#f4f5f7}
+.reaction-btn:active{transform:scale(1.2)}
+.reactions-count{display:flex;gap:8px;margin-top:6px;font-size:12px;color:#667085;flex-wrap:wrap}
+.reactions-count span{background:#f4f5f7;padding:2px 8px;border-radius:12px}
+.reactions-picker{position:absolute;background:#fff;border:1px solid #e5e7eb;border-radius:30px;padding:6px 10px;display:flex;gap:4px;box-shadow:0 4px 14px rgba(0,0,0,.1);z-index:100}
+</style>
 <style>/* iOS/mobile presentation layer only */.profileAvatarLarge{width:54px;height:54px;border-radius:50%;object-fit:cover;border:1px solid rgba(0,0,0,.10);box-shadow:0 5px 16px rgba(0,0,0,.10)}.headerAvatar{width:38px;height:38px;border-radius:50%;object-fit:cover;border:1px solid rgba(0,0,0,.10);box-shadow:0 5px 18px rgba(0,0,0,.12);background:#eef1f5}.top{padding-top:calc(8px + env(safe-area-inset-top));background:rgba(248,249,252,.82);color:#111827;border-bottom:1px solid rgba(0,0,0,.08)}.brand{color:#111827;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text",Inter,system-ui,sans-serif}.sub{color:#667085}.iconbtn{background:rgba(255,255,255,.72);color:#111827;border:1px solid rgba(0,0,0,.08);box-shadow:0 4px 14px rgba(0,0,0,.06)}.card,.statusBox,.filebox,.banner{border-color:rgba(0,0,0,.07);box-shadow:0 8px 26px rgba(31,41,55,.08)}.card{background:rgba(255,255,255,.94)}.card h3{color:#111827;text-shadow:none}.card p,.small{color:#667085}.bottom{left:10px;right:10px;bottom:calc(8px + env(safe-area-inset-bottom));border:1px solid rgba(0,0,0,.08);border-radius:24px;background:rgba(255,255,255,.88);backdrop-filter:blur(22px);box-shadow:0 10px 32px rgba(15,23,42,.14);padding:7px 6px calc(7px + env(safe-area-inset-bottom))}.nav{color:#667085}.nav.active{color:#111827}body{background:#f4f5f7;color:#111827;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,system-ui,sans-serif}.app{background:#f4f5f7}.msg.user{background:#e5e7eb;color:#111827}.msg.ai{background:#fff;color:#111827;border-color:rgba(0,0,0,.06)}input,textarea{color:#111827!important;background:#fff!important;border-color:rgba(0,0,0,.10)!important}.back{background:#fff;color:#111827;border-color:rgba(0,0,0,.08)}</style><style>/* Targeted contrast repair: presentation only; no application logic changes. */
 body{background:#f4f5f7!important;color:#111827!important}
 .detail,.hero,.sectionTitle{color:#111827}
@@ -4106,7 +4125,8 @@ document.getElementById('view').innerHTML=`
   <button class="action" id="fab" style="position:fixed;bottom:90px;left:20px;width:56px;height:56px;border-radius:50%;font-size:24px;padding:0;box-shadow:0 6px 20px rgba(166,108,255,.5);z-index:50;touch-action:none;cursor:grab" onclick="if(!window.__fabMoved){document.getElementById('postBody').focus();window.scrollTo({top:0,behavior:'smooth'});}">✏️</button>
 </section>`;
 loadPosts();
-loadStats();}
+loadStats();
+setTimeout(function(){if(window.__initFab)window.__initFab();},400);}
 
 async function loadStats(){
   try{
@@ -4116,47 +4136,51 @@ async function loadStats(){
   }catch(_){}
 }
 
-// FAB draggable — يحفظ الموضع ويسمح بتحريكه في أي مكان
-(function initFab(){
-  setTimeout(function(){
-    let fab=document.getElementById('fab');if(!fab)return;
-    // استعادة الموضع المحفوظ
-    try{let saved=localStorage.getItem('ai_for_fab_pos');if(saved){let p=JSON.parse(saved);fab.style.bottom='auto';fab.style.left=p.x+'px';fab.style.top=p.y+'px';}}catch(_){}
-    let dragging=false,moved=false,sx=0,sy=0,ox=0,oy=0;
-    function start(e){
-      let t=e.touches?e.touches[0]:e;dragging=true;moved=false;sx=t.clientX;sy=t.clientY;
-      let r=fab.getBoundingClientRect();ox=r.left;oy=r.top;
-      fab.style.cursor='grabbing';
+// FAB قابل للسحب بحرية
+function initFabDraggable(){
+  let fab=document.getElementById('fab');
+  if(!fab || fab.dataset.dragInit)return;
+  fab.dataset.dragInit='1';
+  try{let saved=localStorage.getItem('ai_for_fab_pos');if(saved){let p=JSON.parse(saved);fab.style.bottom='auto';fab.style.left=p.x+'px';fab.style.top=p.y+'px';}}catch(_){}
+  let dragging=false, moved=false, sx=0, sy=0, ox=0, oy=0;
+  function down(e){
+    let t=e.touches?e.touches[0]:e;
+    dragging=true;moved=false;sx=t.clientX;sy=t.clientY;
+    let r=fab.getBoundingClientRect();ox=r.left;oy=r.top;
+    fab.style.transition='none';
+  }
+  function mv(e){
+    if(!dragging)return;
+    let t=e.touches?e.touches[0]:e;
+    let dx=t.clientX-sx, dy=t.clientY-sy;
+    if(Math.abs(dx)>8||Math.abs(dy)>8)moved=true;
+    if(moved){
+      if(e.cancelable)e.preventDefault();
+      let nx=Math.max(6,Math.min(window.innerWidth-62,ox+dx));
+      let ny=Math.max(70,Math.min(window.innerHeight-80,oy+dy));
+      fab.style.bottom='auto';fab.style.right='auto';
+      fab.style.left=nx+'px';fab.style.top=ny+'px';
     }
-    function move(e){
-      if(!dragging)return;
-      let t=e.touches?e.touches[0]:e;
-      let dx=t.clientX-sx,dy=t.clientY-sy;
-      if(Math.abs(dx)>6||Math.abs(dy)>6)moved=true;
-      if(moved){
-        e.preventDefault();
-        let nx=Math.max(6,Math.min(window.innerWidth-62,ox+dx));
-        let ny=Math.max(70,Math.min(window.innerHeight-80,oy+dy));
-        fab.style.bottom='auto';fab.style.left=nx+'px';fab.style.top=ny+'px';
-      }
+  }
+  function up(){
+    if(!dragging)return;
+    dragging=false;
+    if(moved){
+      try{let r=fab.getBoundingClientRect();localStorage.setItem('ai_for_fab_pos',JSON.stringify({x:r.left,y:r.top}))}catch(_){}
+      window.__fabMoved=true;
+      setTimeout(()=>window.__fabMoved=false,500);
     }
-    function end(){
-      if(!dragging)return;
-      dragging=false;fab.style.cursor='grab';
-      window.__fabMoved=moved;
-      if(moved){
-        try{let r=fab.getBoundingClientRect();localStorage.setItem('ai_for_fab_pos',JSON.stringify({x:r.left,y:r.top}))}catch(_){}
-        setTimeout(()=>window.__fabMoved=false,300);
-      }
-    }
-    fab.addEventListener('touchstart',start,{passive:true});
-    fab.addEventListener('touchmove',move,{passive:false});
-    fab.addEventListener('touchend',end);
-    fab.addEventListener('mousedown',start);
-    document.addEventListener('mousemove',move);
-    document.addEventListener('mouseup',end);
-  },300);
-})();
+  }
+  fab.addEventListener('touchstart',down,{passive:true});
+  fab.addEventListener('touchmove',mv,{passive:false});
+  fab.addEventListener('touchend',up);
+  fab.addEventListener('touchcancel',up);
+  fab.addEventListener('mousedown',down);
+  document.addEventListener('mousemove',mv);
+  document.addEventListener('mouseup',up);
+}
+// إعادة التشغيل عند كل فتح للمجتمع
+window.__initFab=initFabDraggable;
 
 async function loadPosts(){
   let host=document.getElementById('posts');if(!host)return;
@@ -4177,18 +4201,26 @@ function renderPostCard(p){
   let time=timeAgo(p.created_at);
   let verified=p.author_verified?'<span style="color:#39d9ff;font-size:14px" title="موثّق">✓</span>':'';
   let img=p.image_url?'<img src="'+esc(p.image_url)+'" style="width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-top:10px">':'';
-  let liked=p.viewer_liked?'❤️':'🤍';
   let bm=p.viewer_bookmarked?'🔖':'📑';
   let avatar=avatarHtml(identity,name,44);
-  let likeBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleLike(this)" style="border-radius:20px;padding:6px 12px">'+liked+' <span class="lk">'+Number(p.likes||0)+'</span></button>';
-  let cmtBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="loadComments(\''+esc(pid)+'\')" style="border-radius:20px;padding:6px 12px">💬 '+Number(p.comment_count||0)+'</button>';
-  let bmBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleBookmark(this)" style="border-radius:20px;padding:6px 12px">'+bm+'</button>';
-  let shareBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="sharePost(this)" style="border-radius:20px;padding:6px 12px">🔗</button>';
-  let canDel=(state.role==='owner'||state.role==='admin');
-  if(!canDel&&state.user.username&&p.author_username===state.user.username)canDel=true;
-  let delBtn=canDel?'<button class="mini" data-pid="'+esc(pid)+'" onclick="deletePost(this)" style="border-radius:20px;padding:6px 12px;color:#ff8793">🗑️</button>':'';
-  return '<div class="statusBox" style="padding:14px 16px;border-radius:18px;margin-bottom:12px"><div style="display:flex;align-items:flex-start;gap:12px">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b style="font-size:15px">'+esc(name)+'</b> '+verified+'<span class="small" style="opacity:.7">'+esc(user)+'</span><span class="small" style="opacity:.55">·</span><span class="small" style="opacity:.7">'+esc(time)+'</span></div></div></div>'+img+'<div style="margin-top:10px;white-space:pre-wrap;line-height:1.7;font-size:15px">'+esc(p.body||'')+'</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:14px;padding-top:10px;border-top:1px solid #1c2a39">'+likeBtn+' '+cmtBtn+' '+bmBtn+' '+shareBtn+' '+delBtn+'</div><div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
+  let myReaction=(p.viewer_reaction||'');
+  let reactionsBar='<div class="reactions-bar" id="reactions-'+esc(pid)+'">'+
+    '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="love" onclick="react(this)" style="'+(myReaction==='love'?'background:#ffe1e1':'')+'">❤️</button>'+
+    '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="like" onclick="react(this)" style="'+(myReaction==='like'?'background:#e1efff':'')+'">👍</button>'+
+    '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="haha" onclick="react(this)" style="'+(myReaction==='haha'?'background:#fff3c4':'')+'">😂</button>'+
+    '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="wow" onclick="react(this)" style="'+(myReaction==='wow'?'background:#f0e1ff':'')+'">😮</button>'+
+    '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="sad" onclick="react(this)" style="'+(myReaction==='sad'?'background:#e1e5ff':'')+'">😢</button>'+
+    '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="clap" onclick="react(this)" style="'+(myReaction==='clap'?'background:#ffe9d0':'')+'">👏</button>'+
+    '</div>'+
+    '<div class="reactions-count"><span>❤️ '+Number(p.likes||0)+'</span>'+
+    '<button class="mini" data-pid="'+esc(pid)+'" onclick="loadComments(\''+esc(pid)+'\')" style="border-radius:14px;padding:2px 10px;font-size:12px">💬 '+Number(p.comment_count||0)+'</button>'+
+    '<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleBookmark(this)" style="border-radius:14px;padding:2px 10px;font-size:12px">'+bm+'</button>'+
+    '<button class="mini" data-pid="'+esc(pid)+'" onclick="sharePost(this)" style="border-radius:14px;padding:2px 10px;font-size:12px">🔗</button>'+
+    (state.role==='owner'||state.role==='admin'||(p.author_username&&state.user.username===p.author_username)?'<button class="mini" data-pid="'+esc(pid)+'" onclick="deletePost(this)" style="border-radius:14px;padding:2px 10px;font-size:12px;color:#ff8793">🗑️</button>':'')+
+    '</div>';
+  return '<div class="statusBox" style="padding:14px 16px;border-radius:18px;margin-bottom:12px" data-post="'+esc(pid)+'"><div style="display:flex;align-items:flex-start;gap:12px">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b style="font-size:15px">'+esc(name)+'</b> '+verified+'<span class="small" style="opacity:.7">'+esc(user)+'</span><span class="small" style="opacity:.55">·</span><span class="small" style="opacity:.7">'+esc(time)+'</span></div></div></div>'+img+'<div style="margin-top:10px;white-space:pre-wrap;line-height:1.7;font-size:15px">'+esc(p.body||'')+'</div>'+reactionsBar+'<div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
 }
+
 
 async function createPost(){
   let b=document.getElementById('postBody').value.trim();
@@ -4206,14 +4238,22 @@ async function createPost(){
   }catch(e){if(m)m.textContent='⚠️ تعذر النشر: '+(e.message||'');}
 }
 
-async function toggleLike(btn){
+async function react(btn){
+  let pid=btn.dataset.pid;
+  let r=btn.dataset.r;
   try{
-    let d=await platformSvc('community_like',{post_id:btn.dataset.pid});
+    let d=await platformSvc('community_react',{post_id:pid,reaction:r});
     if(!d||!d.ok)throw new Error(d.error);
-    let span=btn.querySelector('.lk');let cur=Number(span.textContent||0);
-    btn.innerHTML=(d.liked?'❤️ ':'🤍 ')+'<span class="lk">'+Math.max(0,cur+(d.liked?1:-1))+'</span>';
-    btn.style.transform='scale(1.15)';setTimeout(()=>btn.style.transform='',180);
-  }catch(e){alert('تعذر الإعجاب');}
+    btn.style.transform='scale(1.4)';setTimeout(()=>btn.style.transform='',200);
+    // نُحدّث حالة الأزرار
+    let bar=document.getElementById('reactions-'+pid);
+    if(bar){
+      bar.querySelectorAll('.reaction-btn').forEach(function(b){b.style.background='';});
+      if(d.reaction){let target=bar.querySelector('[data-r="'+d.reaction+'"]');if(target)target.style.background='#ffe1e1';}
+    }
+    // نحدّث العدد (بعد لحظة)
+    setTimeout(()=>{try{loadPosts()}catch(_){}},400);
+  }catch(e){alert('تعذر التفاعل');}
 }
 
 async function toggleBookmark(btn){
@@ -4250,8 +4290,8 @@ async function loadComments(pid){
     area.innerHTML='<div class="small">⏳ جاري التحميل...</div>';
     let d=await platformSvc('community_comments_list',{post_id:pid});
     let rows=(d&&d.comments)||[];
-    let html=rows.map(c=>'<div style="padding:10px 0;border-top:1px solid #1c2a39;display:flex;gap:10px">'+avatarHtml(c.author_identity||'',c.author_name||'?',32)+'<div style="flex:1"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(c.author_name||'')+'</b><span class="small" style="opacity:.6">'+esc(timeAgo(c.created_at))+'</span></div><div style="margin-top:4px;white-space:pre-wrap;line-height:1.6">'+esc(c.body||'')+'</div></div></div>').join('')||'<div class="small">لا تعليقات بعد. كن أول من يعلّق!</div>';
-    area.innerHTML=html+'<div class="toolbar" style="margin-top:8px;display:flex;gap:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:10px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:10px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(pid)+'\')" style="border-radius:10px">إرسال</button></div>';
+    let html=rows.map(c=>'<div class="cmt-row">'+avatarHtml(c.author_identity||'',c.author_name||'?',32)+'<div class="cmt-bubble"><div class="cmt-head"><span class="cmt-name">'+esc(c.author_name||'عضو')+'</span><span class="cmt-time">'+esc(timeAgo(c.created_at))+'</span></div><div class="cmt-body">'+esc(c.body||'')+'</div></div></div>').join('')||'<div class="small" style="padding:10px 0">لا تعليقات بعد. كن أول من يعلّق!</div>';
+    area.innerHTML=html+'<div class="toolbar" style="margin-top:8px;display:flex;gap:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:10px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(pid)+'\')" style="border-radius:22px;background:#a66cff;color:#fff;font-weight:700;border:0;padding:8px 16px">إرسال</button></div>';
     area.dataset.loaded='1';
   }catch(e){console.warn('loadComments error', e);}
 }
@@ -5554,7 +5594,8 @@ def _platform_community_posts(limit=50, viewer_identity=""):
             FROM ai_for_community_posts p
             LEFT JOIN ai_for_web_accounts w ON p.author_identity='web:'||w.account_id::text AND w.status='active'
             LEFT JOIN ai_for_members m ON p.author_identity='tg:'||m.user_id::text
-            LEFT JOIN ai_for_web_accounts wp ON p.author_identity='pi:'||(wp.metadata->>'pi_uid') AND wp.status='active'
+            LEFT JOIN ai_for_identity_links il ON il.provider='pi' AND il.provider_subject = SUBSTRING(p.author_identity FROM 4)
+            LEFT JOIN ai_for_web_accounts wp ON wp.account_id = il.account_id AND wp.status='active'
             WHERE p.is_deleted = FALSE
             ORDER BY p.created_at DESC LIMIT %s""", (limit,))
         rows = [dict(x) for x in cur.fetchall()]
@@ -5565,9 +5606,16 @@ def _platform_community_posts(limit=50, viewer_identity=""):
             liked = {str(x["post_id"]) for x in cur.fetchall()}
             cur.execute("SELECT post_id::text AS post_id FROM ai_for_community_bookmarks WHERE user_identity=%s AND post_id::text = ANY(%s)", (viewer_identity, [str(x) for x in post_ids]))
             bookmarked = {str(x["post_id"]) for x in cur.fetchall()}
+            # reactions متعددة
+            try:
+                cur.execute("SELECT post_id::text AS post_id, reaction FROM ai_for_community_reactions WHERE user_identity=%s AND post_id::text = ANY(%s)", (viewer_identity, [str(x) for x in post_ids]))
+                reactions_map = {str(x["post_id"]): str(x["reaction"]) for x in cur.fetchall()}
+            except Exception:
+                reactions_map = {}
             for r in rows:
                 r["viewer_liked"] = str(r["post_id"]) in liked
                 r["viewer_bookmarked"] = str(r["post_id"]) in bookmarked
+                r["viewer_reaction"] = reactions_map.get(str(r["post_id"]), "")
         # نُصلح الاسم عبر identity_links إذا كان الاسم الافتراضي
         for r in rows:
             ident = str(r.get("author_identity") or "")
@@ -5872,6 +5920,35 @@ def webapp_platform_services():
         if r.get("error")=="forbidden": return jsonify({"ok":False,"error":"forbidden"}),403
         if r.get("error")=="not_found": return jsonify({"ok":False,"error":"not_found"}),404
         return jsonify({"ok":True, **r})
+    if op=="community_react":
+        post_id = str(body.get("post_id","")).strip()
+        reaction = str(body.get("reaction","")).strip()[:10]
+        if not post_id or reaction not in ("like","love","haha","wow","sad","clap"): 
+            return jsonify({"ok":False,"error":"invalid_reaction"}),400
+        identity = _platform_identity(user)
+        def q_react(cur):
+            cur.execute("SELECT reaction FROM ai_for_community_reactions WHERE post_id=%s AND user_identity=%s", (post_id, identity))
+            cur_row = cur.fetchone()
+            cur_reaction = cur_row["reaction"] if cur_row else None
+            if cur_reaction == reaction:
+                cur.execute("DELETE FROM ai_for_community_reactions WHERE post_id=%s AND user_identity=%s", (post_id, identity))
+                cur.execute("UPDATE ai_for_community_posts SET likes=GREATEST(0,likes-1) WHERE post_id=%s", (post_id,))
+                return {"reaction": None, "action": "removed"}
+            if cur_reaction:
+                cur.execute("UPDATE ai_for_community_reactions SET reaction=%s, created_at=NOW() WHERE post_id=%s AND user_identity=%s", (reaction, post_id, identity))
+                return {"reaction": reaction, "action": "changed"}
+            cur.execute("INSERT INTO ai_for_community_reactions(post_id,user_identity,reaction) VALUES(%s,%s,%s)", (post_id, identity, reaction))
+            cur.execute("UPDATE ai_for_community_posts SET likes=likes+1 WHERE post_id=%s", (post_id,))
+            return {"reaction": reaction, "action": "added"}
+        r = _platform_db_query(q_react)
+        return jsonify({"ok":r is not None, **(r or {})})
+    if op=="community_reactions_list":
+        post_id = str(body.get("post_id","")).strip()
+        if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400
+        def q_rl(cur):
+            cur.execute("SELECT reaction, COUNT(*) AS n FROM ai_for_community_reactions WHERE post_id=%s GROUP BY reaction", (post_id,))
+            return {row["reaction"]: int(row["n"]) for row in cur.fetchall()}
+        return jsonify({"ok":True, "reactions": _platform_db_query(q_rl) or {}})
     if op=="community_bookmark":
         post_id = str(body.get("post_id","")).strip()
         if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400

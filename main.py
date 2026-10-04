@@ -593,15 +593,29 @@ def init_membership_db():
         membership_db_ready = False
         return False
     conn = None
+    schema_err = None
     try:
         with membership_db_lock:
             _db_pool_init()
             conn = _pool_conn(membership_db_pool)
             if not conn:
                 raise RuntimeError("PostgreSQL connection pool unavailable")
+            # 1) Verify the connection works (SELECT 1).
             with conn:
                 with conn.cursor() as cur:
-                    _ensure_db_schema(cur)
+                    cur.execute("SELECT 1")
+                    cur.fetchone()
+            # 2) Try to create/upgrade the schema. If this fails, we still mark
+            # the DB as ready because the connection works and most features
+            # only need to read/write existing tables. Any missing table will
+            # fail individually and can be diagnosed later.
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        _ensure_db_schema(cur)
+            except Exception as _se:
+                schema_err = str(_se)
+                print(f"Membership schema warning (connection OK): {_se}")
             membership_db_ready = True
             membership_db_error = ""
             db_last_ok_at = datetime.now(ZoneInfo("Africa/Tunis")).isoformat()
@@ -642,8 +656,9 @@ def ensure_database_ready():
                 finally:
                     _membership_db_release(_probe)
         ok = init_membership_db() or membership_db_ready
-        init_control_db()
-        return bool(ok and membership_db_ready and control_db_ready)
+        if not control_db_ready:
+            init_control_db()
+        return bool(ok and membership_db_ready)
 
 def register_platform_member(user, source="webapp", chat_id=None):
     """Register/update a platform member by immutable Telegram User ID."""

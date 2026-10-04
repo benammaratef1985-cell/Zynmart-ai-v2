@@ -4413,16 +4413,11 @@ async function sendDM(otherIdentity){
   let text=inp.value.trim();
   inp.value='';
   try{
-    let r=await fetch('/api/app/platform-services',{
-      method:'POST',
-      headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
-      cache:'no-store',
-      body:JSON.stringify({op:'message_send',recipient:otherIdentity,body:text})
-    });
-    let d=await r.json();
-    if(!r.ok||!d||!d.ok)throw new Error((d&&d.error)||'send_failed');
+    let d=await platformSvc('message_send',{recipient:otherIdentity,body:text});
+    if(!d||!d.ok)throw new Error((d&&d.error)||'send_failed');
     await loadConversation(otherIdentity);
-  }catch(e){alert('تعذر الإرسال: '+(e.message||''));}
+    inp.focus();
+  }catch(e){alert('⚠️ تعذر الإرسال: '+(e.message||''));}
 }
 
 function newConversationPrompt(){

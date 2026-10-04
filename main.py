@@ -4048,9 +4048,123 @@ async function timeRun(){let r=document.getElementById('timeResult');try{let d=a
 async function currencyRun(){let r=document.getElementById('currencyResult');try{let d=await toolCall({op:'currency',amount:Number(document.getElementById('curAmount').value),base:document.getElementById('curBase').value,target:document.getElementById('curTarget').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+' '+esc(d.target||'')+'<div class="small">المصدر: '+esc(d.source||'')+' · '+esc(d.date||'')+'</div></div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذر الحصول على سعر العملة.</div>'}}
 async function translateRun(){let r=document.getElementById('transResult');try{let d=await toolCall({op:'translate',text:document.getElementById('transText').value,target:document.getElementById('targetLang').value});r.innerHTML='<div class="statusBox">'+esc(d.result||'')+'</div>'}catch(e){r.innerHTML='<div class="statusBox">⚠️ تعذرت الترجمة.</div>'}}
 async function platformSvc(op,body={}){return api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op,...body})})}
-function communityBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المجتمع</button><section class="detail"><div class="sectionTitle">👥 مجتمع AI for</div><div class="filebox"><textarea id="postBody" placeholder="اكتب منشورًا محترمًا..." style="width:100%;min-height:90px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea><button class="action" onclick="createPost()">نشر</button><div id="postMsg"></div></div><div id="posts">⏳ جاري تحميل المنشورات...</div></section>`;loadPosts()}
-async function loadPosts(){let host=document.getElementById('posts');if(!host)return;try{let d=await platformSvc('community_list');if(!d||!d.ok)throw new Error((d&&d.error)||'load_failed');let rows=d.posts||[];host.innerHTML=rows.length?rows.map(p=>{let n=p.author_name||'عضو AI for';let u=p.author_username?' · @'+p.author_username:'';return '<div class="statusBox"><b>👤 '+esc(n)+esc(u)+'</b><div class="row">'+esc(p.body)+'</div><div class="small">'+esc(p.created_at||'')+'</div></div>'}).join(''):'<div class="statusBox">لا توجد منشورات بعد.</div>'}catch(e){host.textContent='⚠️ تعذر تحميل المجتمع: '+(e.message||'')}}
-async function createPost(){let b=document.getElementById('postBody').value.trim();let m=document.getElementById('postMsg');if(!b){if(m)m.textContent='⚠️ اكتب منشورًا أولًا.';return}if(m)m.textContent='⏳ جاري النشر...';try{let d=await platformSvc('community_post',{body:b});if(!d||!d.ok)throw new Error((d&&d.error)||'post_failed');document.getElementById('postBody').value='';if(m)m.innerHTML='<span class="ok">✅ تم النشر.</span>';await loadPosts()}catch(e){if(m)m.textContent='⚠️ تعذر النشر: '+(e.message||'')}}
+function communityBox(){
+document.getElementById('view').innerHTML=`
+<button class="back" onclick="goHome()">← المجتمع</button>
+<section class="detail">
+  <div class="sectionTitle">👥 مجتمع AI for</div>
+  <div class="filebox">
+    <textarea id="postBody" placeholder="شارك رأيك، فكرة، أو خبر..." style="width:100%;min-height:90px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:14px;padding:12px;font:inherit"></textarea>
+    <input id="postImageUrl" placeholder="رابط صورة (اختياري)" style="width:100%;margin-top:8px;padding:10px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;font-size:13px">
+    <button class="action" onclick="createPost()">📤 نشر</button>
+    <div id="postMsg" class="small" style="margin-top:6px"></div>
+  </div>
+  <div id="posts"><div class="statusBox">⏳ جاري التحميل...</div></div>
+</section>`;
+loadPosts();}
+
+async function loadPosts(){
+  let host=document.getElementById('posts');if(!host)return;
+  try{
+    let d=await platformSvc('community_list');
+    if(!d||!d.ok)throw new Error((d&&d.error)||'load_failed');
+    let rows=d.posts||[];
+    if(!rows.length){host.innerHTML='<div class="statusBox">لا توجد منشورات بعد. كن أول من ينشر!</div>';return}
+    host.innerHTML=rows.map(p=>renderPostCard(p)).join('');
+  }catch(e){host.textContent='⚠️ تعذر تحميل المجتمع: '+(e.message||'');}
+}
+
+function renderPostCard(p){
+  let pid=p.post_id;
+  let name=p.author_name||'عضو AI for';
+  let user=p.author_username?'@'+p.author_username:'';
+  let time=(p.created_at||'').replace('T',' ').slice(0,16);
+  let img=p.image_url?'<img src="'+esc(p.image_url)+'" style="width:100%;max-height:400px;object-fit:cover;border-radius:12px;margin-top:10px">':'';
+  let liked=p.viewer_liked?'❤️':'🤍';
+  let bm=p.viewer_bookmarked?'🔖':'📑';
+  let likeBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleLike(this)">'+liked+' <span class="lk">'+Number(p.likes||0)+'</span></button>';
+  let cmtBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="loadComments(\''+esc(pid)+'\')">💬 '+Number(p.comment_count||0)+'</button>';
+  let bmBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="toggleBookmark(this)">'+bm+'</button>';
+  let shareBtn='<button class="mini" data-pid="'+esc(pid)+'" onclick="sharePost(this)">🔗</button>';
+  let canDel=(state.role==='owner'||state.role==='admin');
+  if(!canDel&&state.user.username&&p.author_username===state.user.username)canDel=true;
+  let delBtn=canDel?'<button class="mini danger" data-pid="'+esc(pid)+'" onclick="deletePost(this)">🗑️</button>':'';
+  return '<div class="statusBox"><div style="display:flex;align-items:center;gap:10px"><div style="width:40px;height:40px;border-radius:50%;background:#a66cff;display:flex;align-items:center;justify-content:center;font-size:20px">👤</div><div style="flex:1"><b>'+esc(name)+'</b><div class="small">'+esc(user)+' · '+esc(time)+'</div></div></div>'+img+'<div class="row" style="margin-top:8px;white-space:pre-wrap">'+esc(p.body||'')+'</div><div class="toolbar" style="margin-top:10px">'+likeBtn+' '+cmtBtn+' '+bmBtn+' '+shareBtn+' '+delBtn+'</div><div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
+}
+
+async function createPost(){
+  let b=document.getElementById('postBody').value.trim();
+  let img=document.getElementById('postImageUrl').value.trim();
+  let m=document.getElementById('postMsg');
+  if(!b){if(m)m.textContent='⚠️ اكتب منشورًا أولًا.';return}
+  if(m)m.textContent='⏳ جاري النشر...';
+  try{
+    let d=await platformSvc('community_post',{body:b,image_url:img});
+    if(!d||!d.ok)throw new Error((d&&d.error)||'post_failed');
+    document.getElementById('postBody').value='';
+    document.getElementById('postImageUrl').value='';
+    if(m)m.innerHTML='<span class="ok">✅ تم النشر.</span>';
+    await loadPosts();
+  }catch(e){if(m)m.textContent='⚠️ تعذر النشر: '+(e.message||'');}
+}
+
+async function toggleLike(btn){
+  try{
+    let d=await platformSvc('community_like',{post_id:btn.dataset.pid});
+    if(!d||!d.ok)throw new Error(d.error);
+    let span=btn.querySelector('.lk');let cur=Number(span.textContent||0);
+    btn.innerHTML=(d.liked?'❤️ ':'🤍 ')+'<span class="lk">'+Math.max(0,cur+(d.liked?1:-1))+'</span>';
+  }catch(e){alert('تعذر الإعجاب');}
+}
+
+async function toggleBookmark(btn){
+  try{
+    let d=await platformSvc('community_bookmark',{post_id:btn.dataset.pid});
+    if(!d||!d.ok)throw new Error(d.error);
+    btn.textContent=d.bookmarked?'🔖':'📑';
+  }catch(e){alert('تعذر الحفظ');}
+}
+
+function sharePost(btn){
+  let url=location.origin+'/app?post='+btn.dataset.pid;
+  if(navigator.clipboard){navigator.clipboard.writeText(url).then(()=>alert('✅ تم نسخ الرابط')).catch(()=>prompt('انسخ الرابط:',url));}
+  else{prompt('انسخ الرابط:',url);}
+}
+
+async function deletePost(btn){
+  if(!confirm('مسح هذا المنشور؟'))return;
+  try{
+    let d=await platformSvc('community_delete_post',{post_id:btn.dataset.pid});
+    if(!d||!d.ok)throw new Error(d.error||'failed');
+    await loadPosts();
+  }catch(e){alert('تعذر المسح: '+(e.message||''));}
+}
+
+async function loadComments(pid){
+  let area=document.getElementById('cmt-'+pid);
+  if(!area)return;
+  if(area.style.display==='block'){area.style.display='none';return}
+  area.style.display='block';
+  area.innerHTML='<div class="small">⏳...</div>';
+  try{
+    let d=await platformSvc('community_comments_list',{post_id:pid});
+    let rows=(d&&d.comments)||[];
+    let html=rows.map(c=>'<div style="padding:6px 0;border-top:1px solid #1c2a39"><b>'+esc(c.author_name||'')+'</b> <span class="small">'+esc((c.created_at||'').slice(0,16).replace('T',' '))+'</span><div>'+esc(c.body||'')+'</div></div>').join('')||'<div class="small">لا تعليقات بعد.</div>';
+    area.innerHTML=html+'<div class="toolbar" style="margin-top:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:10px;font-size:13px"><button class="mini" onclick="sendComment(\''+esc(pid)+'\')">إرسال</button></div>';
+  }catch(e){area.innerHTML='<div class="small">⚠️</div>';}
+}
+
+async function sendComment(pid){
+  let inp=document.getElementById('cmt-input-'+pid);
+  if(!inp||!inp.value.trim())return;
+  try{
+    let d=await platformSvc('community_comment',{post_id:pid,body:inp.value.trim()});
+    if(!d||!d.ok)throw new Error(d.error);
+    await loadComments(pid);
+    await loadPosts();
+  }catch(e){alert('تعذر إرسال التعليق');}
+}
+
 function messagesBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الرسائل</button><section class="detail"><div class="sectionTitle">💬 رسائل AI for</div><input id="msgTo" placeholder="معرّف الحساب المستلم" style="width:100%;padding:12px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px"><textarea id="msgBody" placeholder="الرسالة" style="width:100%;min-height:90px;margin-top:8px;background:#0a1018;color:white;border:1px solid #2b3a4c;border-radius:12px;padding:12px"></textarea><button class="action" onclick="sendPlatformMessage()">إرسال</button><div id="msgs" class="statusBox">⏳</div></section>`;loadMessages()}
 async function loadMessages(){try{let d=await platformSvc('messages');document.getElementById('msgs').innerHTML=(d.messages||[]).map(m=>'<div class="row"><b>'+esc(m.sender_identity)+'</b> → '+esc(m.recipient_identity)+'<br>'+esc(m.body)+'<div class="small">'+esc(m.created_at||'')+'</div></div>').join('')||'لا توجد رسائل.'}catch(e){document.getElementById('msgs').textContent='⚠️ تعذر تحميل الرسائل.'}}
 async function sendPlatformMessage(){let to=document.getElementById('msgTo').value.trim(),body=document.getElementById('msgBody').value.trim();if(!to||!body)return;try{await platformSvc('message_send',{recipient:to,body});document.getElementById('msgBody').value='';loadMessages()}catch(e){alert('⚠️ تعذر إرسال الرسالة.')}}

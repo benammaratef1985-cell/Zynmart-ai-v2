@@ -5562,9 +5562,23 @@ def _platform_community_posts(limit=50, viewer_identity=""):
             for r in rows:
                 r["viewer_liked"] = str(r["post_id"]) in liked
                 r["viewer_bookmarked"] = str(r["post_id"]) in bookmarked
-        # نُضيف رابط الصورة + verified لكل منشور
+        # نُصلح الاسم عبر identity_links إذا كان الاسم الافتراضي
         for r in rows:
             ident = str(r.get("author_identity") or "")
+            if (r.get("author_name") in ("عضو AI for", "AI for user", "", None)) and ident:
+                try:
+                    if ident.startswith("web:"):
+                        cur.execute("""SELECT COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''),'عضو') AS nm
+                                       FROM ai_for_web_accounts w WHERE w.account_id=%s LIMIT 1""", (ident[4:],))
+                        rr = cur.fetchone()
+                        if rr and rr.get("nm"): r["author_name"] = rr["nm"]
+                    elif ident.startswith("tg:"):
+                        cur.execute("""SELECT COALESCE(NULLIF(TRIM(CONCAT(COALESCE(first_name,''),' ',COALESCE(last_name,''))),''),NULLIF(username,''),'عضو') AS nm
+                                       FROM ai_for_members WHERE user_id=%s LIMIT 1""", (ident[3:],))
+                        rr = cur.fetchone()
+                        if rr and rr.get("nm"): r["author_name"] = rr["nm"]
+                except Exception:
+                    pass
             r["author_avatar_url"] = "/api/community/avatar/" + ident if ident else ""
             r["author_verified"] = False
         # verified: نقرأه من profiles (اختياري — للأعضاء المميزين)
@@ -6293,6 +6307,15 @@ def community_avatar(identity):
             else:
                 return ("", 404)
             row = cur.fetchone()
+            # إذا كانت صورة web فاشلة، نحاول عبر identity_links
+            if (not row or not row[0]) and identity.startswith("web:"):
+                try:
+                    cur.execute("SELECT m.profile_photo, m.profile_photo_mime FROM ai_for_members m JOIN ai_for_identity_links l ON l.provider_subject = m.user_id::text WHERE l.account_id=%s AND l.provider='telegram' LIMIT 1", (identity[4:],))
+                    row2 = cur.fetchone()
+                    if row2 and row2[0]:
+                        row = row2
+                except Exception:
+                    pass
         if not row or not row[0]:
             return ("", 404)
         return send_file(io.BytesIO(bytes(row[0])), mimetype=row[1] or "image/jpeg", max_age=300, download_name="avatar")
@@ -6307,12 +6330,15 @@ def community_avatar(identity):
 def community_stats():
     """Quick stats for the community header."""
     def q(cur):
-        cur.execute("SELECT COUNT(*) FROM ai_for_community_posts WHERE is_deleted=FALSE")
-        posts = int(cur.fetchone()[0])
-        cur.execute("SELECT COALESCE(SUM(likes),0) FROM ai_for_community_posts WHERE is_deleted=FALSE")
-        likes = int(cur.fetchone()[0])
-        cur.execute("SELECT COUNT(DISTINCT author_identity) FROM ai_for_community_posts WHERE is_deleted=FALSE")
-        authors = int(cur.fetchone()[0])
+        cur.execute("SELECT COUNT(*) AS n FROM ai_for_community_posts WHERE is_deleted=FALSE")
+        row = cur.fetchone() or {}
+        posts = int(row.get("n") or 0)
+        cur.execute("SELECT COALESCE(SUM(likes),0) AS n FROM ai_for_community_posts WHERE is_deleted=FALSE")
+        row = cur.fetchone() or {}
+        likes = int(row.get("n") or 0)
+        cur.execute("SELECT COUNT(DISTINCT author_identity) AS n FROM ai_for_community_posts WHERE is_deleted=FALSE")
+        row = cur.fetchone() or {}
+        authors = int(row.get("n") or 0)
         return {"posts": posts, "likes": likes, "authors": authors}
     stats = _platform_db_query(q) or {"posts": 0, "likes": 0, "authors": 0}
     return jsonify({"ok": True, **stats})

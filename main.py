@@ -581,6 +581,18 @@ def _ensure_db_schema(cur):
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_comments_post ON ai_for_community_comments(post_id, created_at DESC)")
+    for stmt in [
+        "ALTER TABLE ai_for_community_comments ADD COLUMN IF NOT EXISTS parent_id UUID",
+        "ALTER TABLE ai_for_community_comments ADD COLUMN IF NOT EXISTS like_count BIGINT NOT NULL DEFAULT 0",
+    ]:
+        try: cur.execute(stmt)
+        except Exception as e: print(f"comments alter: {e}")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_comment_reactions (
+        comment_id UUID NOT NULL,
+        user_identity TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (comment_id, user_identity)
+    )""")
     # Follows
     cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_community_follows (
         follower_identity TEXT NOT NULL,
@@ -4300,17 +4312,88 @@ async function loadComments(pid){
     if(!area)return;
     if(area.style.display==='block' && area.dataset.loaded==='1'){area.style.display='none';return}
     area.style.display='block';
-    if(area.dataset.loaded==='1')return;
     area.innerHTML='<div class="small">⏳ جاري التحميل...</div>';
     let d=await platformSvc('community_comments_list',{post_id:pid});
     let rows=(d&&d.comments)||[];
-    let html=rows.map(c=>'<div class="cmt-row">'+avatarHtml(c.author_identity||'',c.author_name||'?',32)+'<div class="cmt-bubble"><div class="cmt-head"><span class="cmt-name">'+esc(c.author_name||'عضو')+'</span><span class="cmt-time">'+esc(timeAgo(c.created_at))+'</span></div><div class="cmt-body">'+esc(c.body||'')+'</div></div></div>').join('')||'<div class="small" style="padding:10px 0">لا تعليقات بعد. كن أول من يعلّق!</div>';
-    area.innerHTML=html+'<div class="toolbar" style="margin-top:8px;display:flex;gap:6px"><input id="cmt-input-'+esc(pid)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:10px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(pid)+'\')" style="border-radius:22px;background:#a66cff;color:#fff;font-weight:700;border:0;padding:8px 16px">إرسال</button></div>';
+    area.innerHTML=renderCommentsTree(rows,pid);
     area.dataset.loaded='1';
   }catch(e){console.warn('loadComments error', e);}
 }
 
+function renderCommentsTree(rows,postId){
+  let byParent={};
+  let roots=[];
+  rows.forEach(function(c){
+    let par=c.parent_id||'';
+    if(!par){roots.push(c);}
+    else{if(!byParent[par])byParent[par]=[];byParent[par].push(c);}
+  });
+  function renderOne(c,depth){
+    let liked=c.viewer_liked?'❤️':'🤍';
+    let indent='margin-right:'+(depth*30)+'px';
+    let replies=(byParent[c.comment_id]||[]).map(function(r){return renderOne(r,depth+1)}).join('');
+    return '<div class="cmt-row" style="'+indent+'">'+avatarHtml(c.author_identity||'',c.author_name||'عضو',32)+
+      '<div class="cmt-bubble"><div class="cmt-head"><span class="cmt-name">'+esc(c.author_name||'عضو')+'</span><span class="cmt-time">'+esc(timeAgo(c.created_at))+'</span></div>'+
+      '<div class="cmt-body">'+esc(c.body||'')+'</div>'+
+      '<div class="cmt-actions">'+
+      '<button onclick="likeComment(this, \''+esc(c.comment_id)+'\')" data-liked="'+(c.viewer_liked?'1':'0')+'">'+liked+' <span class="clc">'+Number(c.like_count||0)+'</span></button>'+
+      '<button onclick="showReplyInput(\''+esc(postId)+'\',\''+esc(c.comment_id)+'\')">↩️ رد</button>'+
+      '</div>'+
+      '<div id="reply-'+esc(c.comment_id)+'" style="display:none;margin-top:6px"></div>'+
+      '</div></div>'+replies;
+  }
+  let html=roots.map(function(r){return renderOne(r,0)}).join('')||'<div class="small" style="padding:10px 0">لا تعليقات بعد. كن أول من يعلّق!</div>';
+  html+='<div class="toolbar" style="margin-top:8px;display:flex;gap:6px"><input id="cmt-input-'+esc(postId)+'" placeholder="اكتب تعليقًا..." style="flex:1;padding:10px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:13px"><button class="mini" type="button" onclick="event.preventDefault();sendComment(\''+esc(postId)+'\')" style="border-radius:22px;background:#a66cff;color:#fff;font-weight:700;border:0;padding:8px 16px">إرسال</button></div>';
+  return html;
+}
+
+async function likeComment(btn, commentId){
+  try{
+    let d=await platformSvc('comment_like',{comment_id:commentId});
+    if(!d||!d.ok)throw new Error(d.error);
+    let span=btn.querySelector('.clc');
+    let cur=Number(span.textContent||0);
+    btn.innerHTML=(d.liked?'❤️ ':'🤍 ')+'<span class="clc">'+Math.max(0,cur+(d.liked?1:-1))+'</span>';
+    btn.style.transform='scale(1.2)';setTimeout(function(){btn.style.transform='';},150);
+  }catch(e){alert('تعذر التفاعل');}
+}
+
+function showReplyInput(postId, parentCommentId){
+  let box=document.getElementById('reply-'+parentCommentId);
+  if(!box)return;
+  if(box.style.display==='block'){box.style.display='none';return}
+  box.style.display='block';
+  box.innerHTML='<div style="display:flex;gap:6px;margin-top:4px"><input id="reply-input-'+esc(parentCommentId)+'" placeholder="اكتب ردًا..." style="flex:1;padding:8px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:18px;font-size:13px"><button class="mini" style="border-radius:18px;background:#a66cff;color:#fff;border:0;padding:6px 14px;font-size:12px" onclick="sendReply(\''+esc(postId)+'\',\''+esc(parentCommentId)+'\')">رد</button></div>';
+  setTimeout(function(){let i=document.getElementById('reply-input-'+parentCommentId);if(i)i.focus();},80);
+}
+
+async function sendReply(postId, parentCommentId){
+  let inp=document.getElementById('reply-input-'+parentCommentId);
+  if(!inp||!inp.value.trim())return;
+  let text=inp.value.trim();
+  inp.value='';
+  try{
+    let d=await platformSvc('community_reply',{post_id:postId,parent_id:parentCommentId,body:text});
+    if(!d||!d.ok)throw new Error(d.error||'reply_failed');
+    let area=document.getElementById('cmt-'+postId);
+    if(area){area.dataset.loaded='';area.style.display='none';await loadComments(postId);}
+    setTimeout(function(){try{loadPosts()}catch(_){}},400);
+  }catch(e){alert('⚠️ تعذر الرد: '+(e.message||''));}
+}
+
 async function sendComment(pid){
+  let inp=document.getElementById('cmt-input-'+pid);
+  if(!inp||!inp.value.trim())return;
+  let text=inp.value.trim();
+  inp.value='';
+  try{
+    let d=await platformSvc('community_comment',{post_id:pid,body:text});
+    if(!d||!d.ok)throw new Error(d.error||'comment_failed');
+    let area=document.getElementById('cmt-'+pid);
+    if(area){area.dataset.loaded='';area.style.display='none';await loadComments(pid);}
+    setTimeout(function(){try{loadPosts()}catch(_){}},400);
+  }catch(e){alert('⚠️ تعذر الإرسال: '+(e.message||''));}
+}pid){
   let inp=document.getElementById('cmt-input-'+pid);
   if(!inp||!inp.value.trim())return;
   let text=inp.value.trim();
@@ -4413,16 +4496,11 @@ async function sendDM(otherIdentity){
   let text=inp.value.trim();
   inp.value='';
   try{
-    let r=await fetch('/api/app/platform-services',{
-      method:'POST',
-      headers:Object.assign({'Content-Type':'application/json'},authHeaders()),
-      cache:'no-store',
-      body:JSON.stringify({op:'message_send',recipient:otherIdentity,body:text})
-    });
-    let d=await r.json();
-    if(!r.ok||!d||!d.ok)throw new Error((d&&d.error)||'send_failed');
+    let d=await platformSvc('message_send',{recipient:otherIdentity,body:text});
+    if(!d||!d.ok)throw new Error((d&&d.error)||'send_failed');
     await loadConversation(otherIdentity);
-  }catch(e){alert('تعذر الإرسال: '+(e.message||''));}
+    inp.focus();
+  }catch(e){alert('⚠️ تعذر الإرسال: '+(e.message||''));}
 }
 
 function newConversationPrompt(){
@@ -6155,7 +6233,8 @@ def webapp_platform_services():
         post_id = str(body.get("post_id","")).strip()
         if not post_id: return jsonify({"ok":False,"error":"post_id_required"}),400
         def q_cls(cur):
-            cur.execute("""SELECT c.comment_id, c.author_identity, c.body, c.created_at,
+            viewer = _platform_identity(user)
+            cur.execute("""SELECT c.comment_id, c.parent_id, c.author_identity, c.body, c.created_at, c.like_count,
                     CASE
                         WHEN c.author_identity LIKE 'pi:%%' AND wp.account_id IS NOT NULL THEN COALESCE(NULLIF(wp.display_name,''),NULLIF(wp.username,''),'عضو')
                         WHEN c.author_identity LIKE 'web:%%' AND w.account_id IS NOT NULL THEN COALESCE(NULLIF(w.display_name,''),NULLIF(w.username,''),'عضو')
@@ -6166,8 +6245,16 @@ def webapp_platform_services():
                 LEFT JOIN ai_for_web_accounts wp ON wp.account_id = il.account_id AND wp.status='active'
                 LEFT JOIN ai_for_web_accounts w ON c.author_identity='web:'||w.account_id::text AND w.status='active'
                 LEFT JOIN ai_for_members m ON c.author_identity='tg:'||m.user_id::text
-                WHERE c.post_id=%s AND c.is_deleted=FALSE ORDER BY c.created_at ASC LIMIT 100""", (post_id,))
-            return [dict(x) for x in cur.fetchall()]
+                WHERE c.post_id=%s AND c.is_deleted=FALSE ORDER BY c.created_at ASC LIMIT 200""", (post_id,))
+            rows = [dict(x) for x in cur.fetchall()]
+            if rows:
+                cids = [r["comment_id"] for r in rows]
+                cur.execute("SELECT comment_id FROM ai_for_comment_reactions WHERE user_identity=%s AND comment_id = ANY(%s)", (viewer, cids))
+                liked = {str(x["comment_id"]) for x in cur.fetchall()}
+                for r in rows:
+                    r["viewer_liked"] = str(r["comment_id"]) in liked
+                    r["parent_id"] = str(r["parent_id"]) if r.get("parent_id") else ""
+            return rows
         rows = _platform_db_query(q_cls) or []
         return jsonify({"ok":True, "comments":rows})
     if op=="community_delete_post":
@@ -6189,6 +6276,52 @@ def webapp_platform_services():
         if r.get("error")=="forbidden": return jsonify({"ok":False,"error":"forbidden"}),403
         if r.get("error")=="not_found": return jsonify({"ok":False,"error":"not_found"}),404
         return jsonify({"ok":True, **r})
+    if op=="community_reply":
+        post_id = str(body.get("post_id","")).strip()
+        parent_id = str(body.get("parent_id","")).strip()
+        body_text = str(body.get("body","")).strip()[:2000]
+        if not post_id or not body_text:
+            return jsonify({"ok":False,"error":"post_id_and_body_required"}),400
+        identity = _platform_identity(user)
+        actor_name = user.get("first_name") or user.get("username") or "عضو"
+        cid = str(uuid.uuid4())
+        def q_reply(cur):
+            cur.execute("INSERT INTO ai_for_community_comments(comment_id,post_id,parent_id,author_identity,body) VALUES(%s,%s,%s,%s,%s) RETURNING comment_id,created_at", (cid, post_id, parent_id or None, identity, body_text))
+            row = dict(cur.fetchone())
+            cur.execute("UPDATE ai_for_community_posts SET comment_count=comment_count+1 WHERE post_id=%s", (post_id,))
+            # إشعار لصاحب التعليق الأصلي
+            if parent_id:
+                try:
+                    cur.execute("SELECT author_identity FROM ai_for_community_comments WHERE comment_id=%s", (parent_id,))
+                    pr = cur.fetchone()
+                    if pr and str(pr.get("author_identity") or "") != identity:
+                        _notify(cur, str(pr["author_identity"]), identity, actor_name, "reply", f"رد على تعليقك: {body_text[:80]}", "post", post_id)
+                except Exception: pass
+            return row
+        r = _platform_db_query(q_reply)
+        return jsonify({"ok":r is not None, "comment":r})
+    if op=="comment_like":
+        comment_id = str(body.get("comment_id","")).strip()
+        if not comment_id: return jsonify({"ok":False,"error":"comment_id_required"}),400
+        identity = _platform_identity(user)
+        def q_clk(cur):
+            cur.execute("SELECT 1 FROM ai_for_comment_reactions WHERE comment_id=%s AND user_identity=%s", (comment_id, identity))
+            if cur.fetchone():
+                cur.execute("DELETE FROM ai_for_comment_reactions WHERE comment_id=%s AND user_identity=%s", (comment_id, identity))
+                cur.execute("UPDATE ai_for_community_comments SET like_count=GREATEST(0,like_count-1) WHERE comment_id=%s", (comment_id,))
+                return {"liked": False}
+            cur.execute("INSERT INTO ai_for_comment_reactions(comment_id,user_identity) VALUES(%s,%s)", (comment_id, identity))
+            cur.execute("UPDATE ai_for_community_comments SET like_count=like_count+1 WHERE comment_id=%s", (comment_id,))
+            # إشعار لصاحب التعليق
+            try:
+                cur.execute("SELECT author_identity, post_id FROM ai_for_community_comments WHERE comment_id=%s", (comment_id,))
+                cr = cur.fetchone()
+                if cr and str(cr.get("author_identity") or "") != identity:
+                    _notify(cur, str(cr["author_identity"]), identity, user.get("first_name") or "عضو", "comment_like", "أعجب بتعليقك", "post", str(cr.get("post_id") or ""))
+            except Exception: pass
+            return {"liked": True}
+        r = _platform_db_query(q_clk)
+        return jsonify({"ok":r is not None, **(r or {})})
     if op=="community_delete_comment":
         comment_id = str(body.get("comment_id","")).strip()
         post_id = str(body.get("post_id","")).strip()

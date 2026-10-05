@@ -4863,6 +4863,7 @@ xoReset();memReset();loadArcade();}
 
 async function loadArcade(){
   try{
+    // نُحدث نصوص الحدود وفق القيم الجديدة
     let d=await platformSvc('arcade_state');
     if(!d||!d.ok)throw new Error(d.error||'load_failed');
     document.getElementById('arPoints').textContent=Number(d.points||0);
@@ -4927,7 +4928,7 @@ async function answerQuiz(qkey, choice){
   try{
     let d=await platformSvc('arcade_quiz_answer',{question_key:qkey,choice:choice});
     if(!d||!d.ok)throw new Error(d.error||'answer_failed');
-    let msg=d.correct?'✅ صحيح! +2 نقطة':'❌ خطأ. الإجابة الصحيحة: '+esc(d.correct_answer||'')+' · -1 نقطة';
+    let msg=d.correct?'✅ صحيح! +1 نقطة':'❌ خطأ. الإجابة الصحيحة: '+esc(d.correct_answer||'')+' · -1 نقطة';
     if(d.note==='daily_limit')msg+=' (حد اليوم — لا نقاط)';
     if(res)res.innerHTML='<div style="padding:6px;border-radius:10px;background:'+(d.correct?'#e7f7ec':'#fde7ea')+'">'+msg+'<br><span class="small">النقاط الحالية: '+Number(d.points||0)+'</span></div>';
     // نُحدّث الحالة ثم نُحمّل السؤال التالي بعد 1.2 ثانية
@@ -4940,13 +4941,14 @@ async function quiz(option){try{let d=await platformSvc('quiz_answer',{question_
 let __xo=[],__xoOver=false;
 function xoReset(){__xo=Array(9).fill('');__xoOver=false;renderXO()}
 function renderXO(){let b=document.getElementById('xoBoard');if(!b)return;b.innerHTML=__xo.map((v,i)=>'<button class="mini" style="height:60px;font-size:22px" onclick="xoPlay('+i+')">'+(v||'·')+'</button>').join('');let s=document.getElementById('xoStatus');if(s)s.textContent=__xoOver?'انتهت':'دورك: X'}
-function xoPlay(i){if(__xoOver||__xo[i])return;__xo[i]='X';if(xoWinner('X')){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='🎉 فزت!';return}if(__xo.every(x=>x)){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='🤝 تعادل';return}let best=-1;for(let k=0;k<9;k++){if(!__xo[k]){__xo[k]='O';if(xoWinner('O')){best=k;__xo[k]='';break}__xo[k]=''}}if(best<0){let empties=__xo.map((v,k)=>v?-1:k).filter(k=>k>=0);best=empties[Math.floor(Math.random()*empties.length)]}__xo[best]='O';if(xoWinner('O')){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='💻 فاز الحاسوب';return}if(__xo.every(x=>x)){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='🤝 تعادل';return}renderXO()}
+function xoPlay(i){if(__xoOver||__xo[i])return;__xo[i]='X';if(xoWinner('X')){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='🎉 فزت!';try{platformSvc('arcade_game_reward',{game:'xo_win'}).then(function(d){if(d&&d.ok&&d.reward>0){setTimeout(function(){alert('🎉 +'+d.reward+' نقطة! رصيدك: '+d.points);},300);}}).catch(function(){});}catch(_){}return}if(__xo.every(x=>x)){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='🤝 تعادل';return}let best=-1;for(let k=0;k<9;k++){if(!__xo[k]){__xo[k]='O';if(xoWinner('O')){best=k;__xo[k]='';break}__xo[k]=''}}if(best<0){let empties=__xo.map((v,k)=>v?-1:k).filter(k=>k>=0);best=empties[Math.floor(Math.random()*empties.length)]}__xo[best]='O';if(xoWinner('O')){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='💻 فاز الحاسوب';return}if(__xo.every(x=>x)){__xoOver=true;renderXO();document.getElementById('xoStatus').textContent='🤝 تعادل';return}renderXO()}
 function xoWinner(p){const L=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];return L.some(([a,b,c])=>__xo[a]===p&&__xo[b]===p&&__xo[c]===p)}
-function rps(p){const c=['rock','paper','scissors'][Math.floor(Math.random()*3)];const ar={rock:'✊',paper:'✋',scissors:'✌️'};let r;if(p===c)r='🤝 تعادل';else if((p==='rock'&&c==='scissors')||(p==='paper'&&c==='rock')||(p==='scissors'&&c==='paper'))r='🎉 فزت';else r='💻 فاز الحاسوب';document.getElementById('rpsResult').textContent=ar[p]+' ضد '+ar[c]+' — '+r}
+function rps(p){const c=['rock','paper','scissors'][Math.floor(Math.random()*3)];const ar={rock:'✊',paper:'✋',scissors:'✌️'};let r;let won=false;if(p===c)r='🤝 تعادل';else if((p==='rock'&&c==='scissors')||(p==='paper'&&c==='rock')||(p==='scissors'&&c==='paper')){r='🎉 فزت';won=true;}else r='💻 فاز الحاسوب';document.getElementById('rpsResult').textContent=ar[p]+' ضد '+ar[c]+' — '+r;if(won){try{platformSvc('arcade_game_reward',{game:'rps_win'}).then(function(d){if(d&&d.ok&&d.reward>0){setTimeout(function(){alert('🎉 +'+d.reward+' نقطة! رصيدك: '+d.points);},200);}}).catch(function(){});}catch(_){}}}
 let __mem=[],__memFlipped=[],__memMatched=0,__memAttempts=0;
 function memReset(){const base=['🍎','🍌','🍇','🍒','🍓','🍑','🍊','🥝'];__mem=base.concat(base).sort(()=>Math.random()-.5);__memFlipped=[];__memMatched=0;__memAttempts=0;renderMem()}
 function renderMem(){let g=document.getElementById('memGrid');if(!g)return;g.innerHTML=__mem.map((v,i)=>{let shown=__memFlipped.includes(i)||__mem[i]===null;return '<button class="mini" style="height:60px;font-size:22px" onclick="memFlip('+i+')">'+(shown?v:'❓')+'</button>'}).join('');let s=document.getElementById('memStatus');if(s)s.textContent='المحاولات: '+__memAttempts+' — المتطابقات: '+__memMatched+'/8'}
-function memFlip(i){if(__mem[i]===null||__memFlipped.includes(i)||__memFlipped.length>=2)return;__memFlipped.push(i);renderMem();if(__memFlipped.length===2){__memAttempts++;let a=__memFlipped[0],b=__memFlipped[1];if(__mem[a]===__mem[b]){__mem[a]=null;__mem[b]=null;__memMatched++;__memFlipped=[];renderMem();if(__memMatched===8)setTimeout(()=>{let s=document.getElementById('memStatus');if(s)s.textContent='🎉 أكملت اللعبة في '+__memAttempts},50)}else{setTimeout(()=>{__memFlipped=[];renderMem()},700)}}}
+function memFlip(i){if(__mem[i]===null||__memFlipped.includes(i)||__memFlipped.length>=2)return;__memFlipped.push(i);renderMem();if(__memFlipped.length===2){__memAttempts++;let a=__memFlipped[0],b=__memFlipped[1];if(__mem[a]===__mem[b]){__mem[a]=null;__mem[b]=null;__memMatched++;__memFlipped=[];renderMem();if(__memMatched===8){setTimeout(function(){var s=document.getElementById('memStatus');if(s)s.textContent='🎉 أكملت اللعبة في '+__memAttempts+' محاولات';},50);try{platformSvc('arcade_game_reward',{game:'memory_win'}).then(function(d){if(d&&d.ok&&d.reward>0){setTimeout(function(){alert('🎉 +'+d.reward+' نقطة! رصيدك: '+d.points);},400);}}).catch(function(){});}catch(_){}}}else{setTimeout(()=>{__memFlipped=[];renderMem()},700)}}}
+
 
 async function loadFavorites(){let box=document.getElementById('favList');if(!box)return;try{let d=await api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op:'favorites'})});if(!d.ok)throw new Error(d.error||'favorites_failed');let rows=d.favorites||[];box.innerHTML=rows.length?rows.map(x=>'<div class="row">❤️ '+esc(x.title||x.item_key||'عنصر')+(x.url?' · <a href="'+esc(x.url)+'" target="_blank" rel="noopener noreferrer">فتح</a>':'')+'</div>').join(''):'لا توجد عناصر محفوظة بعد.'}catch(e){box.textContent='⚠️ تعذر قراءة المفضلة.'}}
 async function addFavorite(){let title=document.getElementById('favTitle')?.value.trim(),url=document.getElementById('favUrl')?.value.trim(),r=document.getElementById('favResult');if(!title){if(r)r.textContent='⚠️ اكتب عنوان العنصر.';return}try{let d=await api('/api/app/platform-services',{method:'POST',body:JSON.stringify({op:'favorite_add',item_type:'general',item_key:(url||title).slice(0,300),title,url})});if(!d.ok)throw new Error(d.error||'favorite_failed');if(r)r.innerHTML='<span class="ok">✅ تم الحفظ.</span>';await loadFavorites()}catch(e){if(r)r.textContent='⚠️ '+(e.message||'تعذر الحفظ')}}
@@ -6235,19 +6237,20 @@ def _display_name_by_identity(cur, identity):
 
 
 def _reward_limits_daily():
-    """الحدود اليومية لكل نشاط (ZYN Points)."""
+    """الحدود اليومية لكل نشاط (ZYN Points) — محسوبة للحفاظ على ندرة ZYN."""
     return {
-        "visit": 1,
-        "zynmart_visit": 1,
-        "community_post": 3,
-        "community_comment": 5,
-        "reaction": 10,
-        "comment_like": 5,
-        "quiz_correct": 5,
+        "visit": 1,              # زيارة يومية: +2
+        "zynmart_visit": 3,      # زيارة ZynMart: +15 × 3
+        "zynmart_first": 1,      # أول زيارة للمستخدم: +50
+        "community_post": 3,     # نشر منشور: +1 × 3
+        "community_comment": 5,  # تعليق: +1 × 5
+        "reaction": 10,          # تفاعل: +1 × 10
+        "comment_like": 5,       # تفاعل على تعليق: +1 × 5
+        "quiz_correct": 5,       # إجابة صحيحة: +1 × 5
         "quiz_daily": 1,
-        "xo_win": 3,
-        "rps_win": 5,
-        "memory_win": 2,
+        "xo_win": 3,             # فوز XO: +2 × 3
+        "rps_win": 5,            # فوز RPS: +1 × 5
+        "memory_win": 2,         # إكمال ذاكرة: +2 × 2
         "ai_use": 5,
     }
 
@@ -6332,12 +6335,12 @@ def _platform_db_query(fn):
     print(f"Platform DB final failure: {last_err}")
     return None
 
-REPUTATION_EVENT_POINTS={"visit":1,"ai_use":2,"search_use":1,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":2,"message_send":1,"support_ticket":1,"quiz_correct":10}
+REPUTATION_EVENT_POINTS={"visit":1,"ai_use":0,"search_use":0,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":1,"message_send":0,"support_ticket":1,"quiz_correct":1}
 
 # ZYN Arcade — ZYN Token Conversion Constants
-ZYN_POINTS_PER_TOKEN = 400          # 1 ZYN = 400 ZYN Points
-ZYN_MIN_CONVERSION = 1000           # الحد الأدنى 1000 نقطة (= 2.5 ZYN)
-ZYN_MAX_DAILY = 2000                # الحد الأقصى اليومي 2000 نقطة (= 5 ZYN)
+ZYN_POINTS_PER_TOKEN = 1000         # 1 ZYN = 1000 ZYN Points
+ZYN_MIN_CONVERSION = 1000           # الحد الأدنى 1000 نقطة (= 1 ZYN)
+ZYN_MAX_DAILY = 500                 # الحد الأقصى اليومي 500 نقطة (= 0.5 ZYN)
 ZYN_VERIFICATION_TTL = 30*60        # 30 دقيقة صلاحية الكود
 
 # ZYN Arcade — بنك أسئلة (كل سؤال: {q, options:[...], a: index, cat: category})
@@ -7160,9 +7163,16 @@ def webapp_platform_services():
                 cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
                 p = int((cur.fetchone() or {}).get("points") or 0)
                 return {"reward": 0, "note": "daily_limit", "points": p}
-            _reward_mark_used(cur, identity, "zynmart_visit")
-            # +10 نقاط + +5 سمعة
-            reward_val = 10
+            # نتحقق إن كانت أول زيارة للمستخدم
+            cur.execute("SELECT 1 FROM ai_for_reward_ledger WHERE identity_key=%s AND event_type='zynmart_first' LIMIT 1", (identity,))
+            is_first = cur.fetchone() is None
+            if is_first:
+                # أول زيارة: +50 (بدون خصم من حد الزيارات)
+                reward_val = 50
+                cur.execute("INSERT INTO ai_for_reward_ledger(ledger_id, identity_key, event_type, points, source_key) VALUES(%s,%s,'zynmart_first',50,'once') ON CONFLICT DO NOTHING", (str(uuid.uuid4()), identity))
+            else:
+                _reward_mark_used(cur, identity, "zynmart_visit")
+                reward_val = 15
             cur.execute("""INSERT INTO ai_for_rewards(identity_key, points) VALUES(%s, %s)
                            ON CONFLICT(identity_key) DO UPDATE SET points = ai_for_rewards.points + %s, updated_at=NOW()""",
                         (identity, reward_val, reward_val))
@@ -7289,6 +7299,31 @@ def webapp_platform_services():
         r = _platform_db_query(q_hist)
         return jsonify({"ok": True, "history": r or []})
 
+    if op=="arcade_game_reward":
+        identity = _platform_identity(user)
+        game = str(body.get("game") or "").strip()
+        if game not in ("xo_win","rps_win","memory_win"):
+            return jsonify({"ok": False, "error": "unknown_game"}), 400
+        reward_map = {"xo_win":2, "rps_win":1, "memory_win":2}
+        def q_gr(cur):
+            allowed, remaining = _reward_check_limit(cur, identity, game)
+            if not allowed:
+                cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+                p = int((cur.fetchone() or {}).get("points") or 0)
+                return {"reward": 0, "note": "daily_limit", "points": p}
+            _reward_mark_used(cur, identity, game)
+            reward_val = reward_map[game]
+            cur.execute("""INSERT INTO ai_for_rewards(identity_key, points) VALUES(%s, %s)
+                           ON CONFLICT(identity_key) DO UPDATE SET points = ai_for_rewards.points + %s, updated_at=NOW()""",
+                        (identity, reward_val, reward_val))
+            cur.execute("""INSERT INTO ai_for_levels(identity_key, points_total) VALUES(%s, %s)
+                           ON CONFLICT(identity_key) DO UPDATE SET points_total = ai_for_levels.points_total + %s, updated_at=NOW()""",
+                        (identity, reward_val, reward_val))
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            return {"reward": reward_val, "points": int((cur.fetchone() or {}).get("points") or 0)}
+        r = _platform_db_query(q_gr)
+        return jsonify({"ok": r is not None, **(r or {})})
+
     if op=="arcade_state":
         # يعرض حالة ZYN Arcade للمستخدم الحالي
         identity = _platform_identity(user)
@@ -7364,8 +7399,8 @@ def webapp_platform_services():
         except Exception:
             return jsonify({"ok": False, "error": "unknown_question"}), 404
         correct = (choice == q["a"])
-        # المكافأة: +2 صحيح / -1 خطأ
-        reward = 2 if correct else -1
+        # المكافأة: +1 صحيح / -1 خطأ
+        reward = 1 if correct else -1
         aid = str(uuid.uuid4())
         def q_ans(cur):
             # نتحقق من الحد اليومي

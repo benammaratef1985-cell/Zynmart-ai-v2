@@ -701,6 +701,30 @@ def _ensure_db_schema(cur):
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_quiz_daily_identity ON ai_for_quiz_daily(identity_key, day_key)")
+    # محافظ ZYN (اختياري)
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_zyn_wallets (
+        identity_key TEXT PRIMARY KEY,
+        zyn_wallet_address TEXT NOT NULL DEFAULT '',
+        total_earned NUMERIC(20,7) NOT NULL DEFAULT 0,
+        total_converted NUMERIC(20,7) NOT NULL DEFAULT 0,
+        last_conversion TIMESTAMPTZ,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    # تحويلات ZYN
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_zyn_conversions (
+        conversion_id UUID PRIMARY KEY,
+        identity_key TEXT NOT NULL,
+        pi_uid TEXT NOT NULL DEFAULT '',
+        points_spent INTEGER NOT NULL,
+        zyn_amount NUMERIC(20,7) NOT NULL,
+        verification_code TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        delivered_at TIMESTAMPTZ
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_zyn_conversions_identity ON ai_for_zyn_conversions(identity_key, created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_zyn_conversions_code ON ai_for_zyn_conversions(verification_code)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_image_jobs_identity_time ON ai_for_nft_image_jobs(identity_key, created_at DESC)")
     cur.execute("""INSERT INTO ai_for_db_meta(key,value) VALUES('schema_version',%s)
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
@@ -4637,7 +4661,135 @@ function newConversationPrompt(){
 
 
 function plusBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← ZYNMART+</button><section class="detail"><div class="sectionTitle">⭐ ZYNMART+</div><div id="plusState" class="statusBox">⏳ جاري قراءة حالة العضوية...</div><div class="statusBox"><b>منظومة ZYNMART+</b><div class="row">👤 العضوية مرتبطة بهوية الحساب</div><div class="row">🤖 مزايا AI المتقدمة — مرتبطة بحالة العضوية</div><div class="row">🖼️ Marketplace وNFT — مزايا مرتبطة بالمنظومة</div><div class="row">🎁 Rewards وReputation — مرتبطة بنشاط الحساب</div><div class="row">🔐 حالة العضوية ومدة الصلاحية محفوظتان في PostgreSQL</div></div></section>`;platformSvc('zynmart_plus').then(d=>{let p=d.plus||{};document.getElementById('plusState').innerHTML='<div class="row">الحالة: <b>'+esc(p.active?'مفعّلة':'غير مفعّلة للحساب الحالي')+'</b></div><div class="row">المستوى: <b>'+esc(p.tier||'free')+'</b></div>'+(p.started_at?'<div class="row">البداية: '+esc(p.started_at)+'</div>':'')+(p.expires_at?'<div class="row">الانتهاء: '+esc(p.expires_at)+'</div>':'')}).catch(()=>document.getElementById('plusState').textContent='⚠️ تعذر قراءة حالة ZYNMART+ الآن.')}
-function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط والسمعة</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi. السمعة تُبنى من نشاطات واضحة وقابلة للتدقيق.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b><br>سمعة الحساب: <b>'+esc(d.reputation?.score||0)+'</b> · المستوى '+esc(d.reputation?.level||1)+'<br>ZYNMART+: <b>'+esc(d.plus?.active?'مفعّل':'غير مفعّل')+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
+function rewardsBox(){
+document.getElementById('view').innerHTML=`
+<button class="back" onclick="goHome()">← المكافآت</button>
+<section class="detail">
+  <div class="sectionTitle">🎁 نقاط النشاط والسمعة</div>
+
+  <div class="statusBox" id="zrPoints" style="background:linear-gradient(135deg,#a66cff,#7b4dd9);color:#fff">
+    <div style="font-size:36px;font-weight:800" id="zrPointsVal">—</div>
+    <div class="small" style="opacity:.85">رصيد ZYN Points</div>
+    <div style="margin-top:6px;font-size:13px;opacity:.9" id="zrLevelLine">—</div>
+  </div>
+
+  <div class="statusBox">
+    <b>💎 تحويل النقاط إلى ZYN Token</b>
+    <p class="small" style="line-height:1.6" id="zrRate">1 ZYN = 400 نقطة · الحد الأدنى 1000 نقطة (2.5 ZYN)</p>
+    <div style="background:#f4ecff;border-radius:12px;padding:10px;margin-top:8px">
+      <div class="small">حدك اليومي:</div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px;font-size:13px">
+        <span>استُهلك اليوم: <b id="zrSpentToday">0</b></span>
+        <span>المتبقي: <b id="zrRemaining">2000</b></span>
+      </div>
+    </div>
+    <div id="zrActions" style="margin-top:10px"></div>
+    <div id="zrCode" class="small" style="margin-top:10px"></div>
+  </div>
+
+  <div class="statusBox">
+    <b>📜 سجل التحويلات</b>
+    <div id="zrHistory" class="small" style="margin-top:8px">⏳</div>
+  </div>
+
+  <div class="statusBox">
+    <div class="small">💡 النقاط داخلية ولا تمثل أموالًا. السمعة تُبنى من نشاطك (لا تُحوَّل).</div>
+  </div>
+</section>`;
+loadZynStatus();}
+
+async function loadZynStatus(){
+  try{
+    let d=await platformSvc('zyn_status');
+    if(!d||!d.ok)throw new Error(d.error||'load_failed');
+    document.getElementById('zrPointsVal').textContent=Number(d.points||0);
+    document.getElementById('zrSpentToday').textContent=Number(d.spent_today||0);
+    document.getElementById('zrRemaining').textContent=Number(d.remaining_today||0);
+    document.getElementById('zrRate').textContent='1 ZYN = '+Number(400)+' نقطة · الحد الأدنى '+Number(d.min||1000)+' نقطة';
+    // عرض زر التحويل حسب الأهلية
+    let act=document.getElementById('zrActions');
+    if(d.can_convert){
+      let maxNow=Number(d.max_now_points||0);
+      let opts=[];
+      let v=1000;
+      while(v<=maxNow && v<=5000){
+        opts.push('<button class="mini" style="margin:4px" onclick="createZynConversion('+v+')">'+v+' نقطة ('+(v/400).toFixed(2)+' ZYN)</button>');
+        v+=1000;
+      }
+      act.innerHTML='<div class="small">اختر الكمية:</div>'+opts.join('');
+    }else{
+      if(Number(d.points||0)<Number(d.min||1000)){
+        act.innerHTML='<div class="statusBox" style="background:#fff3c4;color:#7a5c00">⚠️ تحتاج '+(Number(d.min)-Number(d.points))+' نقطة إضافية للتحويل.</div>';
+      }else if(Number(d.remaining_today||0)<=0){
+        act.innerHTML='<div class="statusBox" style="background:#fff3c4;color:#7a5c00">⏳ وصلت الحد اليومي للتحويل. حاول غدًا.</div>';
+      }
+    }
+    // المستوى
+    try{
+      let arc=await platformSvc('arcade_state');
+      if(arc&&arc.ok){
+        document.getElementById('zrLevelLine').textContent='مستواك: Lv '+Number(arc.level||1)+' · '+esc(arc.level_name||'');
+      }
+    }catch(_){}
+    // السجل
+    loadZynHistory();
+  }catch(e){document.getElementById('zrPoints').textContent='⚠️ '+(e.message||'تعذر التحميل');}
+}
+
+async function loadZynHistory(){
+  let host=document.getElementById('zrHistory');if(!host)return;
+  try{
+    let d=await platformSvc('zyn_history');
+    let rows=(d&&d.history)||[];
+    if(!rows.length){host.innerHTML='لا توجد تحويلات بعد.';return}
+    host.innerHTML=rows.map(function(h){
+      let color='#7a5c00';
+      let label=h.status;
+      if(h.status==='pending'){label='⏳ بانتظار التسليم';color='#7a5c00';}
+      else if(h.status==='delivered'){label='✅ تم التسليم';color='#0a6b3a';}
+      else if(h.status==='cancelled'){label='❌ ملغى';color='#a33';}
+      let cancel=h.status==='pending'?'<button class="mini" style="margin-top:4px" onclick="cancelZynConversion(\''+esc(h.conversion_id)+'\')">إلغاء واسترجاع النقاط</button>':'';
+      return '<div style="padding:8px 0;border-top:1px solid #e5e7eb"><div style="display:flex;justify-content:space-between"><b>'+h.points+' نقطة → '+Number(h.zyn).toFixed(2)+' ZYN</b><span style="color:'+color+';font-weight:700">'+label+'</span></div><div class="small" style="margin-top:2px">'+esc(timeAgo(h.created_at))+'</div>'+cancel+'</div>';
+    }).join('');
+  }catch(e){host.textContent='⚠️ تعذر تحميل السجل';}
+}
+
+async function createZynConversion(points){
+  let codeBox=document.getElementById('zrCode');
+  if(codeBox)codeBox.innerHTML='⏳ جاري إنشاء كود التحويل...';
+  try{
+    let d=await platformSvc('zyn_create_conversion',{points:points});
+    if(!d||!d.ok)throw new Error(d.error||'create_failed');
+    // نعرض الكود
+    if(codeBox){
+      codeBox.innerHTML='<div class="statusBox" style="background:#e7f7ec;color:#0a6b3a"><b>✅ تم إنشاء كود التحويل</b><div style="font-size:20px;font-weight:800;letter-spacing:2px;margin:8px 0;user-select:all" id="zynCode">'+esc(d.code)+'</div><div class="small">صالح حتى: '+esc((d.expires_at||'').slice(0,16).replace('T',' '))+'</div><div class="small" style="margin-top:6px">💡 افتح بوت تعدين ZYN وألصق الكود لاستلام '+Number(d.zyn_amount).toFixed(2)+' ZYN.</div><button class="mini" style="margin-top:8px" onclick="copyZynCode(\''+esc(d.code)+'\')">📋 نسخ الكود</button></div>';
+    }
+    loadZynStatus();
+  }catch(e){
+    let msg=e.message||'';
+    if(msg==='below_min')msg='الحد الأدنى 1000 نقطة';
+    else if(msg==='must_be_multiple_of')msg='يجب أن يكون عدد النقاط من مضاعفات 400';
+    else if(msg==='insufficient_points')msg='لا تملك نقاطًا كافية';
+    else if(msg==='daily_limit_exceeded')msg='وصلت الحد اليومي';
+    if(codeBox)codeBox.innerHTML='<div class="statusBox" style="background:#fde7ea;color:#a33">⚠️ '+esc(msg)+'</div>';
+  }
+}
+
+function copyZynCode(code){
+  if(navigator.clipboard){navigator.clipboard.writeText(code).then(function(){alert('✅ تم نسخ الكود');}).catch(function(){prompt('انسخ الكود:',code);});}
+  else{prompt('انسخ الكود:',code);}
+}
+
+async function cancelZynConversion(conversionId){
+  if(!confirm('إلغاء التحويل واسترجاع النقاط؟'))return;
+  try{
+    let d=await platformSvc('zyn_cancel_conversion',{conversion_id:conversionId});
+    if(!d||!d.ok)throw new Error(d.error||'cancel_failed');
+    loadZynStatus();
+  }catch(e){alert('⚠️ '+(e.message||'تعذر الإلغاء'));}
+}
+
+
 function funBox(){
 document.getElementById('view').innerHTML=`
 <button class="back" onclick="goHome()">← الترفيه</button>
@@ -6170,6 +6322,12 @@ def _platform_db_query(fn):
 
 REPUTATION_EVENT_POINTS={"visit":1,"ai_use":2,"search_use":1,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":2,"message_send":1,"support_ticket":1,"quiz_correct":10}
 
+# ZYN Arcade — ZYN Token Conversion Constants
+ZYN_POINTS_PER_TOKEN = 400          # 1 ZYN = 400 ZYN Points
+ZYN_MIN_CONVERSION = 1000           # الحد الأدنى 1000 نقطة (= 2.5 ZYN)
+ZYN_MAX_DAILY = 2000                # الحد الأقصى اليومي 2000 نقطة (= 5 ZYN)
+ZYN_VERIFICATION_TTL = 30*60        # 30 دقيقة صلاحية الكود
+
 # ZYN Arcade — بنك أسئلة (كل سؤال: {q, options:[...], a: index, cat: category})
 ZYN_QUIZ_BANK = [
     {"q": "ما هو اختصار HTTP؟", "options": ["HyperText Transfer Process", "HyperText Transfer Protocol", "High Transfer Text Protocol"], "a": 1, "cat": "tech"},
@@ -6876,6 +7034,118 @@ def webapp_platform_services():
         pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0),"reputation":_reputation_snapshot(user),"plus":_zynmart_plus_snapshot(user)})
     if op=="reputation": return jsonify({"ok":True,"reputation":_reputation_snapshot(user)})
     if op=="zynmart_plus": return jsonify({"ok":True,"plus":_zynmart_plus_snapshot(user)})
+    if op=="zyn_status":
+        identity = _platform_identity(user)
+        def q_zs(cur):
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            row = cur.fetchone()
+            points = int((row or {}).get("points") or 0)
+            cur.execute("SELECT total_converted FROM ai_for_zyn_wallets WHERE identity_key=%s", (identity,))
+            row2 = cur.fetchone()
+            total_converted = float((row2 or {}).get("total_converted") or 0)
+            # الحد اليومي
+            from datetime import date as _date
+            day_key = _date.today().isoformat()
+            cur.execute("SELECT COALESCE(SUM(points_spent),0) AS n FROM ai_for_zyn_conversions WHERE identity_key=%s AND created_at::date=%s AND status <> 'cancelled'", (identity, _date.today()))
+            spent_today_row = cur.fetchone()
+            spent_today = int((spent_today_row or {}).get("n") or 0)
+            can_convert = points >= ZYN_MIN_CONVERSION and (spent_today < ZYN_MAX_DAILY)
+            max_now = min(points, ZYN_MAX_DAILY - spent_today)
+            return {
+                "points": points,
+                "min": ZYN_MIN_CONVERSION,
+                "max_daily": ZYN_MAX_DAILY,
+                "spent_today": spent_today,
+                "remaining_today": max(0, ZYN_MAX_DAILY - spent_today),
+                "can_convert": bool(can_convert),
+                "max_now_points": max(0, max_now),
+                "rate": f"1 ZYN = {ZYN_POINTS_PER_TOKEN} نقطة",
+                "total_converted": total_converted,
+            }
+        r = _platform_db_query(q_zs)
+        return jsonify({"ok": r is not None, **(r or {})})
+
+    if op=="zyn_create_conversion":
+        identity = _platform_identity(user)
+        pi_uid = str(user.get("pi_uid") or "").strip()
+        points_to_spend = int(body.get("points") or 0)
+        if points_to_spend < ZYN_MIN_CONVERSION:
+            return jsonify({"ok": False, "error": "below_min", "min": ZYN_MIN_CONVERSION}), 400
+        if points_to_spend % ZYN_POINTS_PER_TOKEN != 0:
+            # نشترط أن يكون المضاعف من 400
+            return jsonify({"ok": False, "error": "must_be_multiple_of", "unit": ZYN_POINTS_PER_TOKEN}), 400
+        zyn_amount = points_to_spend / ZYN_POINTS_PER_TOKEN
+        conv_id = str(uuid.uuid4())
+        code = "ZYN-" + secrets.token_urlsafe(9).replace("_","").replace("-","")[:12].upper()
+        from datetime import date as _date
+        def q_cc(cur):
+            # نتحقق من النقاط
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            row = cur.fetchone()
+            current = int((row or {}).get("points") or 0)
+            if current < points_to_spend:
+                return {"error": "insufficient_points", "points": current}
+            # نتحقق من الحد اليومي
+            cur.execute("SELECT COALESCE(SUM(points_spent),0) AS n FROM ai_for_zyn_conversions WHERE identity_key=%s AND created_at::date=%s AND status <> 'cancelled'", (identity, _date.today()))
+            spent_today = int((cur.fetchone() or {}).get("n") or 0)
+            if spent_today + points_to_spend > ZYN_MAX_DAILY:
+                return {"error": "daily_limit_exceeded", "remaining_today": max(0, ZYN_MAX_DAILY - spent_today)}
+            # نخصم النقاط مبدئيًا (نُعيدها إن فشل التحويل)
+            cur.execute("UPDATE ai_for_rewards SET points = GREATEST(0, points - %s), updated_at=NOW() WHERE identity_key=%s", (points_to_spend, identity))
+            # نُنشئ التحويل
+            cur.execute("""INSERT INTO ai_for_zyn_conversions(conversion_id, identity_key, pi_uid, points_spent, zyn_amount, verification_code, status, expires_at)
+                           VALUES(%s,%s,%s,%s,%s,%s,'pending',NOW() + (%s * INTERVAL '1 second'))
+                           RETURNING created_at, expires_at""",
+                        (conv_id, identity, pi_uid, points_to_spend, zyn_amount, code, ZYN_VERIFICATION_TTL))
+            row2 = cur.fetchone()
+            return {
+                "conversion_id": conv_id,
+                "code": code,
+                "points_spent": points_to_spend,
+                "zyn_amount": float(zyn_amount),
+                "expires_at": row2.get("expires_at").isoformat() if row2 and row2.get("expires_at") else None,
+                "new_points": current - points_to_spend,
+            }
+        r = _platform_db_query(q_cc)
+        if not r:
+            return jsonify({"ok": False, "error": "db_unavailable"}), 503
+        if r.get("error") == "insufficient_points":
+            return jsonify({"ok": False, "error": r["error"], "points": r.get("points", 0)}), 400
+        if r.get("error") == "daily_limit_exceeded":
+            return jsonify({"ok": False, "error": r["error"], "remaining_today": r.get("remaining_today", 0)}), 400
+        return jsonify({"ok": True, **r})
+
+    if op=="zyn_cancel_conversion":
+        conv_id = str(body.get("conversion_id") or "").strip()
+        if not conv_id: return jsonify({"ok": False, "error": "conversion_id_required"}), 400
+        identity = _platform_identity(user)
+        def q_cancel(cur):
+            cur.execute("SELECT identity_key, points_spent, status FROM ai_for_zyn_conversions WHERE conversion_id=%s", (conv_id,))
+            row = cur.fetchone()
+            if not row: return {"error": "not_found"}
+            if str(row["identity_key"]) != identity:
+                return {"error": "forbidden"}
+            if row["status"] != "pending":
+                return {"error": "not_pending"}
+            cur.execute("UPDATE ai_for_zyn_conversions SET status='cancelled' WHERE conversion_id=%s", (conv_id,))
+            cur.execute("UPDATE ai_for_rewards SET points = points + %s, updated_at=NOW() WHERE identity_key=%s", (int(row["points_spent"]), identity))
+            return {"refunded": int(row["points_spent"])}
+        r = _platform_db_query(q_cancel)
+        if not r: return jsonify({"ok": False, "error": "db_unavailable"}), 503
+        if r.get("error") == "not_found": return jsonify({"ok": False, "error": r["error"]}), 404
+        if r.get("error") == "forbidden": return jsonify({"ok": False, "error": r["error"]}), 403
+        if r.get("error") == "not_pending": return jsonify({"ok": False, "error": r["error"]}), 409
+        return jsonify({"ok": True, **r})
+
+    if op=="zyn_history":
+        identity = _platform_identity(user)
+        def q_hist(cur):
+            cur.execute("""SELECT conversion_id, points_spent, zyn_amount, status, created_at, expires_at, delivered_at
+                           FROM ai_for_zyn_conversions WHERE identity_key=%s ORDER BY created_at DESC LIMIT 30""", (identity,))
+            return [{"conversion_id": str(r["conversion_id"]), "points": int(r["points_spent"]), "zyn": float(r["zyn_amount"]), "status": r["status"], "created_at": r["created_at"].isoformat() if r.get("created_at") else None, "expires_at": r["expires_at"].isoformat() if r.get("expires_at") else None, "delivered_at": r["delivered_at"].isoformat() if r.get("delivered_at") else None} for r in cur.fetchall()]
+        r = _platform_db_query(q_hist)
+        return jsonify({"ok": True, "history": r or []})
+
     if op=="arcade_state":
         # يعرض حالة ZYN Arcade للمستخدم الحالي
         identity = _platform_identity(user)

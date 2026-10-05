@@ -578,8 +578,17 @@ def _ensure_db_schema(cur):
         author_identity TEXT NOT NULL,
         body TEXT NOT NULL,
         is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+        parent_id UUID,
+        like_count BIGINT NOT NULL DEFAULT 0,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
+    # ترقية آلية للجداول القديمة
+    for _stmt in [
+        "ALTER TABLE ai_for_community_comments ADD COLUMN IF NOT EXISTS parent_id UUID",
+        "ALTER TABLE ai_for_community_comments ADD COLUMN IF NOT EXISTS like_count BIGINT NOT NULL DEFAULT 0",
+    ]:
+        try: cur.execute(_stmt)
+        except Exception as _e: print(f"ALTER comments: {_e}")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_community_comments_post ON ai_for_community_comments(post_id, created_at DESC)")
     # الترقية الآمنة لجدول التعليقات (idempotent)
     for stmt in [
@@ -4638,11 +4647,13 @@ function renderNotification(n){
   else if(kind==='follow')icon='👤';
   let bg=n.is_read?'#fff':'#f4ecff';
   let dot=n.is_read?'':'<span style="width:10px;height:10px;background:#a66cff;border-radius:50%;display:inline-block"></span>';
-  let dataTarget='';
-  if(n.target_type==='post'&&n.target_id)dataTarget=' data-post="'+esc(n.target_id)+'"';
-  else if((n.target_type==='message'||n.target_type==='dm')&&n.target_id)dataTarget=' data-dm="'+esc(n.target_id)+'" data-dm-name="'+esc(n.actor_name||'')+'"';
+  // نبني data-attributes كـ JSON لتجنب مشاكل الاقتباسات
+  let payload = {post: '', dm: '', dmName: n.actor_name||''};
+  if(n.target_type==='post' && n.target_id){payload.post = String(n.target_id);}
+  if((n.target_type==='message'||n.target_type==='dm') && n.target_id){payload.dm = String(n.target_id);}
+  let dataJson = esc(JSON.stringify(payload));
   let nm=n.actor_name||'عضو';
-  return '<div class="statusBox notif-row" data-nid="'+esc(n.id)+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+bg+'"'+dataTarget+' onclick="openNotifTarget(this)"><div style="display:flex;gap:12px;align-items:center">'+avatarHtml(n.actor_identity,nm,40)+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(nm)+'</b> '+dot+'</div><div class="small" style="margin-top:2px">'+icon+' '+esc(n.body||'')+'</div><div class="small" style="opacity:.55;margin-top:2px">'+esc(timeAgo(n.created_at))+'</div></div></div></div>';
+  return '<div class="statusBox notif-row" data-nid="'+esc(n.id)+'" data-payload="'+dataJson+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+bg+'" onclick="openNotifTarget(this)"><div style="display:flex;gap:12px;align-items:center">'+avatarHtml(n.actor_identity,nm,40)+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(nm)+'</b> '+dot+'</div><div class="small" style="margin-top:2px">'+icon+' '+esc(n.body||'')+'</div><div class="small" style="opacity:.55;margin-top:2px">'+esc(timeAgo(n.created_at))+'</div></div></div></div>';
 }
 
 async function markAllNotifRead(){
@@ -4653,11 +4664,14 @@ async function markAllNotifRead(){
 }
 
 async function openNotifTarget(el){
-  let postId=el.dataset.post;
-  let dmTarget=el.dataset.dm;
-  let dmName=el.dataset.dmName||dmTarget;
+  let payload={post:'',dm:'',dmName:''};
+  try{payload=JSON.parse(el.dataset.payload||'{}');}catch(_){}
+  let postId=payload.post;
+  let dmTarget=payload.dm;
+  let dmName=payload.dmName||dmTarget;
   let nid=el.dataset.nid;
   try{if(nid){fetch('/api/notifications/read',{method:'POST',headers:Object.assign({},authHeaders(),{'Content-Type':'application/json'}),body:JSON.stringify({id:nid})});}}catch(_){}
+  el.style.background='#fff';
   if(postId){
     openSection('community');
     setTimeout(function(){let t=document.querySelector('[data-post="'+postId+'"]');if(t)t.scrollIntoView({behavior:'smooth',block:'center'});},800);

@@ -672,6 +672,35 @@ def _ensure_db_schema(cur):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_messages_recipient ON ai_for_messages(recipient_identity, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_reputation_events_identity_time ON ai_for_reputation_events(identity_key, created_at DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_reward_ledger_identity_time ON ai_for_reward_ledger(identity_key, created_at DESC)")
+    # ZYN Arcade — الحدود اليومية للمكافآت (منفصلة عن اللعب الفعلي)
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_reward_limits (
+        identity_key TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        day_key TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (identity_key, event_type, day_key)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_reward_limits_day ON ai_for_reward_limits(identity_key, day_key)")
+    # ZYN Arcade — مستويات المستخدمين
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_levels (
+        identity_key TEXT PRIMARY KEY,
+        level INTEGER NOT NULL DEFAULT 1,
+        points_total BIGINT NOT NULL DEFAULT 0,
+        points_spent BIGINT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    # ZYN Arcade — سجل محاولات الاختبار اليومية
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_quiz_daily (
+        attempt_id UUID PRIMARY KEY,
+        identity_key TEXT NOT NULL,
+        day_key TEXT NOT NULL,
+        question_key TEXT NOT NULL,
+        correct BOOLEAN NOT NULL DEFAULT FALSE,
+        reward_points INTEGER NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_quiz_daily_identity ON ai_for_quiz_daily(identity_key, day_key)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_image_jobs_identity_time ON ai_for_nft_image_jobs(identity_key, created_at DESC)")
     cur.execute("""INSERT INTO ai_for_db_meta(key,value) VALUES('schema_version',%s)
                    ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=NOW()""", (str(DB_SCHEMA_VERSION),))
@@ -4609,7 +4638,140 @@ function newConversationPrompt(){
 
 function plusBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← ZYNMART+</button><section class="detail"><div class="sectionTitle">⭐ ZYNMART+</div><div id="plusState" class="statusBox">⏳ جاري قراءة حالة العضوية...</div><div class="statusBox"><b>منظومة ZYNMART+</b><div class="row">👤 العضوية مرتبطة بهوية الحساب</div><div class="row">🤖 مزايا AI المتقدمة — مرتبطة بحالة العضوية</div><div class="row">🖼️ Marketplace وNFT — مزايا مرتبطة بالمنظومة</div><div class="row">🎁 Rewards وReputation — مرتبطة بنشاط الحساب</div><div class="row">🔐 حالة العضوية ومدة الصلاحية محفوظتان في PostgreSQL</div></div></section>`;platformSvc('zynmart_plus').then(d=>{let p=d.plus||{};document.getElementById('plusState').innerHTML='<div class="row">الحالة: <b>'+esc(p.active?'مفعّلة':'غير مفعّلة للحساب الحالي')+'</b></div><div class="row">المستوى: <b>'+esc(p.tier||'free')+'</b></div>'+(p.started_at?'<div class="row">البداية: '+esc(p.started_at)+'</div>':'')+(p.expires_at?'<div class="row">الانتهاء: '+esc(p.expires_at)+'</div>':'')}).catch(()=>document.getElementById('plusState').textContent='⚠️ تعذر قراءة حالة ZYNMART+ الآن.')}
 function rewardsBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المكافآت</button><section class="detail"><div class="sectionTitle">🎁 نقاط النشاط والسمعة</div><div id="points" class="statusBox">⏳</div><p class="small">النقاط داخلية حاليًا ولا تمثل أموالًا أو Pi. السمعة تُبنى من نشاطات واضحة وقابلة للتدقيق.</p></section>`;platformSvc('rewards').then(d=>document.getElementById('points').innerHTML='رصيد النقاط: <b>'+esc(d.points||0)+'</b><br>سمعة الحساب: <b>'+esc(d.reputation?.score||0)+'</b> · المستوى '+esc(d.reputation?.level||1)+'<br>ZYNMART+: <b>'+esc(d.plus?.active?'مفعّل':'غير مفعّل')+'</b>').catch(()=>document.getElementById('points').textContent='⚠️ تعذر قراءة النقاط.')}
-function funBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← الترفيه</button><section class="detail"><div class="sectionTitle">🎮 الترفيه</div><div class="statusBox"><b>✅ اختبار سريع</b><p>ما هو اختصار HTTP؟</p><button class="mini" onclick="quiz('a')">HyperText Transfer Process</button><button class="mini" onclick="quiz('b')">HyperText Transfer Protocol</button><div id="quizResult"></div></div><div class="statusBox"><b>❌⭕ XO ضد الحاسوب</b><div id="xoBoard" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;max-width:260px"></div><div class="toolbar" style="margin-top:10px"><button class="mini" onclick="xoReset()">🔄 إعادة</button></div><div id="xoStatus" class="small" style="margin-top:8px">دورك: X</div></div><div class="statusBox"><b>✊✋✌️ حجر ورقة مقص</b><div class="toolbar" style="margin-top:10px"><button class="mini" onclick="rps('rock')">✊ حجر</button><button class="mini" onclick="rps('paper')">✋ ورقة</button><button class="mini" onclick="rps('scissors')">✌️ مقص</button></div><div id="rpsResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>🧠 لعبة الذاكرة (4×4)</b><div id="memGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px"></div><div class="toolbar" style="margin-top:10px"><button class="mini" onclick="memReset()">🔄 إعادة</button></div><div id="memStatus" class="small" style="margin-top:8px">المحاولات: 0</div></div></section>`;xoReset();memReset()}
+function funBox(){
+document.getElementById('view').innerHTML=`
+<button class="back" onclick="goHome()">← الترفيه</button>
+<section class="detail">
+  <div class="sectionTitle" style="display:flex;align-items:center;justify-content:space-between">
+    <span>🎮 ZYN Arcade</span>
+  </div>
+  <div class="statusBox" id="arcadeStatus" style="background:linear-gradient(135deg,#a66cff,#7b4dd9);color:#fff">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <div>
+        <div class="small" style="opacity:.85">نقاطك</div>
+        <div style="font-size:32px;font-weight:800" id="arPoints">—</div>
+      </div>
+      <div style="text-align:left">
+        <div class="small" style="opacity:.85">المستوى</div>
+        <div style="font-size:20px;font-weight:800" id="arLevel">—</div>
+      </div>
+    </div>
+    <div id="arProgress" class="small" style="margin-top:8px;opacity:.9"></div>
+    <div id="arBar" style="height:6px;background:rgba(255,255,255,.3);border-radius:3px;overflow:hidden;margin-top:6px"><div style="height:100%;background:#fff;width:0%;transition:width .3s" id="arBarFill"></div></div>
+  </div>
+
+  <div class="statusBox">
+    <b>✅ اختبار المعرفة</b>
+    <p class="small">أسئلة متتابعة — كل سؤال له إجابة صحيحة واحدة.</p>
+    <div id="quizArea"><div class="small">⏳ جاري التحميل...</div></div>
+  </div>
+
+  <div class="statusBox">
+    <b>🎯 XO ضد الحاسوب</b>
+    <div id="xoBoard" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:10px;max-width:260px"></div>
+    <div class="toolbar" style="margin-top:10px"><button class="mini" onclick="xoReset()">🔄 إعادة</button></div>
+    <div id="xoStatus" class="small" style="margin-top:8px">دورك: X</div>
+  </div>
+
+  <div class="statusBox">
+    <b>✊✋✌️ حجر ورقة مقص</b>
+    <div class="toolbar" style="margin-top:10px">
+      <button class="mini" onclick="rps('rock')">✊ حجر</button>
+      <button class="mini" onclick="rps('paper')">✋ ورقة</button>
+      <button class="mini" onclick="rps('scissors')">✌️ مقص</button>
+    </div>
+    <div id="rpsResult" class="small" style="margin-top:8px"></div>
+  </div>
+
+  <div class="statusBox">
+    <b>🧠 لعبة الذاكرة (4×4)</b>
+    <div id="memGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px"></div>
+    <div class="toolbar" style="margin-top:10px"><button class="mini" onclick="memReset()">🔄 إعادة</button></div>
+    <div id="memStatus" class="small" style="margin-top:8px">المحاولات: 0</div>
+  </div>
+
+  <div class="statusBox">
+    <b>📋 كيف تربح نقاط ZYN؟</b>
+    <div id="arRules" class="small" style="margin-top:8px">⏳</div>
+  </div>
+</section>`;
+xoReset();memReset();loadArcade();}
+
+async function loadArcade(){
+  try{
+    let d=await platformSvc('arcade_state');
+    if(!d||!d.ok)throw new Error(d.error||'load_failed');
+    document.getElementById('arPoints').textContent=Number(d.points||0);
+    document.getElementById('arLevel').textContent='Lv '+Number(d.level||1)+' · '+esc(d.level_name||'');
+    let nxt=d.next_threshold;
+    if(nxt){
+      let pct=Math.min(100,Math.round((Number(d.points_total||0)/nxt)*100));
+      document.getElementById('arProgress').textContent='التقدم: '+Number(d.points_total||0)+' / '+nxt+' نقطة';
+      document.getElementById('arBarFill').style.width=pct+'%';
+    }else{
+      document.getElementById('arProgress').textContent='المستوى الأقصى 🏆';
+      document.getElementById('arBarFill').style.width='100%';
+    }
+    // نعرض الحدود في القائمة
+    let limits=d.limits||{};
+    let labels={
+      visit: '👋 زيارة يومية',
+      zynmart_visit: '🛒 فتح ZynMart',
+      community_post: '📝 نشر منشور',
+      community_comment: '💬 تعليق',
+      reaction: '❤️ تفاعل',
+      comment_like: '❤️ تفاعل على تعليق',
+      quiz_correct: '🎯 إجابة اختبار صحيحة',
+      xo_win: '🎯 فوز XO',
+      rps_win: '✊ فوز حجر ورقة مقص',
+      memory_win: '🧠 إكمال الذاكرة',
+      ai_use: '🤖 استخدام AI',
+    };
+    let rows=[];
+    for(let k in labels){
+      if(limits[k]){
+        let st=limits[k];
+        let status=st.remaining>0?('✅ متاح ('+st.remaining+')'):'⏳ انتهى حد اليوم';
+        rows.push('<div style="display:flex;justify-content:space-between;padding:4px 0"><span>'+labels[k]+'</span><span class="small" style="opacity:.7">'+status+'</span></div>');
+      }
+    }
+    document.getElementById('arRules').innerHTML=rows.join('')+'<p class="small" style="margin-top:8px;opacity:.7">عند انتهاء حد اليوم، يمكنك الاستمرار باللعب بدون مكافآت إضافية.</p>';
+    // نحمّل السؤال
+    loadQuizNext();
+  }catch(e){console.warn('loadArcade error',e);}
+}
+
+async function loadQuizNext(){
+  let area=document.getElementById('quizArea');if(!area)return;
+  area.innerHTML='<div class="small">⏳ جاري التحميل...</div>';
+  try{
+    let d=await platformSvc('arcade_quiz_next');
+    if(!d||!d.ok)throw new Error(d.error||'load_failed');
+    if(d.done){
+      area.innerHTML='<div class="statusBox" style="background:#fff3c4;color:#7a5c00">🏁 '+esc(d.reason==='daily_limit_reached'?'انتهى حد الاختبار اليومي (5 أسئلة). عُد غدًا!':'انتهت الأسئلة المتاحة.')+'</div>';
+      return;
+    }
+    let opts=(d.options||[]).map(function(opt, idx){
+      return '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:#f4f5f7;border:0;border-radius:12px" onclick="answerQuiz(\''+esc(d.question_key)+'\','+idx+')">'+esc(opt)+'</button>';
+    }).join('');
+    area.innerHTML='<div style="margin-top:8px"><div style="font-weight:700;margin-bottom:6px">'+esc(d.q)+'</div>'+opts+'<div id="quizResult" class="small" style="margin-top:8px"></div></div>';
+  }catch(e){area.innerHTML='<div class="small">⚠️ تعذر تحميل السؤال.</div>';}
+}
+
+async function answerQuiz(qkey, choice){
+  let res=document.getElementById('quizResult');
+  try{
+    let d=await platformSvc('arcade_quiz_answer',{question_key:qkey,choice:choice});
+    if(!d||!d.ok)throw new Error(d.error||'answer_failed');
+    let msg=d.correct?'✅ صحيح! +2 نقطة':'❌ خطأ. الإجابة الصحيحة: '+esc(d.correct_answer||'')+' · -1 نقطة';
+    if(d.note==='daily_limit')msg+=' (حد اليوم — لا نقاط)';
+    if(res)res.innerHTML='<div style="padding:6px;border-radius:10px;background:'+(d.correct?'#e7f7ec':'#fde7ea')+'">'+msg+'<br><span class="small">النقاط الحالية: '+Number(d.points||0)+'</span></div>';
+    // نُحدّث الحالة ثم نُحمّل السؤال التالي بعد 1.2 ثانية
+    setTimeout(loadArcade, 1200);
+  }catch(e){if(res)res.textContent='⚠️ '+(e.message||'تعذر الإجابة');}
+}
+
+
 async function quiz(option){try{let d=await platformSvc('quiz_answer',{question_key:'http-001',option});let correct=Number(d.awarded||0)>0;document.getElementById('quizResult').innerHTML='<div class="statusBox">'+(correct?'✅ إجابة صحيحة — +10 نقاط':'❌ إجابة غير صحيحة — +0')+'<br>الرصيد: '+esc(d.points||0)+'</div>'}catch(e){document.getElementById('quizResult').textContent='⚠️ تعذر تسجيل المحاولة.'}}
 let __xo=[],__xoOver=false;
 function xoReset(){__xo=Array(9).fill('');__xoOver=false;renderXO()}
@@ -5908,6 +6070,67 @@ def _display_name_by_identity(cur, identity):
     return "عضو"
 
 
+def _reward_limits_daily():
+    """الحدود اليومية لكل نشاط (ZYN Points)."""
+    return {
+        "visit": 1,
+        "zynmart_visit": 1,
+        "community_post": 3,
+        "community_comment": 5,
+        "reaction": 10,
+        "comment_like": 5,
+        "quiz_correct": 5,
+        "quiz_daily": 1,
+        "xo_win": 3,
+        "rps_win": 5,
+        "memory_win": 2,
+        "ai_use": 5,
+    }
+
+def _reward_check_limit(cur, identity, event_type):
+    """يتحقق إن كان المستخدم يستحق المكافأة اليومية (ضمن الحد).
+    يعيد (allowed: bool, remaining: int)."""
+    from datetime import date as _date
+    day_key = _date.today().isoformat()
+    limit = _reward_limits_daily().get(event_type, 0)
+    if limit <= 0:
+        return (False, 0)
+    cur.execute("SELECT count FROM ai_for_reward_limits WHERE identity_key=%s AND event_type=%s AND day_key=%s", (identity, event_type, day_key))
+    row = cur.fetchone()
+    used = int((row or {}).get("count") or 0)
+    if used >= limit:
+        return (False, 0)
+    return (True, limit - used)
+
+def _reward_mark_used(cur, identity, event_type):
+    """يُسجل استخدام حد اليوم."""
+    from datetime import date as _date
+    day_key = _date.today().isoformat()
+    cur.execute("""INSERT INTO ai_for_reward_limits(identity_key, event_type, day_key, count)
+                   VALUES(%s,%s,%s,1)
+                   ON CONFLICT(identity_key, event_type, day_key) DO UPDATE
+                   SET count = ai_for_reward_limits.count + 1, updated_at=NOW()
+                   RETURNING count""",
+                (identity, event_type, day_key))
+    row = cur.fetchone()
+    return int((row or {}).get("count") or 1)
+
+def _current_user_level(points_total):
+    """يحسب المستوى بناءً على مجموع النقاط."""
+    if points_total >= 10000: return 5, "Genesis"
+    if points_total >= 2000: return 4, "Legend"
+    if points_total >= 500: return 3, "Champion"
+    if points_total >= 100: return 2, "Pioneer"
+    return 1, "Explorer"
+
+def _level_next_threshold(points_total):
+    thresholds = [0, 100, 500, 2000, 10000]
+    for i, t in enumerate(thresholds):
+        if points_total < t:
+            return t
+    return None
+
+
 def _platform_identity(user):
     """Unified identity: Pi UID takes precedence for Mainnet-ready stability."""
     if user.get("pi_uid"):
@@ -5946,6 +6169,29 @@ def _platform_db_query(fn):
     return None
 
 REPUTATION_EVENT_POINTS={"visit":1,"ai_use":2,"search_use":1,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":2,"message_send":1,"support_ticket":1,"quiz_correct":10}
+
+# ZYN Arcade — بنك أسئلة (كل سؤال: {q, options:[...], a: index, cat: category})
+ZYN_QUIZ_BANK = [
+    {"q": "ما هو اختصار HTTP؟", "options": ["HyperText Transfer Process", "HyperText Transfer Protocol", "High Transfer Text Protocol"], "a": 1, "cat": "tech"},
+    {"q": "Pi Network تستخدم تقنية blockchain مبنية على:", "options": ["Ethereum", "Stellar", "Bitcoin"], "a": 1, "cat": "pi"},
+    {"q": "ما هي العملة الرقمية الأساسية في Pi Network؟", "options": ["PI", "BTC", "ETH"], "a": 0, "cat": "pi"},
+    {"q": "الهدف الرئيسي من ZynMart:", "options": ["بيع الألعاب", "منصة متعددة الخدمات", "بورصة عملات"], "a": 1, "cat": "zyn"},
+    {"q": "كم عدد مستخدمي Pi Network تقريبًا؟", "options": ["مليون", "أكثر من 60 مليون", "100 ألف"], "a": 1, "cat": "pi"},
+    {"q": "ما معنى AI؟", "options": ["Automated Internet", "Artificial Intelligence", "Advanced Input"], "a": 1, "cat": "tech"},
+    {"q": "أفضل طريقة لحماية محفظة Pi:", "options": ["مشاركة المفتاح", "الاحتفاظ بعبارة الاسترداد سرًا", "حفظها في الإيميل"], "a": 1, "cat": "security"},
+    {"q": "ما هي وحدة قياس قوة المعالج؟", "options": ["GHz", "GB", "MB"], "a": 0, "cat": "tech"},
+    {"q": "ZYN Points تُستخدم في:", "options": ["البيع والشراء", "فتح ميزات المنصة", "تحويلها لعملة"], "a": 1, "cat": "zyn"},
+    {"q": "الـNFT هو:", "options": ["عملة رقمية", "أصل رقمي فريد", "لعبة"], "a": 1, "cat": "nft"},
+    {"q": "أي مما يلي يُعد شبكة اجتماعية؟", "options": ["Facebook", "Google Chrome", "Photoshop"], "a": 0, "cat": "general"},
+    {"q": "HTTPS يعني:", "options": ["HTTP Secure", "Hyper Transfer Secure", "High Text Protocol"], "a": 0, "cat": "tech"},
+    {"q": "ما هي أفضل طريقة لتأمين حسابك؟", "options": ["كلمة سر ضعيفة", "مصادقة ثنائية", "نفس كلمة السر لكل شيء"], "a": 1, "cat": "security"},
+    {"q": "Pi Browser هو:", "options": ["متصفح ويب", "لعبة", "برنامج تحرير"], "a": 0, "cat": "pi"},
+    {"q": "Blockchain هي:", "options": ["لعبة فيديو", "سجل رقمي موزع", "نوع شبكة اجتماعية"], "a": 1, "cat": "tech"},
+]
+ZYN_DAILY_QUESTIONS = [
+    {"q": "ما هو شعار Pi Network؟", "options": ["π", "Δ", "Ω"], "a": 0, "cat": "pi"},
+    {"q": "ZynMart يبدأ بـ:", "options": ["Z", "S", "M"], "a": 0, "cat": "zyn"},
+]
 
 def _record_reputation_event(user,event_type,source_key="",metadata=None,reward=True):
     identity=_platform_identity(user); event_type=str(event_type or "").strip()[:60]; source_key=str(source_key or "").strip()[:180]
@@ -6630,6 +6876,115 @@ def webapp_platform_services():
         pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0),"reputation":_reputation_snapshot(user),"plus":_zynmart_plus_snapshot(user)})
     if op=="reputation": return jsonify({"ok":True,"reputation":_reputation_snapshot(user)})
     if op=="zynmart_plus": return jsonify({"ok":True,"plus":_zynmart_plus_snapshot(user)})
+    if op=="arcade_state":
+        # يعرض حالة ZYN Arcade للمستخدم الحالي
+        identity = _platform_identity(user)
+        from datetime import date as _date
+        day_key = _date.today().isoformat()
+        def q_state(cur):
+            # عدد إجابات الاختبار اليوم
+            cur.execute("SELECT COUNT(*) AS n FROM ai_for_quiz_daily WHERE identity_key=%s AND day_key=%s", (identity, day_key))
+            quizzes_today = int((cur.fetchone() or {}).get("n") or 0)
+            # نقاط المستخدم
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            row = cur.fetchone()
+            points = int((row or {}).get("points") or 0)
+            # المستوى
+            cur.execute("SELECT points_total FROM ai_for_levels WHERE identity_key=%s", (identity,))
+            row2 = cur.fetchone()
+            total_earned = int((row2 or {}).get("points_total") or points)
+            level, name = _current_user_level(total_earned)
+            nxt = _level_next_threshold(total_earned)
+            # حالة كل نشاط
+            limits = _reward_limits_daily()
+            states = {}
+            for ev, lim in limits.items():
+                cur.execute("SELECT count FROM ai_for_reward_limits WHERE identity_key=%s AND event_type=%s AND day_key=%s", (identity, ev, day_key))
+                r = cur.fetchone()
+                used = int((r or {}).get("count") or 0)
+                states[ev] = {"used": used, "limit": lim, "remaining": max(0, lim - used)}
+            return {
+                "points": points,
+                "level": level,
+                "level_name": name,
+                "points_total": total_earned,
+                "next_threshold": nxt,
+                "quizzes_today": quizzes_today,
+                "limits": states,
+                "day": day_key,
+            }
+        r = _platform_db_query(q_state)
+        return jsonify({"ok": r is not None, **(r or {})})
+
+    if op=="arcade_quiz_next":
+        # يُعيد السؤال التالي (من بنك الأسئلة) بناءً على محاولات المستخدم اليوم
+        identity = _platform_identity(user)
+        from datetime import date as _date
+        day_key = _date.today().isoformat()
+        def q_next(cur):
+            cur.execute("SELECT question_key FROM ai_for_quiz_daily WHERE identity_key=%s AND day_key=%s ORDER BY created_at ASC", (identity, day_key))
+            asked = {str(r["question_key"]) for r in cur.fetchall()}
+            # نبحث عن أول سؤال لم يُسأل
+            for idx, q in enumerate(ZYN_QUIZ_BANK):
+                key = f"q{idx}"
+                if key not in asked:
+                    # نتحقق من الحد الأقصى
+                    if len(asked) >= 5:
+                        return {"done": True, "reason": "daily_limit_reached"}
+                    return {"done": False, "question_key": key, "q": q["q"], "options": q["options"], "cat": q.get("cat", "general"), "index": idx}
+            return {"done": True, "reason": "bank_exhausted"}
+        r = _platform_db_query(q_next)
+        return jsonify({"ok": r is not None, **(r or {})})
+
+    if op=="arcade_quiz_answer":
+        identity = _platform_identity(user)
+        from datetime import date as _date
+        day_key = _date.today().isoformat()
+        qkey = str(body.get("question_key", "")).strip()
+        choice = int(body.get("choice", -1))
+        if not qkey or choice < 0:
+            return jsonify({"ok": False, "error": "invalid_answer"}), 400
+        # نتحقق من صحة السؤال
+        try:
+            idx = int(qkey.replace("q", ""))
+            q = ZYN_QUIZ_BANK[idx]
+        except Exception:
+            return jsonify({"ok": False, "error": "unknown_question"}), 404
+        correct = (choice == q["a"])
+        # المكافأة: +2 صحيح / -1 خطأ
+        reward = 2 if correct else -1
+        aid = str(uuid.uuid4())
+        def q_ans(cur):
+            # نتحقق من الحد اليومي
+            allowed, remaining = _reward_check_limit(cur, identity, "quiz_correct")
+            if not allowed:
+                reward_val = 0
+                reward_note = "daily_limit"
+            else:
+                reward_val = reward
+                reward_note = "applied"
+                if correct:
+                    _reward_mark_used(cur, identity, "quiz_correct")
+            # نسجل المحاولة
+            cur.execute("""INSERT INTO ai_for_quiz_daily(attempt_id, identity_key, day_key, question_key, correct, reward_points)
+                           VALUES(%s,%s,%s,%s,%s,%s)""",
+                        (aid, identity, day_key, qkey, correct, reward_val))
+            # نُحدّث النقاط
+            if reward_val != 0:
+                cur.execute("""INSERT INTO ai_for_rewards(identity_key, points) VALUES(%s, GREATEST(%s,0))
+                               ON CONFLICT(identity_key) DO UPDATE SET points = GREATEST(0, ai_for_rewards.points + %s), updated_at=NOW()""",
+                            (identity, max(0,reward_val), reward_val))
+                cur.execute("""INSERT INTO ai_for_levels(identity_key, points_total)
+                               VALUES(%s, GREATEST(%s,0))
+                               ON CONFLICT(identity_key) DO UPDATE SET points_total = GREATEST(0, ai_for_levels.points_total + %s), updated_at=NOW()""",
+                            (identity, max(0,reward_val), reward_val))
+            # نُعيد نقاط المستخدم
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            new_points = int((cur.fetchone() or {}).get("points") or 0)
+            return {"correct": correct, "reward": reward_val, "note": reward_note, "points": new_points, "correct_answer": q["options"][q["a"]]}
+        r = _platform_db_query(q_ans)
+        return jsonify({"ok": r is not None, **(r or {})})
+
     if op=="quiz_answer":
         key=str(body.get("question_key",""))[:100]; option=str(body.get("option",""))[:100]
         answer_key={"http-001":"b"}.get(key)

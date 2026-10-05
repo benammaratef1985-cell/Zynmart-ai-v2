@@ -4131,7 +4131,7 @@ function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.rem
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
 function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="card" style="margin:14px 0"><h3>💳 Pi Payments</h3><p class="small">${window.PI_PAYMENTS_ENABLED?'دفع Pi مفعّل على '+(window.PI_SANDBOX?'Testnet':'Mainnet')+' بمبلغ '+Number(window.PI_PAYMENT_AMOUNT).toFixed(4)+' Pi.':'دفع Pi غير مفعّل حاليًا.'}</p><div class="actions"><button class="action" onclick="testPiPayment()">💳 دفع Pi</button></div><div id="paymentMsg" class="small" style="margin-top:8px"></div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
-function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
+function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer" onclick="trackZynMartVisit()"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق (+10 نقاط)</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
@@ -4630,6 +4630,13 @@ function openDMFromCommunity_btn(btn){
   openDMFromCommunity(identity, name);
 }
 
+async function trackZynMartVisit(){
+  try{
+    let d=await platformSvc('zynmart_visit');
+    if(d&&d.ok&&d.reward>0){alert('🎉 +'+d.reward+' نقطة ZYN! رصيدك: '+d.points);}
+  }catch(e){console.warn('zynmart visit',e);}
+}
+
 async function sendDM(otherIdentity){
   let inp=document.getElementById('msgInput');
   if(!inp||!inp.value.trim())return;
@@ -4660,7 +4667,7 @@ function newConversationPrompt(){
 }
 
 
-function plusBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← ZYNMART+</button><section class="detail"><div class="sectionTitle">⭐ ZYNMART+</div><div id="plusState" class="statusBox">⏳ جاري قراءة حالة العضوية...</div><div class="statusBox"><b>منظومة ZYNMART+</b><div class="row">👤 العضوية مرتبطة بهوية الحساب</div><div class="row">🤖 مزايا AI المتقدمة — مرتبطة بحالة العضوية</div><div class="row">🖼️ Marketplace وNFT — مزايا مرتبطة بالمنظومة</div><div class="row">🎁 Rewards وReputation — مرتبطة بنشاط الحساب</div><div class="row">🔐 حالة العضوية ومدة الصلاحية محفوظتان في PostgreSQL</div></div></section>`;platformSvc('zynmart_plus').then(d=>{let p=d.plus||{};document.getElementById('plusState').innerHTML='<div class="row">الحالة: <b>'+esc(p.active?'مفعّلة':'غير مفعّلة للحساب الحالي')+'</b></div><div class="row">المستوى: <b>'+esc(p.tier||'free')+'</b></div>'+(p.started_at?'<div class="row">البداية: '+esc(p.started_at)+'</div>':'')+(p.expires_at?'<div class="row">الانتهاء: '+esc(p.expires_at)+'</div>':'')}).catch(()=>document.getElementById('plusState').textContent='⚠️ تعذر قراءة حالة ZYNMART+ الآن.')}
+function plusBox(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← ZYNMART+</button><section class="detail"><div class="sectionTitle">⭐ ZYNMART+</div><div id="plusState" class="statusBox">⏳ جاري قراءة حالة العضوية...</div><div class="statusBox"><b>منظومة ZYNMART+</b><div class="row">👤 العضوية مرتبطة بهوية الحساب</div><div class="row">🤖 مزايا AI المتقدمة — مرتبطة بحالة العضوية</div><div class="row">🖼️ Marketplace وNFT — مزايا مرتبطة بالمنظومة</div><div class="row">🎁 Rewards وReputation — مرتبطة بنشاط الحساب</div><div class="row">🔐 حالة العضوية ومدة الصلاحية محفوظتان في PostgreSQL</div></div><div class="statusBox"><b>💡 كيف تُفعّل ZYNMART+؟</b><div class="small" style="line-height:1.7">• اجمع ZYN Points من الأنشطة<br>• حوّل النقاط إلى ZYN Token<br>• ادفع بـZYN للاشتراك الشهري<br><div style="margin-top:8px;opacity:.7">🚧 سيتوفر فتح العضوية عند اكتمال تكامل ZYN مع المنصة.</div></div></div></section>`;platformSvc('zynmart_plus').then(d=>{let p=(d&&d.plus)||{};let status=p.active?'<b style="color:#0a6b3a">🟢 مفعّلة</b>':'<b style="color:#7a5c00">🟡 غير مفعّلة</b>';let html='<div class="row">الحالة: '+status+'</div><div class="row">المستوى: <b>'+esc(p.tier||'free')+'</b></div>';if(p.active&&p.started_at)html+='<div class="row">البداية: '+esc(p.started_at.slice(0,10))+'</div>';if(p.active&&p.expires_at)html+='<div class="row">الانتهاء: '+esc(p.expires_at.slice(0,10))+'</div>';document.getElementById('plusState').innerHTML=html}).catch(()=>{document.getElementById('plusState').innerHTML='<div class="row">الحالة: <b style="color:#7a5c00">🟡 غير مفعّلة</b></div><div class="row">المستوى: <b>free</b></div>'});}
 function rewardsBox(){
 document.getElementById('view').innerHTML=`
 <button class="back" onclick="goHome()">← المكافآت</button>
@@ -6378,10 +6385,20 @@ def _reputation_snapshot(user):
 def _zynmart_plus_snapshot(user):
     identity=_platform_identity(user)
     def q(cur):
-        cur.execute("SELECT tier,active,benefits,started_at,expires_at FROM ai_for_zynmart_plus WHERE identity_key=%s",(identity,)); row=cur.fetchone()
-        if not row:return {"tier":"free","active":False,"benefits":{}}
-        return {"tier":row["tier"],"active":bool(row["active"]),"benefits":row["benefits"] if isinstance(row["benefits"],dict) else {},"started_at":row["started_at"].isoformat() if row.get("started_at") else None,"expires_at":row["expires_at"].isoformat() if row.get("expires_at") else None}
-    return _platform_db_query(q) or {"tier":"free","active":False,"benefits":{}}
+        try:
+            cur.execute("SELECT tier,active,benefits,started_at,expires_at FROM ai_for_zynmart_plus WHERE identity_key=%s",(identity,)); row=cur.fetchone()
+            if not row:return {"tier":"free","active":False,"benefits":{}}
+            benefits = row.get("benefits") if isinstance(row.get("benefits"),dict) else {}
+            return {"tier":str(row.get("tier") or "free"),"active":bool(row.get("active")),"benefits":benefits,
+                    "started_at":row["started_at"].isoformat() if row.get("started_at") else None,
+                    "expires_at":row["expires_at"].isoformat() if row.get("expires_at") else None}
+        except Exception as e:
+            print(f"plus_snapshot error: {e}")
+            return {"tier":"free","active":False,"benefits":{},"error":str(e)[:100]}
+    result = _platform_db_query(q)
+    if result is None:
+        return {"tier":"free","active":False,"benefits":{},"error":"db_unavailable"}
+    return result
 
 def _reward_points(user, delta=0):
     identity=_platform_identity(user)
@@ -7034,6 +7051,32 @@ def webapp_platform_services():
         pts=_reward_points(user,0); return jsonify({"ok":pts is not None,"points":int(pts or 0),"reputation":_reputation_snapshot(user),"plus":_zynmart_plus_snapshot(user)})
     if op=="reputation": return jsonify({"ok":True,"reputation":_reputation_snapshot(user)})
     if op=="zynmart_plus": return jsonify({"ok":True,"plus":_zynmart_plus_snapshot(user)})
+    if op=="zynmart_visit":
+        identity = _platform_identity(user)
+        def q_zv(cur):
+            allowed, remaining = _reward_check_limit(cur, identity, "zynmart_visit")
+            if not allowed:
+                # نُسجّل الزيارة بدون مكافأة
+                cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+                p = int((cur.fetchone() or {}).get("points") or 0)
+                return {"reward": 0, "note": "daily_limit", "points": p}
+            _reward_mark_used(cur, identity, "zynmart_visit")
+            # +10 نقاط + +5 سمعة
+            reward_val = 10
+            cur.execute("""INSERT INTO ai_for_rewards(identity_key, points) VALUES(%s, %s)
+                           ON CONFLICT(identity_key) DO UPDATE SET points = ai_for_rewards.points + %s, updated_at=NOW()""",
+                        (identity, reward_val, reward_val))
+            cur.execute("""INSERT INTO ai_for_levels(identity_key, points_total) VALUES(%s, %s)
+                           ON CONFLICT(identity_key) DO UPDATE SET points_total = ai_for_levels.points_total + %s, updated_at=NOW()""",
+                        (identity, reward_val, reward_val))
+            cur.execute("""INSERT INTO ai_for_reputation_events(event_id, identity_key, event_type, points, source_key)
+                           VALUES(%s,%s,'zynmart_visit',5,%s) ON CONFLICT DO NOTHING""",
+                        (str(uuid.uuid4()), identity, "visit:"+cur._connection.info.dbname if hasattr(cur,'_connection') else str(uuid.uuid4())))
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            return {"reward": reward_val, "points": int((cur.fetchone() or {}).get("points") or 0)}
+        r = _platform_db_query(q_zv)
+        return jsonify({"ok": r is not None, **(r or {})})
+
     if op=="zyn_status":
         identity = _platform_identity(user)
         def q_zs(cur):

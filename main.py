@@ -4592,8 +4592,13 @@ async function loadConversation(otherIdentity){
       let align=mine?'flex-end':'flex-start';
       let bg=mine?'#a66cff':'#fff';
       let color=mine?'#fff':'#111827';
-      let delBtn=mine&&m.message_id?'<button onclick="deleteMessage(this, \''+esc(m.message_id)+'\')" style="background:none;border:0;color:inherit;opacity:.6;cursor:pointer;margin-right:6px;font-size:12px">🗑️</button>':'';
-      return '<div style="display:flex;justify-content:'+align+';margin:6px 0;align-items:center">'+delBtn+'<div style="max-width:78%;background:'+bg+';color:'+color+';padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,.06)"><div style="white-space:pre-wrap">'+esc(m.body)+'</div><div style="font-size:10px;opacity:.6;margin-top:3px">'+esc(timeAgo(m.created_at))+'</div></div></div>';
+      // علامات القراءة: ✓ أُرسلت · ✓✓ قُرئت
+      let readMark=mine?'<span style="margin-right:6px;font-size:12px">'+(m.read?'✓✓':'✓')+'</span>':'';
+      // زر المسح للرسائل الصادرة فقط
+      let delBtn=mine&&m.message_id?'<button onclick="deleteMessage(this, \''+esc(m.message_id)+'\')" style="background:none;border:0;color:inherit;opacity:.5;cursor:pointer;margin-left:6px;font-size:12px">🗑️</button>':'';
+      let time=`+timeAgo(m.created_at)+`;
+      let meta='<div style="font-size:10px;opacity:.7;margin-top:4px;display:flex;align-items:center;justify-content:'+(mine?'flex-end':'flex-start')+'">'+time+readMark+'</div>';
+      return '<div style="display:flex;justify-content:'+align+';margin:6px 0"><div style="max-width:78%;background:'+bg+';color:'+color+';padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,.06)"><div style="white-space:pre-wrap">'+esc(m.body)+'</div>'+meta+'</div>'+delBtn+'</div>';
     }).join('');
     win.scrollTop=win.scrollHeight;
   }catch(e){win.innerHTML='<div class="small">⚠️ تعذر التحميل</div>';}
@@ -7013,35 +7018,130 @@ def webapp_platform_services():
     if op=="conversations_list":
         identity = _platform_identity(user)
         def q_conv(cur):
-            cur.execute("""SELECT other, MAX(created_at) AS last_at, COUNT(*) FILTER (WHERE is_unread) AS unread FROM (
-                    SELECT CASE WHEN sender_identity=%s THEN recipient_identity ELSE sender_identity END AS other,
-                           created_at, (sender_identity <> %s AND read_at IS NULL) AS is_unread
-                    FROM ai_for_messages
-                    WHERE sender_identity=%s OR recipient_identity=%s
-                ) AS t GROUP BY other ORDER BY last_at DESC LIMIT 50""",
-                        (identity, identity, identity, identity))
-            convs = []
-            for r in cur.fetchall():
-                other = str(r["other"])
-                # تجاهل الرسائل لـ"pi:" القديمة (لا معنى لها)
-                if other.startswith("pi:"):
+            # كل الهويات الممكنة لي
+            me_variants = [identity]
+            if identity.startswith("pi:"):
+                cur.execute("SELECT account_id FROM ai_for_identity_links WHERE provider='pi' AND provider_subject=%s LIMIT 1", (identity[3:],))
+                r = cur.fetchone()
+                if r and r.get("account_id"): me_variants.append("web:"+str(r["account_id"]))
+            elif identity.startswith("web:"):
+                cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (identity[4:],))
+                r = cur.fetchone()
+                if r and r.get("provider_subject"): me_variants.append("pi:"+str(r["provider_subject"]))
+            me_ph = ",".join(["%s"]*len(me_variants))
+            cur.execute(f"""SELECT sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE sender_identity IN ({me_ph}) OR recipient_identity IN ({me_ph}) ORDER BY created_at DESC LIMIT 500""", tuple(me_variants + me_variants))
+            all_msgs = cur.fetchall()
+            me_set = set(me_variants)
+            # توحيد هوية الطرف الآخر
+            identity_map = {}
+            def normalize_id(i):
+                i = str(i)
+                if i in identity_map: return identity_map[i]
+                try:
+                    if i.startswith("web:"):
+                        cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (i[4:],))
+                        r = cur.fetchone()
+                        if r and r.get("provider_subject"):
+                            identity_map[i] = "pi:" + str(r["provider_subject"])
+                            return identity_map[i]
+                    elif i.startswith("pi:"):
+                        cur.execute("SELECT account_id FROM ai_for_identity_links WHERE provider='pi' AND provider_subject=%s LIMIT 1", (i[3:],))
+                        r = cur.fetchone()
+                        if r and r.get("account_id"):
+                            identity_map[i] = i
+                            identity_map["web:"+str(r["account_id"])] = i
+                            return i
+                except Exception:
                     pass
-                cur.execute("""SELECT body FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at DESC LIMIT 1""",
-                            (identity, other, other, identity))
-                last = cur.fetchone()
+                identity_map[i] = i
+                return i
+            conversations = {}
+            for m in all_msgs:
+                sender = str(m["sender_identity"])
+                other_raw = m["recipient_identity"] if sender in me_set else sender
+                other = normalize_id(other_raw)
+                if other in me_set or other == identity:
+                    continue
+                existing = conversations.get(other)
+                if not existing or (m.get("created_at") and (existing["last_at_raw"] is None or m["created_at"] > existing["last_at_raw"])):
+                    conversations[other] = {
+                        "last_body": m["body"],
+                        "last_at_raw": m["created_at"],
+                        "unread": existing["unread"] if existing else 0
+                    }
+                if sender not in me_set and m.get("read_at") is None:
+                    conversations[other]["unread"] = conversations[other].get("unread", 0) + 1
+            convs = []
+            for other, info in sorted(conversations.items(), key=lambda x: (x[1]["last_at_raw"] is not None, x[1]["last_at_raw"]), reverse=True)[:50]:
                 nm = _display_name_by_identity(cur, other)
-                convs.append({"other_identity": other, "other_name": nm, "last_message": (last or {}).get("body") or "", "last_at": r["last_at"].isoformat() if r.get("last_at") else None, "unread": int(r.get("unread") or 0)})
+                convs.append({"other_identity": other, "other_name": nm, "last_message": info["last_body"] or "", "last_at": info["last_at_raw"].isoformat() if info["last_at_raw"] else None, "unread": int(info["unread"] or 0)})
             return convs
         rows = _platform_db_query(q_conv) or []
         return jsonify({"ok": True, "conversations": rows})
+
     if op=="conversation_get":
+        identity = _platform_identity(user)
+        other = str(body.get("other") or "").strip()
+        if not other: return jsonify({"ok":False,"error":"other_required"}),400
+        def q_get(cur):
+            def _variants(ident):
+                vs = {ident}
+                if ident.startswith("pi:"):
+                    cur.execute("SELECT account_id FROM ai_for_identity_links WHERE provider='pi' AND provider_subject=%s LIMIT 1", (ident[3:],))
+                    r = cur.fetchone()
+                    if r and r.get("account_id"): vs.add("web:"+str(r["account_id"]))
+                elif ident.startswith("web:"):
+                    cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (ident[4:],))
+                    r = cur.fetchone()
+                    if r and r.get("provider_subject"): vs.add("pi:"+str(r["provider_subject"]))
+                return list(vs)
+            me_variants = _variants(identity)
+            other_variants = _variants(other)
+            me_ph = ",".join(["%s"]*len(me_variants))
+            other_ph = ",".join(["%s"]*len(other_variants))
+            cur.execute(f"""SELECT message_id, sender_identity, recipient_identity, body, created_at, read_at 
+                            FROM ai_for_messages 
+                            WHERE (sender_identity IN ({me_ph}) AND recipient_identity IN ({other_ph})) 
+                               OR (sender_identity IN ({other_ph}) AND recipient_identity IN ({me_ph})) 
+                            ORDER BY created_at ASC LIMIT 200""",
+                        tuple(me_variants + other_variants + other_variants + me_variants))
+            rows = cur.fetchall()
+            me_set = set(me_variants)
+            msgs = []
+            for r in rows:
+                mine = str(r["sender_identity"]) in me_set
+                is_read = (r.get("read_at") is not None) if mine else False
+                msgs.append({"message_id": str(r["message_id"]), "body": r["body"],
+                             "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                             "mine": mine, "read": is_read})
+            # نعلّم الرسائل الواردة كمقروءة
+            other_ph2 = ",".join(["%s"]*len(other_variants))
+            me_ph2 = ",".join(["%s"]*len(me_variants))
+            cur.execute(f"UPDATE ai_for_messages SET read_at=NOW() WHERE sender_identity IN ({other_ph2}) AND recipient_identity IN ({me_ph2}) AND read_at IS NULL", tuple(other_variants + me_variants))
+            return msgs
+        msgs = _platform_db_query(q_get) or []
+        return jsonify({"ok": True, "messages": msgs})
         identity = _platform_identity(user)
         other = str(body.get("other") or "").strip()
         if not other: return jsonify({"ok":False,"error":"other_required"}),400
         def q_get(cur):
             cur.execute("""SELECT message_id, sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at ASC LIMIT 200""",
                         (identity, other, other, identity))
-            msgs = [{"message_id": str(r["message_id"]), "body": r["body"], "created_at": r["created_at"].isoformat() if r.get("created_at") else None, "mine": r["sender_identity"] == identity} for r in cur.fetchall()]
+            rows = cur.fetchall()
+            # نبني مجموعة هويات 'أنا' لتحقق دقيق
+            me_set = set(me_variants)
+            msgs = []
+            for r in rows:
+                mine = str(r["sender_identity"]) in me_set
+                # 'read' يعني الرسالة الصادرة مني وقد قُرئت
+                is_read = (r.get("read_at") is not None) if mine else False
+                msgs.append({
+                    "message_id": str(r["message_id"]),
+                    "body": r["body"],
+                    "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                    "mine": mine,
+                    "read": is_read
+                })
             # نعلّم كل الرسائل الواردة كمقروءة
             cur.execute("UPDATE ai_for_messages SET read_at=NOW() WHERE sender_identity=%s AND recipient_identity=%s AND read_at IS NULL", (other, identity))
             return msgs

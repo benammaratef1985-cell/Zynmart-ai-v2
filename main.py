@@ -4596,8 +4596,8 @@ async function loadConversation(otherIdentity){
       let readMark=mine?'<span style="margin-right:6px;font-size:12px">'+(m.read?'✓✓':'✓')+'</span>':'';
       // زر المسح للرسائل الصادرة فقط
       let delBtn=mine&&m.message_id?'<button onclick="deleteMessage(this, \''+esc(m.message_id)+'\')" style="background:none;border:0;color:inherit;opacity:.5;cursor:pointer;margin-left:6px;font-size:12px">🗑️</button>':'';
-      let time=`+timeAgo(m.created_at)+`;
-      let meta='<div style="font-size:10px;opacity:.7;margin-top:4px;display:flex;align-items:center;justify-content:'+(mine?'flex-end':'flex-start')+'">'+time+readMark+'</div>';
+      let time=timeAgo(m.created_at);
+      let meta='<div style="font-size:10px;opacity:.7;margin-top:4px;display:flex;align-items:center;justify-content:'+(mine?'flex-end':'flex-start')+'">'+esc(time)+readMark+'</div>';
       return '<div style="display:flex;justify-content:'+align+';margin:6px 0"><div style="max-width:78%;background:'+bg+';color:'+color+';padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,.06)"><div style="white-space:pre-wrap">'+esc(m.body)+'</div>'+meta+'</div>'+delBtn+'</div>';
     }).join('');
     win.scrollTop=win.scrollHeight;

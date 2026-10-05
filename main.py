@@ -6375,7 +6375,7 @@ def webapp_platform_services():
             rows = [dict(x) for x in cur.fetchall()]
             if rows:
                 cids = [r["comment_id"] for r in rows]
-                cur.execute("SELECT comment_id FROM ai_for_comment_reactions WHERE user_identity=%s AND comment_id = ANY(%s)", (viewer, cids))
+                cur.execute("SELECT comment_id::text AS comment_id FROM ai_for_comment_reactions WHERE user_identity=%s AND comment_id::text = ANY(%s)", (viewer, [str(x) for x in cids]))
                 liked = {str(x["comment_id"]) for x in cur.fetchall()}
                 for r in rows:
                     r["viewer_liked"] = str(r["comment_id"]) in liked
@@ -7059,7 +7059,7 @@ def api_notifications_read():
     nid = str(body.get("id") or "").strip()
     def q(cur):
         if nid:
-            cur.execute("UPDATE ai_for_notifications SET is_read=TRUE WHERE recipient_identity=%s AND notification_id=%s", (identity, nid))
+            cur.execute("UPDATE ai_for_notifications SET is_read=TRUE WHERE recipient_identity=%s AND notification_id::text=%s", (identity, str(nid)))
         else:
             cur.execute("UPDATE ai_for_notifications SET is_read=TRUE WHERE recipient_identity=%s", (identity,))
         return True

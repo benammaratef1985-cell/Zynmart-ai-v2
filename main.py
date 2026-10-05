@@ -6002,12 +6002,14 @@ def _platform_message_send(user, recipient, body):
                 except Exception: resolved=None
         if not resolved or resolved==identity: return None
         cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,resolved,body_text))
-        # إشعار للمستقبل
+        # نحفظ النتيجة قبل استدعاء _notify (الذي يُعدّل cursor)
+        row = dict(cur.fetchone())
+        # إشعار للمستقبل — يشير إلى رسالة
         try:
-            _notify(cur, resolved, identity, _display_name_by_identity(cur, identity), "message", f"أرسل لك رسالة: {body_text[:80]}", "message", resolved)
-        except Exception:
-            pass
-        return dict(cur.fetchone())
+            _notify(cur, resolved, identity, _display_name_by_identity(cur, identity), "message", f"أرسل لك رسالة: {body_text[:80]}", "dm", str(resolved))
+        except Exception as _ne:
+            print(f"notify after message: {_ne}")
+        return row
     return _platform_db_query(q)
 
 def _platform_messages(user):
@@ -6371,11 +6373,12 @@ def webapp_platform_services():
             convs = []
             for r in cur.fetchall():
                 other = str(r["other"])
-                # نأخذ آخر رسالة
+                # تجاهل الرسائل لـ"pi:" القديمة (لا معنى لها)
+                if other.startswith("pi:"):
+                    pass
                 cur.execute("""SELECT body FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at DESC LIMIT 1""",
                             (identity, other, other, identity))
                 last = cur.fetchone()
-                # نجلب اسم/صورة الطرف الآخر
                 nm = _display_name_by_identity(cur, other)
                 convs.append({"other_identity": other, "other_name": nm, "last_message": (last or {}).get("body") or "", "last_at": r["last_at"].isoformat() if r.get("last_at") else None, "unread": int(r.get("unread") or 0)})
             return convs

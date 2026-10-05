@@ -4384,26 +4384,31 @@ function searchUsers(){
 }
 
 async function openConversation(otherIdentity, otherName){
+  window.__currentDM = {identity: otherIdentity, name: otherName};
   document.getElementById('view').innerHTML=`
-  <button class="back" onclick="messagesBox()">← المحادثات</button>
-  <section class="detail">
-    <div style="display:flex;align-items:center;gap:10px;padding:6px 0">`+avatarHtml(otherIdentity,otherName,40)+`<b style="font-size:17px">`+esc(otherName)+`</b></div>
-    <div id="chatWindow" style="background:#f4f5f7;border-radius:16px;padding:12px;min-height:340px;max-height:60vh;overflow-y:auto;margin-top:8px"><div class="small">⏳</div></div>
-    <div style="display:flex;gap:6px;margin-top:10px">
+  <div style="position:sticky;top:0;background:#fff;z-index:10;padding:8px 0;border-bottom:1px solid #e5e7eb;display:flex;align-items:center;gap:10px">
+    <button class="back" style="margin:0;padding:6px 10px" onclick="messagesBox()">←</button>
+    <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:0">
+      <span>`+avatarHtml(otherIdentity,otherName,36)+`</span>
+      <b style="font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">`+esc(otherName)+`</b>
+    </div>
+  </div>
+  <section class="detail" style="padding-bottom:0">
+    <div id="chatWindow" style="background:#f4f5f7;border-radius:16px;padding:12px;min-height:280px;max-height:calc(100vh - 280px);overflow-y:auto;margin-top:8px"><div class="small">⏳</div></div>
+  </section>
+  <div style="position:sticky;bottom:0;background:#fff;padding:10px 16px;border-top:1px solid #e5e7eb;z-index:10">
+    <div style="display:flex;gap:6px">
       <input id="msgInput" placeholder="اكتب رسالة..." style="flex:1;padding:12px;background:#fff;color:#111827;border:1px solid #e5e7eb;border-radius:22px;font-size:14px">
       <button class="action" style="width:auto;padding:10px 20px;border-radius:22px;background:#a66cff" id="sendDMbtn">إرسال</button>
     </div>
-    <button class="mini" style="margin-top:8px;background:#f4f5f7" id="debugDMbtn">🔍 اختبار الإرسال</button>
-  </section>`;
-  // نربط الأزرار عبر JavaScript بعد بنائها (لتجنب مشكلة النطاق)
+  </div>`;
   setTimeout(function(){
     var sb=document.getElementById('sendDMbtn');
     if(sb){sb.onclick=function(){sendDM(otherIdentity);};}
-    var db=document.getElementById('debugDMbtn');
-    if(db){db.onclick=function(){debugDM(otherIdentity);};}
     var inp=document.getElementById('msgInput');
     if(inp){inp.addEventListener('keydown',function(ev){if(ev.key==='Enter'&&!ev.shiftKey){ev.preventDefault();sendDM(otherIdentity);}});}
   },100);
+  await loadConversation(otherIdentity);
 }
 
 async function loadConversation(otherIdentity){
@@ -4418,7 +4423,8 @@ async function loadConversation(otherIdentity){
       let align=mine?'flex-end':'flex-start';
       let bg=mine?'#a66cff':'#fff';
       let color=mine?'#fff':'#111827';
-      return '<div style="display:flex;justify-content:'+align+';margin:6px 0"><div style="max-width:78%;background:'+bg+';color:'+color+';padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,.06)"><div style="white-space:pre-wrap">'+esc(m.body)+'</div><div style="font-size:10px;opacity:.6;margin-top:3px">'+esc(timeAgo(m.created_at))+'</div></div></div>';
+      let delBtn=mine&&m.message_id?'<button onclick="deleteMessage(this, \''+esc(m.message_id)+'\')" style="background:none;border:0;color:inherit;opacity:.6;cursor:pointer;margin-right:6px;font-size:12px">🗑️</button>':'';
+      return '<div style="display:flex;justify-content:'+align+';margin:6px 0;align-items:center">'+delBtn+'<div style="max-width:78%;background:'+bg+';color:'+color+';padding:10px 14px;border-radius:18px;font-size:14px;line-height:1.5;box-shadow:0 1px 3px rgba(0,0,0,.06)"><div style="white-space:pre-wrap">'+esc(m.body)+'</div><div style="font-size:10px;opacity:.6;margin-top:3px">'+esc(timeAgo(m.created_at))+'</div></div></div>';
     }).join('');
     win.scrollTop=win.scrollHeight;
   }catch(e){win.innerHTML='<div class="small">⚠️ تعذر التحميل</div>';}
@@ -4431,6 +4437,16 @@ async function debugDM(other){
   }catch(e){
     alert('ERROR: '+(e.message||String(e)));
   }
+}
+
+async function deleteMessage(btn, messageId){
+  if(!confirm('حذف هذه الرسالة؟'))return;
+  try{
+    let d=await platformSvc('message_delete',{message_id:messageId});
+    if(!d||!d.ok)throw new Error(d.error||'delete_failed');
+    let row=btn.closest('div[style*="margin:6px 0"]');
+    if(row){row.style.opacity='0.4';setTimeout(function(){row.remove();},250);}
+  }catch(e){alert('تعذر الحذف: '+(e.message||''));}
 }
 
 async function sendDM(otherIdentity){
@@ -4512,15 +4528,17 @@ function renderNotification(n){
   if(kind==='comment')icon='💬';
   else if(kind==='mention')icon='@';
   else if(kind==='message')icon='✉️';
+  else if(kind==='reply')icon='↩️';
+  else if(kind==='comment_like')icon='❤️';
   else if(kind==='like'||kind==='react')icon='❤️';
   else if(kind==='follow')icon='👤';
   let bg=n.is_read?'#fff':'#f4ecff';
   let dot=n.is_read?'':'<span style="width:10px;height:10px;background:#a66cff;border-radius:50%;display:inline-block"></span>';
   let dataTarget='';
-  if(n.target_type==='post'&&n.target_id)dataTarget=' onclick="openNotifTarget(this)" data-post="'+esc(n.target_id)+'"';
-  else if(n.target_type==='message'&&n.target_id)dataTarget=' onclick="openNotifTarget(this)" data-dm="'+esc(n.target_id)+'"';
+  if(n.target_type==='post'&&n.target_id)dataTarget=' data-post="'+esc(n.target_id)+'"';
+  else if((n.target_type==='message'||n.target_type==='dm')&&n.target_id)dataTarget=' data-dm="'+esc(n.target_id)+'" data-dm-name="'+esc(n.actor_name||'')+'"';
   let nm=n.actor_name||'عضو';
-  return '<div class="statusBox" data-nid="'+esc(n.id)+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+bg+'"'+dataTarget+'><div style="display:flex;gap:12px;align-items:center">'+avatarHtml(n.actor_identity,nm,40)+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(nm)+'</b> '+dot+'</div><div class="small" style="margin-top:2px">'+icon+' '+esc(n.body||'')+'</div><div class="small" style="opacity:.55;margin-top:2px">'+esc(timeAgo(n.created_at))+'</div></div></div></div>';
+  return '<div class="statusBox notif-row" data-nid="'+esc(n.id)+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+bg+'"'+dataTarget+' onclick="openNotifTarget(this)"><div style="display:flex;gap:12px;align-items:center">'+avatarHtml(n.actor_identity,nm,40)+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(nm)+'</b> '+dot+'</div><div class="small" style="margin-top:2px">'+icon+' '+esc(n.body||'')+'</div><div class="small" style="opacity:.55;margin-top:2px">'+esc(timeAgo(n.created_at))+'</div></div></div></div>';
 }
 
 async function markAllNotifRead(){
@@ -4533,16 +4551,17 @@ async function markAllNotifRead(){
 async function openNotifTarget(el){
   let postId=el.dataset.post;
   let dmTarget=el.dataset.dm;
-  // نعلّم الإشعار كمقروء
+  let dmName=el.dataset.dmName||dmTarget;
   let nid=el.dataset.nid;
-  try{if(nid){fetch('/api/notifications/read',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},body:JSON.stringify({id:nid})});}}catch(_){}
+  try{if(nid){fetch('/api/notifications/read',{method:'POST',headers:Object.assign({},authHeaders(),{'Content-Type':'application/json'}),body:JSON.stringify({id:nid})});}}catch(_){}
   if(postId){
-    // نفتح Community
     openSection('community');
-    // ننتظر قليلًا ثم نمرر إلى المنشور
     setTimeout(function(){let t=document.querySelector('[data-post="'+postId+'"]');if(t)t.scrollIntoView({behavior:'smooth',block:'center'});},800);
   }else if(dmTarget){
-    openConversation(dmTarget,dmTarget);
+    // نفتح قائمة الرسائل ثم المحادثة
+    document.getElementById('view').innerHTML='<div class="center"><div class="loader">⏳</div><p>جاري فتح المحادثة...</p></div>';
+    // نستدعي openConversation مباشرة
+    setTimeout(function(){openConversation(dmTarget,dmName);},200);
   }
 }
 
@@ -6360,6 +6379,23 @@ def webapp_platform_services():
         if row: _record_reputation_event(user,"message_send",str(row.get("message_id") or uuid.uuid4()))
         return jsonify({"ok":bool(row),"message":row})
     if op=="messages": return jsonify({"ok":True,"messages":_platform_messages(user)})
+    if op=="message_delete":
+        mid = str(body.get("message_id","")).strip()
+        if not mid: return jsonify({"ok":False,"error":"message_id_required"}),400
+        identity = _platform_identity(user)
+        def q_del(cur):
+            cur.execute("SELECT sender_identity FROM ai_for_messages WHERE message_id=%s", (mid,))
+            r = cur.fetchone()
+            if not r: return {"error":"not_found"}
+            if str(r["sender_identity"]) != identity:
+                return {"error":"forbidden"}
+            cur.execute("DELETE FROM ai_for_messages WHERE message_id=%s", (mid,))
+            return {"deleted": True}
+        r = _platform_db_query(q_del)
+        if not r: return jsonify({"ok":False,"error":"db_unavailable"}),503
+        if r.get("error")=="not_found": return jsonify({"ok":False,"error":"not_found"}),404
+        if r.get("error")=="forbidden": return jsonify({"ok":False,"error":"forbidden"}),403
+        return jsonify({"ok":True, **r})
     if op=="conversations_list":
         identity = _platform_identity(user)
         def q_conv(cur):
@@ -6389,9 +6425,9 @@ def webapp_platform_services():
         other = str(body.get("other") or "").strip()
         if not other: return jsonify({"ok":False,"error":"other_required"}),400
         def q_get(cur):
-            cur.execute("""SELECT sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at ASC LIMIT 200""",
+            cur.execute("""SELECT message_id, sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at ASC LIMIT 200""",
                         (identity, other, other, identity))
-            msgs = [{"body": r["body"], "created_at": r["created_at"].isoformat() if r.get("created_at") else None, "mine": r["sender_identity"] == identity} for r in cur.fetchall()]
+            msgs = [{"message_id": str(r["message_id"]), "body": r["body"], "created_at": r["created_at"].isoformat() if r.get("created_at") else None, "mine": r["sender_identity"] == identity} for r in cur.fetchall()]
             # نعلّم كل الرسائل الواردة كمقروءة
             cur.execute("UPDATE ai_for_messages SET read_at=NOW() WHERE sender_identity=%s AND recipient_identity=%s AND read_at IS NULL", (other, identity))
             return msgs

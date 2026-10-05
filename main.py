@@ -4558,9 +4558,7 @@ async function openNotifTarget(el){
     openSection('community');
     setTimeout(function(){let t=document.querySelector('[data-post="'+postId+'"]');if(t)t.scrollIntoView({behavior:'smooth',block:'center'});},800);
   }else if(dmTarget){
-    // نفتح قائمة الرسائل ثم المحادثة
     document.getElementById('view').innerHTML='<div class="center"><div class="loader">⏳</div><p>جاري فتح المحادثة...</p></div>';
-    // نستدعي openConversation مباشرة
     setTimeout(function(){openConversation(dmTarget,dmName);},200);
   }
 }
@@ -6023,9 +6021,18 @@ def _platform_message_send(user, recipient, body):
         cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,resolved,body_text))
         # نحفظ النتيجة قبل استدعاء _notify (الذي يُعدّل cursor)
         row = dict(cur.fetchone())
-        # إشعار للمستقبل — يشير إلى رسالة
+        # إشعار للمستقبل — نستخدم pi:UID إن وُجد (لأن الإشعارات تُقرأ بهوية pi:)
+        notify_recipient = resolved
+        if resolved.startswith("web:"):
+            try:
+                cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (resolved[4:],))
+                _pi = cur.fetchone()
+                if _pi and _pi.get("provider_subject"):
+                    notify_recipient = "pi:" + str(_pi["provider_subject"])
+            except Exception:
+                pass
         try:
-            _notify(cur, resolved, identity, _display_name_by_identity(cur, identity), "message", f"أرسل لك رسالة: {body_text[:80]}", "dm", str(resolved))
+            _notify(cur, notify_recipient, identity, _display_name_by_identity(cur, identity), "message", f"أرسل لك رسالة: {body_text[:80]}", "dm", str(identity))
         except Exception as _ne:
             print(f"notify after message: {_ne}")
         return row

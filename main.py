@@ -4260,8 +4260,6 @@ function renderPostCard(p){
   let bm=p.viewer_bookmarked?'🔖':'📑';
   let avatar=avatarHtml(identity,name,44);
   let myReaction=(p.viewer_reaction||'');
-  // زر DM صغير — يفتح محادثة خاصة مع الناشر
-  let dmBtn='<button class="mini" style="background:#a66cff;color:#fff;border:0;border-radius:50%;width:34px;height:34px;padding:0;font-size:15px;margin-right:6px" onclick="event.stopPropagation();openDMFromCommunity(\''+esc(identity)+'\',\''+esc(name).replace(/\\/g,\'\')+'\')" title="محادثة خاصة">✉️</button>';
   let reactionsBar='<div class="reactions-bar" id="reactions-'+esc(pid)+'">'+
     '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="love" onclick="react(this)" style="'+(myReaction==='love'?'background:#ffe1e1':'')+'">❤️</button>'+
     '<button class="reaction-btn" data-pid="'+esc(pid)+'" data-r="like" onclick="react(this)" style="'+(myReaction==='like'?'background:#e1efff':'')+'">👍</button>'+
@@ -4276,7 +4274,7 @@ function renderPostCard(p){
     '<button class="mini" data-pid="'+esc(pid)+'" onclick="sharePost(this)" style="border-radius:14px;padding:2px 10px;font-size:12px">🔗</button>'+
     (state.role==='owner'||state.role==='admin'||(p.author_username&&state.user.username===p.author_username)?'<button class="mini" data-pid="'+esc(pid)+'" onclick="deletePost(this)" style="border-radius:14px;padding:2px 10px;font-size:12px;color:#ff8793">🗑️</button>':'')+
     '</div>';
-  return '<div class="statusBox" style="padding:14px 16px;border-radius:18px;margin-bottom:12px" data-post="'+esc(pid)+'"><div style="display:flex;align-items:flex-start;gap:12px">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b style="font-size:15px">'+esc(name)+'</b> '+verified+'<span class="small" style="opacity:.7">'+esc(user)+'</span><span class="small" style="opacity:.55">·</span><span class="small" style="opacity:.7">'+esc(time)+'</span></div></div>'+dmBtn+'</div>'+img+'<div style="margin-top:10px;white-space:pre-wrap;line-height:1.7;font-size:15px">'+esc(p.body||'')+'</div>'+reactionsBar+'<div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
+  return '<div class="statusBox" style="padding:14px 16px;border-radius:18px;margin-bottom:12px" data-post="'+esc(pid)+'"><div style="display:flex;align-items:flex-start;gap:12px">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><b style="font-size:15px">'+esc(name)+'</b> '+verified+'<span class="small" style="opacity:.7">'+esc(user)+'</span><span class="small" style="opacity:.55">·</span><span class="small" style="opacity:.7">'+esc(time)+'</span></div></div></div>'+img+'<div style="margin-top:10px;white-space:pre-wrap;line-height:1.7;font-size:15px">'+esc(p.body||'')+'</div>'+reactionsBar+'<div id="cmt-'+esc(pid)+'" style="display:none;margin-top:10px"></div></div>';
 }
 
 
@@ -4562,12 +4560,6 @@ async function deleteMessage(btn, messageId){
     let row=btn.closest('div[style*="margin:6px 0"]');
     if(row){row.style.opacity='0.4';setTimeout(function(){row.remove();},250);}
   }catch(e){alert('تعذر الحذف: '+(e.message||''));}
-}
-
-function openDMFromCommunity(otherIdentity, otherName){
-  // ننتقل إلى قائمة الرسائل ثم نفتح المحادثة مباشرة
-  document.getElementById('view').innerHTML='<div class="center"><div class="loader">⏳</div><p>جاري فتح المحادثة...</p></div>';
-  setTimeout(function(){openConversation(otherIdentity,otherName);},150);
 }
 
 async function sendDM(otherIdentity){
@@ -6144,17 +6136,8 @@ def _platform_message_send(user, recipient, body):
                 try: resolved=("web:"+str(row["account_id"])) if row and row.get("account_id") is not None else None
                 except Exception: resolved=None
         if not resolved or resolved==identity: return None
-        # نُخزّن المستقبل بـ pi:UID إن أمكن (لتوحيد الهوية)
-        recipient_identity = resolved
-        if resolved.startswith("web:"):
-            try:
-                cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (resolved[4:],))
-                _r = cur.fetchone()
-                if _r and _r.get("provider_subject"):
-                    recipient_identity = "pi:" + str(_r["provider_subject"])
-            except Exception:
-                pass
-        cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,recipient_identity,body_text))
+        cur.execute("INSERT INTO ai_for_messages(message_id,sender_identity,recipient_identity,body) VALUES(%s,%s,%s,%s) RETURNING message_id,sender_identity,recipient_identity,body,created_at",(mid,identity,resolved,body_text))
+        # نحفظ النتيجة قبل استدعاء _notify (الذي يُعدّل cursor)
         row = dict(cur.fetchone())
         # إشعار للمستقبل — نستخدم pi:UID إن وُجد (لأن الإشعارات تُقرأ بهوية pi:)
         notify_recipient = resolved
@@ -6335,12 +6318,6 @@ def webapp_platform_services():
         actor_name = user.get("first_name") or user.get("username") or "عضو"
         cid = str(uuid.uuid4())
         def q_cmt(cur):
-            # تشغيل ALTER هنا كإجراء وقائي (مرة واحدة)
-            try:
-                cur.execute("ALTER TABLE ai_for_community_comments ADD COLUMN IF NOT EXISTS parent_id UUID")
-                cur.execute("ALTER TABLE ai_for_community_comments ADD COLUMN IF NOT EXISTS like_count BIGINT NOT NULL DEFAULT 0")
-            except Exception:
-                pass
             cur.execute("INSERT INTO ai_for_community_comments(comment_id,post_id,author_identity,body) VALUES(%s,%s,%s,%s) RETURNING comment_id,created_at", (cid, post_id, identity, body_text))
             row = dict(cur.fetchone())
             cur.execute("UPDATE ai_for_community_posts SET comment_count=comment_count+1 WHERE post_id=%s", (post_id,))
@@ -6607,55 +6584,17 @@ def webapp_platform_services():
                     WHERE sender_identity=%s OR recipient_identity=%s
                 ) AS t GROUP BY other ORDER BY last_at DESC LIMIT 50""",
                         (identity, identity, identity, identity))
-            # نجلب كل الرسائل، ثم نُوحّد هوية الطرف الآخر (web:X و pi:Y لنفس المستخدم)
-            cur.execute("""SELECT sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE sender_identity=%s OR recipient_identity=%s ORDER BY created_at DESC LIMIT 500""",
-                        (identity, identity))
-            all_msgs = cur.fetchall()
-            # نبني خريطة توحيد الهويات
-            identity_map = {}
-            def normalize_id(i):
-                i = str(i)
-                if i in identity_map: return identity_map[i]
-                # نبحث عن pi:UID
-                try:
-                    if i.startswith("web:"):
-                        cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (i[4:],))
-                        r = cur.fetchone()
-                        if r and r.get("provider_subject"):
-                            identity_map[i] = "pi:" + str(r["provider_subject"])
-                            return identity_map[i]
-                    elif i.startswith("pi:"):
-                        cur.execute("SELECT account_id FROM ai_for_identity_links WHERE provider='pi' AND provider_subject=%s LIMIT 1", (i[3:],))
-                        r = cur.fetchone()
-                        if r and r.get("account_id"):
-                            # نبقي pi: كقيمة موحدة
-                            identity_map[i] = i
-                            identity_map["web:"+str(r["account_id"])] = i
-                            return i
-                except Exception:
-                    pass
-                identity_map[i] = i
-                return i
-            # نُجمّع حسب الطرف الآخر الموحّد
-            conversations = {}
-            for m in all_msgs:
-                other_raw = m["recipient_identity"] if m["sender_identity"] == identity else m["sender_identity"]
-                other = normalize_id(other_raw)
-                if other == identity:
-                    continue
-                existing = conversations.get(other)
-                if not existing or (m.get("created_at") and (existing["last_at_raw"] is None or m["created_at"] > existing["last_at_raw"])):
-                    conversations[other] = {
-                        "last_body": m["body"],
-                        "last_at_raw": m["created_at"],
-                        "unread": existing["unread"] if existing else 0
-                    }
-                if m["sender_identity"] != identity and m.get("read_at") is None:
-                    conversations[other]["unread"] = conversations[other].get("unread", 0) + 1
             convs = []
-            for other, info in sorted(conversations.items(), key=lambda x: (x[1]["last_at_raw"] is not None, x[1]["last_at_raw"]), reverse=True)[:50]:
+            for r in cur.fetchall():
+                other = str(r["other"])
+                # تجاهل الرسائل لـ"pi:" القديمة (لا معنى لها)
+                if other.startswith("pi:"):
+                    pass
+                cur.execute("""SELECT body FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at DESC LIMIT 1""",
+                            (identity, other, other, identity))
+                last = cur.fetchone()
                 nm = _display_name_by_identity(cur, other)
-                convs.append({"other_identity": other, "other_name": nm, "last_message": info["last_body"] or "", "last_at": info["last_at_raw"].isoformat() if info["last_at_raw"] else None, "unread": int(info["unread"] or 0)})
+                convs.append({"other_identity": other, "other_name": nm, "last_message": (last or {}).get("body") or "", "last_at": r["last_at"].isoformat() if r.get("last_at") else None, "unread": int(r.get("unread") or 0)})
             return convs
         rows = _platform_db_query(q_conv) or []
         return jsonify({"ok": True, "conversations": rows})
@@ -6664,23 +6603,8 @@ def webapp_platform_services():
         other = str(body.get("other") or "").strip()
         if not other: return jsonify({"ok":False,"error":"other_required"}),400
         def q_get(cur):
-            # نبني قائمة الاحتمالات للـother (pi:، web:، tg:)
-            other_variants = [other]
-            if other.startswith("pi:"):
-                # أضف web:UUID
-                cur.execute("SELECT account_id FROM ai_for_identity_links WHERE provider='pi' AND provider_subject=%s LIMIT 1", (other[3:],))
-                _ra = cur.fetchone()
-                if _ra and _ra.get("account_id"):
-                    other_variants.append("web:" + str(_ra["account_id"]))
-            elif other.startswith("web:"):
-                cur.execute("SELECT provider_subject FROM ai_for_identity_links WHERE account_id=%s AND provider='pi' LIMIT 1", (other[4:],))
-                _rp = cur.fetchone()
-                if _rp and _rp.get("provider_subject"):
-                    other_variants.append("pi:" + str(_rp["provider_subject"]))
-            # نبني IN clause
-            placeholders = ",".join(["%s"]*len(other_variants))
-            cur.execute(f"""SELECT message_id, sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity IN ({placeholders})) OR (sender_identity IN ({placeholders}) AND recipient_identity=%s) ORDER BY created_at ASC LIMIT 200""",
-                        tuple([identity] + other_variants + other_variants + [identity]))
+            cur.execute("""SELECT message_id, sender_identity, recipient_identity, body, created_at, read_at FROM ai_for_messages WHERE (sender_identity=%s AND recipient_identity=%s) OR (sender_identity=%s AND recipient_identity=%s) ORDER BY created_at ASC LIMIT 200""",
+                        (identity, other, other, identity))
             msgs = [{"message_id": str(r["message_id"]), "body": r["body"], "created_at": r["created_at"].isoformat() if r.get("created_at") else None, "mine": r["sender_identity"] == identity} for r in cur.fetchall()]
             # نعلّم كل الرسائل الواردة كمقروءة
             cur.execute("UPDATE ai_for_messages SET read_at=NOW() WHERE sender_identity=%s AND recipient_identity=%s AND read_at IS NULL", (other, identity))

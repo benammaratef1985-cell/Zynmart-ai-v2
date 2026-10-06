@@ -701,6 +701,106 @@ def _ensure_db_schema(cur):
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_quiz_daily_identity ON ai_for_quiz_daily(identity_key, day_key)")
+    # قاعدة معرفة البوت (Bot Knowledge Base)
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_bot_knowledge (
+        knowledge_id UUID PRIMARY KEY,
+        category TEXT NOT NULL DEFAULT 'general',
+        keywords TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+        question_example TEXT NOT NULL DEFAULT '',
+        answer TEXT NOT NULL,
+        priority INTEGER NOT NULL DEFAULT 50,
+        active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_bot_knowledge_active ON ai_for_bot_knowledge(active, priority DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_bot_knowledge_keywords ON ai_for_bot_knowledge USING GIN(keywords)")
+    # ---- بذور قاعدة المعرفة (تُضاف مرة واحدة) ----
+    _kb_seed = [
+        # الدخول والمنصة
+        ("platform", ["كيف","ادخل","المنصة"], "كيف أدخل إلى المنصة؟",
+         "📱 للدخول إلى منصة AI for:\n1. افتح Pi Browser\n2. اذهب إلى:\nhttps://ai-for-backup.onrender.com\n3. سجّل دخولك بـ Pi\n\n✅ التسجيل تلقائي ومجاني.", 90),
+        ("platform", ["ما","منصة","ai","for"], "ما هي منصة AI for؟",
+         "🌐 منصة AI for هي بوابة موحّدة تجمع:\n• الذكاء الاصطناعي\n• البحث\n• المجتمع والرسائل\n• ZynMart\n• الألعاب والمكافآت\n\n🔗 افتحها في Pi Browser.", 90),
+        ("platform", ["هل","مجانية","مجاني"], "هل المنصة مجانية؟",
+         "✅ نعم، التسجيل والاستخدام الأساسي مجاني.\n\n🎁 الميزات المتقدمة (AI موسّع، Marketplace NFT) ستكون متاحة لاحقًا ضمن عضوية ZYNMART+ أو عبر Genesis NFT.", 80),
+        ("platform", ["تسجيل","اسجل","حساب"], "كيف أسجّل حسابًا؟",
+         "📝 التسجيل تلقائي:\n1. افتح المنصة في Pi Browser\n2. وافق على مصادقة Pi\n3. سيُإنشاء حسابك تلقائيًا\n\nلا تحتاج بريدًا أو كلمة مرور.", 85),
+
+        # ZynMart
+        ("zynmart", ["كيف","افتح","zynmart"], "كيف أفتح ZynMart؟",
+         "🛒 لفتح ZynMart:\n1. افتح AI for في Pi Browser\n2. اضغط على بطاقة ZYNMART في الرئيسية\n3. سيفتح المتجر في نافذة جديدة\n\n🎁 مكافأة: +15 نقطة لكل فتح (+50 لأول مرة).", 95),
+        ("zynmart", ["مكافاة","مكافآت","نقاط","zynmart"], "هل هناك مكافآت على ZynMart؟",
+         "🎁 نعم:\n• +15 نقطة لكل فتح لـZynMart (حتى 3/يوم)\n• +50 نقطة لأول زيارة\n\n💡 الجمع يصل إلى 45 نقطة يوميًا.", 90),
+        ("zynmart", ["متى","افتح","متجر"], "متى أزور ZynMart؟",
+         "🛒 يمكنك فتح ZynMart في أي وقت.\nلكن المكافآت محدودة بـ3 زيارات يوميًا (لحماية قيمة ZYN).\n\nيمكنك التسوّق بلا حدود — المكافأة فقط تُقيَّد.", 80),
+
+        # المكافآت
+        ("rewards", ["كيف","اجمع","نقاط"], "كيف أجمع نقاط ZYN؟",
+         "🎁 مصادر النقاط:\n• فتح ZynMart: +15\n• أول زيارة: +50\n• اختبار المعرفة: +1/إجابة\n• فوز XO: +2\n• فوز حجر ورقة مقص: +1\n• إكمال الذاكرة: +2\n• نشر منشور: +1\n• تعليق: +1\n• تفاعل: +1", 90),
+        ("rewards", ["حد","يومي"], "ما هو الحد اليومي للنقاط؟",
+         "📊 الحد اليومي:\n• 500 نقطة كحد أقصى للتحويل\n• كل نشاط له حد يومي خاص\n\n💡 يمكنك الاستمرار في اللعب والتسوّق بعد الحد — لكن بدون مكافآت إضافية.", 85),
+        ("rewards", ["كيف","احول","نقاط","zyn"], "كيف أحوّل النقاط إلى ZYN؟",
+         "💎 لتحويل النقاط إلى ZYN:\n1. اجمع 1000 نقطة على الأقل\n2. اذهب إلى 🎁 المكافآت\n3. اضغط 'تحويل إلى ZYN'\n4. انسخ الكود واستخدمه في بوت تعدين ZYN\n\n📊 1 ZYN = 1000 نقطة", 95),
+        ("rewards", ["ما","قيمة","نقاط"], "ما قيمة النقاط؟",
+         "💎 1 ZYN = 1000 نقطة ZYN.\n\n📌 الحد الأدنى للتحويل: 1000 نقطة\n📌 الحد اليومي: 500 نقطة", 85),
+        ("rewards", ["لم","اتلق","وصلتني"], "لم تصلني النقاط.",
+         "⚠️ تحقق من:\n1. هل سجّلت اليوم؟ (نقاط الزيارة اليومية)\n2. هل تجاوزت الحد اليومي؟\n3. هل الاتصال مستقر؟\n\nإذا استمرت المشكلة، افتح تذكرة في قسم 🆘 الدعم.", 80),
+
+        # ZYN Token
+        ("zyn", ["متى","zyn","يطلق"], "متى يُطلق ZYN Token؟",
+         "💎 ZYN Token قيد التحضير.\nسيُتاح التحويل الرسمي بعد اكتمال التكامل مع بوت التعدين.\n\n📢 تابعنا — سيُعلن قريبًا جدًا.", 85),
+        ("zyn", ["كيف","اشتري","zyn"], "كيف أشتري ZYN؟",
+         "💎 ZYN يُكتسب حاليًا عبر:\n• جمع النقاط في المنصة\n• تحويلها إلى ZYN Token\n\n📌 الشراء المباشر بـPi سيتوفر بعد Mainnet.", 80),
+        ("zyn", ["محفظة","محفظتي"], "أين محفظتي؟",
+         "👛 محفظتك هي محفظة Pi المرتبطة بحسابك.\nلربطها:\n1. اذهب إلى 👤 الحساب\n2. اضغط '🟣 ربط محفظة Pi'\n3. أكمل المصادقة.\n\n🔒 لن نطلب أي مفتاح خاص.", 90),
+
+        # الأقسام المغلقة
+        ("locked", ["لماذا","ai","مغلق"], "لماذا AI مغلق؟",
+         "🤖 قسم AI الموسّع تحت التطوير حاليًا من الإدارة.\n\nسيتم فتح الميزات المتقدمة قريبًا ضمن تحديث قادم.\n\nابقَ معنا! 🚀", 95),
+        ("locked", ["لماذا","nft","مغلق"], "لماذا NFT Studio مغلق؟",
+         "🖼️ قسم NFT Studio قيد التطوير.\n\nسيفتح مع الإطلاق الرسمي للأصول الرقمية.\n\n📢 تابع المنصة للتحديثات.", 90),
+        ("locked", ["متى","يفتح","ai"], "متى يُفتح AI؟",
+         "🤖 الإدارة تعمل على تجهيز الميزات المتقدمة.\n\nسيُفتح قريبًا — ابقَ متابعًا للإشعارات. ✨", 85),
+        ("locked", ["لماذا","قسم","مغلق"], "لماذا القسم مغلق؟",
+         "🔒 هذا القسم مغلق مؤقتًا من الإدارة لتطوير خصائص جديدة.\n\nسيُفتح ضمن تحديث قادم.\nشكرًا لتفهّمك. ✨", 80),
+
+        # AI
+        ("ai", ["كيف","استخدم","ai"], "كيف أستخدم AI؟",
+         "🤖 لاستخدام AI:\n1. افتح المنصة\n2. اضغط على بطاقة 🤖 AI\n3. اكتب سؤالك\n\n📌 مجاني بحدود يومية. للحصول على استخدام أوسع، انتظر ZYNMART+.", 85),
+        ("ai", ["ai","مجاني"], "هل AI مجاني؟",
+         "✅ نعم، الاستخدام الأساسي لـAI مجاني.\n\n💎 الاستخدام المتقدم (بلا حدود، ميزات خاصة) سيكون ضمن ZYNMART+ أو Genesis NFT.", 85),
+        ("ai", ["genesis"], "ما هو Genesis NFT؟",
+         "💎 Genesis NFT عضوية مميزة من الإدارة.\n\n📋 المزايا:\n• استخدام AI بلا حدود\n• وصول مبكر لميزات جديدة\n• نسبة من إيرادات Marketplace NFT\n\n📢 سيُعلن عن التفاصيل قريبًا.", 85),
+
+        # المجتمع والرسائل
+        ("community", ["كيف","انشر","منشور"], "كيف أنشر منشورًا؟",
+         "📝 للنشر في المجتمع:\n1. افتح 👥 المجتمع\n2. اكتب في خانة النص\n3. اضغط 📤 نشر\n\n🎁 مكافأة: +1 نقطة (حتى 3/يوم).", 85),
+        ("community", ["كيف","اراسل"], "كيف أراسل عضوًا؟",
+         "💬 لمراسلة عضو:\n1. افتح 👥 المجتمع\n2. اضغط زر ✉️ بجانب اسمه\n3. اكتب رسالتك\n\n📱 أو من قسم 💬 الرسائل مباشرة.", 85),
+        ("community", ["اشعارات","تنبيهات"], "كيف أرى الإشعارات؟",
+         "🔔 الإشعارات في شريط الأسفل:\n• اضغط 🔔 لرؤية كل الإشعارات\n• العداد يظهر تلقائيًا\n\n📌 تُحدَّث كل 30 ثانية.", 80),
+
+        # عام
+        ("general", ["انت","من"], "من أنت؟",
+         "🤖 أنا AI for — المساعد الرسمي لمنظومة ZYNMART.\n\nأجيب على أسئلتكم وأساعدكم في استخدام المنصة والمتجر.", 75),
+        ("general", ["دعم","مساعدة","تواصل"], "كيف أتواصل مع الدعم؟",
+         "🆘 للدعم:\n1. افتح المنصة\n2. اضغط 🆘 الدعم\n3. أنشئ تذكرة.\n\n📌 أو اكتب هنا وسأساعدك.", 80),
+        ("general", ["خطا","مشكلة","لا","يفتح"], "لا أستطيع الدخول.",
+         "⚠️ تأكد من:\n1. فتح المنصة داخل Pi Browser\n2. إكمال مصادقة Pi\n3. اتصال إنترنت مستقر\n\n🔁 إذا استمرت المشكلة، جرّب تحديث الصفحة أو افتح تذكرة في 🆘 الدعم.", 80),
+        ("general", ["pi","browser"], "ما هو Pi Browser؟",
+         "🌐 Pi Browser هو المتصفح الرسمي لشبكة Pi.\nيُستخدم لتشغيل المنصات داخل Pi Ecosystem.\n\n📱 حمّله من متجر التطبيقات أو من pi.app.", 70),
+        ("general", ["تطبيق","اندرويد","ios"], "هل هناك تطبيق للهاتف؟",
+         "📱 لا يوجد تطبيق منفصل.\nالمنصة تعمل داخل Pi Browser كـWebApp.\n\n🔗 افتحها من Pi Browser مباشرة.", 70),
+    ]
+    import uuid as _uuid
+    for _cat, _kws, _ex, _ans, _pri in _kb_seed:
+        try:
+            cur.execute("""INSERT INTO ai_for_bot_knowledge(knowledge_id, category, keywords, question_example, answer, priority)
+                           VALUES(%s, %s, %s, %s, %s, %s)
+                           ON CONFLICT DO NOTHING""",
+                        (str(_uuid.uuid4()), _cat, _kws, _ex, _ans, _pri))
+        except Exception as _e:
+            print(f"kb seed warning: {_e}")
     # محافظ ZYN (اختياري)
     cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_zyn_wallets (
         identity_key TEXT PRIMARY KEY,
@@ -6298,6 +6398,73 @@ def _level_next_threshold(points_total):
     return None
 
 
+# ============================================================
+# Bot Knowledge Base — ردود فورية بدون استهلاك مفاتيح AI
+# ============================================================
+
+_BOT_KB_CACHE = {"data": None, "ts": 0}
+_BOT_KB_CACHE_TTL = 300  # 5 دقائق
+
+def _bot_knowledge_load():
+    """يُحمّل كل المدخلات النشطة من القاعدة (cache 5 دق)."""
+    import time as _t
+    now = _t.time()
+    if _BOT_KB_CACHE["data"] is not None and (now - _BOT_KB_CACHE["ts"]) < _BOT_KB_CACHE_TTL:
+        return _BOT_KB_CACHE["data"]
+    conn = None
+    entries = []
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return []
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT knowledge_id, category, keywords, answer, priority FROM ai_for_bot_knowledge WHERE active=TRUE ORDER BY priority DESC")
+            for r in cur.fetchall():
+                entries.append({
+                    "id": str(r["knowledge_id"]),
+                    "cat": r["category"],
+                    "kw": [str(k).lower() for k in (r["keywords"] or [])],
+                    "ans": r["answer"],
+                    "pri": int(r["priority"] or 50),
+                })
+        _BOT_KB_CACHE["data"] = entries
+        _BOT_KB_CACHE["ts"] = now
+        return entries
+    except Exception as e:
+        print(f"bot_kb_load error: {e}")
+        return entries
+    finally:
+        _membership_db_release(conn)
+
+
+def _bot_knowledge_lookup(text):
+    """يبحث في القاعدة ويعيد الرد الأنسب (أو None).
+    الاستراتيجية: تطابق keywords (كل كلمة موجودة في النص)."""
+    text_low = " " + (str(text or "").lower()) + " "
+    entries = _bot_knowledge_load()
+    if not entries:
+        return None
+    # مطابقة دقيقة
+    for e in entries:
+        if not e["kw"]:
+            continue
+        if all((" " + k + " ") in text_low for k in e["kw"]):
+            return e["ans"]
+    # مطابقة جزئية (50% من الكلمات على الأقل)
+    best = None
+    best_score = 0
+    for e in entries:
+        if not e["kw"]:
+            continue
+        hits = sum(1 for k in e["kw"] if (" " + k + " ") in text_low)
+        if hits >= max(1, len(e["kw"]) // 2):
+            score = hits * 10 + e["pri"]
+            if score > best_score:
+                best_score = score
+                best = e["ans"]
+    return best
+
+
 def _platform_identity(user):
     """Unified identity: Pi UID takes precedence for Mainnet-ready stability."""
     if user.get("pi_uid"):
@@ -8295,6 +8462,13 @@ def webhook():
                 run_ai_job(group_job)
             return jsonify({"status":"ok"}),200
 
+        # Photo without text → نصيحة (لا استدعاء AI)
+        if msg.get("photo") and not text:
+            reply_to = msg.get("message_id")
+            if reply_to:
+                send_message(chat_id, "📸 رأيت صورتك، لكني أُجيب على الأسئلة النصية.\n\n💡 اكتب سؤالك بوضوح وسأساعدك فورًا.", reply_to=reply_to)
+            return jsonify({"status": "ok"}), 200
+
         # Mention => answer immediately.
         low = text.lower()
         bot_handle = BOT_USERNAME.lower()
@@ -8307,6 +8481,12 @@ def webhook():
                 send_message(chat_id, "👋 أنا هنا. اكتب سؤالك وسأحاول مساعدتك.", reply_to=msg.get("message_id"))
                 return jsonify({"status": "ok"}), 200
             message_id = msg.get("message_id")
+            # 1) القاعدة أولًا — توفير مفاتيح AI
+            kb_answer = _bot_knowledge_lookup(question)
+            if kb_answer:
+                send_message(chat_id, kb_answer, reply_to=message_id)
+                return jsonify({"status": "ok"}), 200
+            # 2) AI كما هو (بدون تغيير)
             def job():
                 search_res = search_official(question) if needs_fresh_search(question) else ""
                 reply = get_ai_response(question, user_name, search_context=search_res)
@@ -8320,6 +8500,10 @@ def webhook():
 
     if chat_type == "private":
         remember_user(msg)
+        # Photo without text → نصيحة
+        if msg.get("photo") and not text:
+            send_message(chat_id, "📸 رأيت صورتك، لكني أُجيب على الأسئلة النصية.\n\n💡 اكتب سؤالك بوضوح وسأساعدك فورًا.")
+            return jsonify({"status": "ok"}), 200
         # Explicit Telegram gateway: starting the bot registers the user as an AI for member.
         # Persistence is mandatory; never claim membership when the durable store is unavailable.
         start_payload = text.split(maxsplit=1)[1].strip() if text.startswith("/start") and len(text.split(maxsplit=1)) > 1 else ""
@@ -8419,8 +8603,12 @@ def webhook():
         if execute_moderation_command(active_group_chat_id or DEFAULT_GROUP_CHAT_ID, user_id, text):
             return jsonify({"status": "ok"}), 200
 
-        # Preserve ordinary private AI reply, but process it outside /webhook so
-        # slow AI/search calls can never make Telegram/Render wait for the result.
+        # 1) القاعدة أولًا — توفير مفاتيح AI
+        kb_answer = _bot_knowledge_lookup(text)
+        if kb_answer:
+            send_message(chat_id, kb_answer)
+            return jsonify({"status": "ok"}), 200
+        # 2) AI كما هو (بدون تغيير)
         def job():
             search_res = search_official(text) if needs_fresh_search(text) else ""
             direct_reply = get_ai_response(text, user_name, search_context=search_res)

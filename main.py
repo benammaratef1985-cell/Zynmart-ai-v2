@@ -8500,10 +8500,6 @@ def webhook():
 
     if chat_type == "private":
         remember_user(msg)
-        # Photo without text → نصيحة
-        if msg.get("photo") and not text:
-            send_message(chat_id, "📸 رأيت صورتك، لكني أُجيب على الأسئلة النصية.\n\n💡 اكتب سؤالك بوضوح وسأساعدك فورًا.")
-            return jsonify({"status": "ok"}), 200
         # Explicit Telegram gateway: starting the bot registers the user as an AI for member.
         # Persistence is mandatory; never claim membership when the durable store is unavailable.
         start_payload = text.split(maxsplit=1)[1].strip() if text.startswith("/start") and len(text.split(maxsplit=1)) > 1 else ""
@@ -8603,12 +8599,8 @@ def webhook():
         if execute_moderation_command(active_group_chat_id or DEFAULT_GROUP_CHAT_ID, user_id, text):
             return jsonify({"status": "ok"}), 200
 
-        # 1) القاعدة أولًا — توفير مفاتيح AI
-        kb_answer = _bot_knowledge_lookup(text)
-        if kb_answer:
-            send_message(chat_id, kb_answer)
-            return jsonify({"status": "ok"}), 200
-        # 2) AI كما هو (بدون تغيير)
+        # Preserve ordinary private AI reply, but process it outside /webhook so
+        # slow AI/search calls can never make Telegram/Render wait for the result.
         def job():
             search_res = search_official(text) if needs_fresh_search(text) else ""
             direct_reply = get_ai_response(text, user_name, search_context=search_res)

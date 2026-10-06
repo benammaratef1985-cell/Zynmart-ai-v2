@@ -6617,31 +6617,33 @@ def _bot_knowledge_load():
 
 def _bot_knowledge_lookup(text):
     """يبحث في القاعدة ويعيد الرد الأنسب (أو None).
-    إذا كان السؤال طويلًا (15+ كلمة) → يتجاوز القاعدة ويذهب إلى AI.
-    الاستراتيجية: تطابق keywords."""
+    - الأسئلة الطويلة (15+ كلمة): قاعدة مطابقة أوسع، ثم AI.
+    - المطابقة: min 2 كلمات من keywords، أو مطابقة ذكية."""
     _txt = str(text or "").strip()
-    # الأسئلة الطويلة تحتاج AI للحصول على رد مفصل
-    if len(_txt.split()) >= 15:
+    if not _txt:
         return None
     text_low = " " + _txt.lower() + " "
     entries = _bot_knowledge_load()
     if not entries:
         return None
-    # مطابقة دقيقة
+    # 1) مطابقة كاملة (كل الكلمات)
     for e in entries:
         if not e["kw"]:
             continue
         if all((" " + k + " ") in text_low for k in e["kw"]):
             return e["ans"]
-    # مطابقة جزئية (50% من الكلمات على الأقل)
+    # 2) مطابقة جزئية (min 2 كلمات، وإذا كان العدد الكلي 2 → كلمة واحدة تكفي)
     best = None
     best_score = 0
     for e in entries:
         if not e["kw"]:
             continue
         hits = sum(1 for k in e["kw"] if (" " + k + " ") in text_low)
-        if hits >= max(1, len(e["kw"]) // 2):
-            score = hits * 10 + e["pri"]
+        needed = max(1, len(e["kw"]) // 2)
+        if len(e["kw"]) <= 3:
+            needed = 1  # قواعد قصيرة: كلمة واحدة تكفي
+        if hits >= needed:
+            score = hits * 100 + e["pri"]
             if score > best_score:
                 best_score = score
                 best = e["ans"]

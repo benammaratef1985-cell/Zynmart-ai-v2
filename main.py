@@ -714,6 +714,30 @@ def _ensure_db_schema(cur):
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_bot_knowledge_active ON ai_for_bot_knowledge(active, priority DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_bot_knowledge_keywords ON ai_for_bot_knowledge USING GIN(keywords)")
+    # ============================================================
+    # Security: Rate Limits + Events
+    # ============================================================
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_rate_limits (
+        identity_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        window_key TEXT NOT NULL,
+        count INTEGER NOT NULL DEFAULT 0,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (identity_key, action, window_key)
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_rate_limits_window ON ai_for_rate_limits(window_key)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_security_events (
+        event_id UUID PRIMARY KEY,
+        identity_key TEXT NOT NULL DEFAULT '',
+        event_type TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'low',
+        details JSONB NOT NULL DEFAULT '{}'::jsonb,
+        ip TEXT NOT NULL DEFAULT '',
+        user_agent TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_security_events_time ON ai_for_security_events(created_at DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_security_events_identity ON ai_for_security_events(identity_key, created_at DESC)")
     # ---- بذور قاعدة المعرفة (تُضاف مرة واحدة) ----
     _kb_seed = [
         # الدخول والمنصة
@@ -6405,6 +6429,73 @@ def _level_next_threshold(points_total):
 _BOT_KB_CACHE = {"data": None, "ts": 0}
 _BOT_KB_CACHE_TTL = 300  # 5 دقائق
 
+# ============================================================
+# Security: Rate Limiting + Audit
+# ============================================================
+
+def _rate_limit(action, identity, window_seconds=60, max_count=10):
+    """يفحص ويُحدّث الحد. يُرجع (allowed: bool, remaining: int).
+    إن تجاوز الحد → يُرجع False + يُسجّل حدثًا أمنيًا."""
+    import time as _t
+    from datetime import datetime as _dt
+    window_key = str(int(_t.time() // window_seconds))
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return (True, max_count)  # fail-open عند فشل DB
+        with conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""INSERT INTO ai_for_rate_limits(identity_key, action, window_key, count)
+                               VALUES(%s,%s,%s,1)
+                               ON CONFLICT(identity_key, action, window_key) DO UPDATE
+                               SET count = ai_for_rate_limits.count + 1, updated_at=NOW()
+                               RETURNING count""",
+                            (identity, action, window_key))
+                row = cur.fetchone()
+                count = int((row or {}).get("count") or 1)
+                if count > max_count:
+                    _security_log_with_cur(cur, identity, "rate_limit_exceeded", "medium", {"action": action, "count": count, "max": max_count})
+                    return (False, 0)
+                return (True, max(0, max_count - count))
+    except Exception as e:
+        print(f"rate_limit error: {e}")
+        return (True, max_count)
+    finally:
+        _membership_db_release(conn)
+
+
+def _security_log_with_cur(cur, identity, event_type, severity, details):
+    """يُسجّل حدثًا أمنيًا (يستخدم cursor مفتوحًا)."""
+    try:
+        import uuid as _u
+        cur.execute("""INSERT INTO ai_for_security_events(event_id, identity_key, event_type, severity, details)
+                       VALUES(%s,%s,%s,%s,%s)""",
+                    (str(_u.uuid4()), str(identity or ""), str(event_type)[:80], str(severity)[:20], json.dumps(details or {}, ensure_ascii=False)))
+    except Exception as e:
+        print(f"security_log error: {e}")
+
+
+def _security_log(identity, event_type, severity="low", details=None, ip="", user_agent=""):
+    """يسجّل حدثًا أمنيًا (يفتح اتصالًا خاصًا)."""
+    conn = None
+    try:
+        conn = _membership_db_connect()
+        if not conn:
+            return
+        import uuid as _u
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute("""INSERT INTO ai_for_security_events(event_id, identity_key, event_type, severity, details, ip, user_agent)
+                               VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+                            (str(_u.uuid4()), str(identity or ""), str(event_type)[:80], str(severity)[:20],
+                             json.dumps(details or {}, ensure_ascii=False), str(ip or "")[:80], str(user_agent or "")[:250]))
+    except Exception as e:
+        print(f"security_log error: {e}")
+    finally:
+        _membership_db_release(conn)
+
+
 def _bot_knowledge_load():
     """يُحمّل كل المدخلات النشطة من القاعدة (cache 5 دق)."""
     import time as _t
@@ -6505,6 +6596,7 @@ def _platform_db_query(fn):
 REPUTATION_EVENT_POINTS={"visit":1,"ai_use":0,"search_use":0,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":1,"message_send":0,"support_ticket":1,"quiz_correct":1}
 
 # ZYN Arcade — ZYN Token Conversion Constants
+_QUIZ_LAST_TS = {}  # in-memory: {identity: last_timestamp}
 ZYN_POINTS_PER_TOKEN = 1000         # 1 ZYN = 1000 ZYN Points
 ZYN_MIN_CONVERSION = 1000           # الحد الأدنى 1000 نقطة (= 1 ZYN)
 ZYN_MAX_DAILY = 500                 # الحد الأقصى اليومي 500 نقطة (= 0.5 ZYN)
@@ -6922,6 +7014,11 @@ def webapp_platform_services():
         r = _platform_db_query(q_like)
         return jsonify({"ok":r is not None, **(r or {})})
     if op=="community_comment":
+        identity = _platform_identity(user)
+        # Rate limit: 10/دقيقة
+        allowed, _ = _rate_limit("community_comment", identity, window_seconds=60, max_count=10)
+        if not allowed:
+            return jsonify({"ok": False, "error": "rate_limit"}), 429
         post_id = str(body.get("post_id","")).strip()
         body_text = str(body.get("body","")).strip()[:2000]
         if not post_id or not body_text: return jsonify({"ok":False,"error":"post_id_and_body_required"}),400
@@ -7138,6 +7235,11 @@ def webapp_platform_services():
         except Exception: pass
         return jsonify({"ok":True, **r})
     if op=="community_post":
+        identity = _platform_identity(user)
+        # Rate limit: 5/دقيقة
+        allowed, _ = _rate_limit("community_post", identity, window_seconds=60, max_count=5)
+        if not allowed:
+            return jsonify({"ok": False, "error": "rate_limit", "message": "منشورات كثيرة جدًا. انتظر دقيقة."}), 429
         post_body = body.get("body","")
         row=_platform_post_create(user,post_body,body.get("image_url",""))
         if not row:
@@ -7164,6 +7266,10 @@ def webapp_platform_services():
             print(f"mentions post error: {_me}")
         return jsonify({"ok":True,"post":row})
     if op=="message_send":
+        _dm_identity = _platform_identity(user)
+        _dm_allowed, _ = _rate_limit("message_send", _dm_identity, window_seconds=60, max_count=20)
+        if not _dm_allowed:
+            return jsonify({"ok": False, "error": "rate_limit", "message": "رسائل كثيرة جدًا. انتظر دقيقة."}), 429
         row=_platform_message_send(user,body.get("recipient"),body.get("body",""));
         if row: _record_reputation_event(user,"message_send",str(row.get("message_id") or uuid.uuid4()))
         return jsonify({"ok":bool(row),"message":row})
@@ -7323,6 +7429,10 @@ def webapp_platform_services():
     if op=="zynmart_plus": return jsonify({"ok":True,"plus":_zynmart_plus_snapshot(user)})
     if op=="zynmart_visit":
         identity = _platform_identity(user)
+        # Rate limit: 5/دقيقة
+        allowed, remaining = _rate_limit("zynmart_visit", identity, window_seconds=60, max_count=5)
+        if not allowed:
+            return jsonify({"ok": False, "error": "rate_limit", "message": "محاولات كثيرة. انتظر دقيقة."}), 429
         def q_zv(cur):
             allowed, remaining = _reward_check_limit(cur, identity, "zynmart_visit")
             if not allowed:
@@ -7387,6 +7497,11 @@ def webapp_platform_services():
 
     if op=="zyn_create_conversion":
         identity = _platform_identity(user)
+        # Rate limit: 3/10 دقائق
+        allowed, _ = _rate_limit("zyn_conversion", identity, window_seconds=600, max_count=3)
+        if not allowed:
+            _security_log(identity, "zyn_conversion_flood", "high", {})
+            return jsonify({"ok": False, "error": "rate_limit", "message": "محاولات كثيرة. انتظر 10 دقائق."}), 429
         pi_uid = str(user.get("pi_uid") or "").strip()
         points_to_spend = int(body.get("points") or 0)
         if points_to_spend < ZYN_MIN_CONVERSION:
@@ -7468,6 +7583,10 @@ def webapp_platform_services():
 
     if op=="arcade_game_reward":
         identity = _platform_identity(user)
+        # Rate limit: 15/دقيقة
+        allowed, _ = _rate_limit("arcade_game", identity, window_seconds=60, max_count=15)
+        if not allowed:
+            return jsonify({"ok": False, "error": "rate_limit"}), 429
         game = str(body.get("game") or "").strip()
         if game not in ("xo_win","rps_win","memory_win"):
             return jsonify({"ok": False, "error": "unknown_game"}), 400
@@ -7553,6 +7672,19 @@ def webapp_platform_services():
 
     if op=="arcade_quiz_answer":
         identity = _platform_identity(user)
+        # Rate limit: 10/دقيقة
+        allowed, _ = _rate_limit("quiz_answer", identity, window_seconds=60, max_count=10)
+        if not allowed:
+            return jsonify({"ok": False, "error": "rate_limit"}), 429
+        # Anti-bot: الحد الأدنى 2 ثانية بين الإجابات
+        _last_key = f"quiz_last:{identity}"
+        import time as _t2
+        now_ts = _t2.time()
+        _last_ts = _QUIZ_LAST_TS.get(_last_key, 0)
+        if _last_ts and (now_ts - _last_ts) < 2:
+            _security_log(identity, "quiz_too_fast", "medium", {"delta": round(now_ts - _last_ts, 2)})
+            return jsonify({"ok": False, "error": "too_fast", "message": "تأنَّ قليلًا في الإجابة."}), 429
+        _QUIZ_LAST_TS[_last_key] = now_ts
         from datetime import date as _date
         day_key = _date.today().isoformat()
         qkey = str(body.get("question_key", "")).strip()

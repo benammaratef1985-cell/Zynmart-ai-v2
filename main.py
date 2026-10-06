@@ -6530,8 +6530,13 @@ def _bot_knowledge_load():
 
 def _bot_knowledge_lookup(text):
     """يبحث في القاعدة ويعيد الرد الأنسب (أو None).
-    الاستراتيجية: تطابق keywords (كل كلمة موجودة في النص)."""
-    text_low = " " + (str(text or "").lower()) + " "
+    إذا كان السؤال طويلًا (15+ كلمة) → يتجاوز القاعدة ويذهب إلى AI.
+    الاستراتيجية: تطابق keywords."""
+    _txt = str(text or "").strip()
+    # الأسئلة الطويلة تحتاج AI للحصول على رد مفصل
+    if len(_txt.split()) >= 15:
+        return None
+    text_low = " " + _txt.lower() + " "
     entries = _bot_knowledge_load()
     if not entries:
         return None
@@ -8594,13 +8599,6 @@ def webhook():
                 run_ai_job(group_job)
             return jsonify({"status":"ok"}),200
 
-        # Photo without text → نصيحة (لا استدعاء AI)
-        if msg.get("photo") and not text:
-            reply_to = msg.get("message_id")
-            if reply_to:
-                send_message(chat_id, "📸 رأيت صورتك، لكني أُجيب على الأسئلة النصية.\n\n💡 اكتب سؤالك بوضوح وسأساعدك فورًا.", reply_to=reply_to)
-            return jsonify({"status": "ok"}), 200
-
         # Mention => answer immediately.
         low = text.lower()
         bot_handle = BOT_USERNAME.lower()
@@ -8611,6 +8609,10 @@ def webhook():
             question = text_without_bot_mention(text)
             if not question:
                 send_message(chat_id, "👋 أنا هنا. اكتب سؤالك وسأحاول مساعدتك.", reply_to=msg.get("message_id"))
+                return jsonify({"status": "ok"}), 200
+            # إذا كانت الرسالة صورة بدون نص صريح
+            if msg.get("photo"):
+                send_message(chat_id, "📸 رأيت صورتك، لكني أُجيب على الأسئلة النصية.\n\n💡 اكتب سؤالك بوضوح وسأساعدك فورًا.", reply_to=msg.get("message_id"))
                 return jsonify({"status": "ok"}), 200
             message_id = msg.get("message_id")
             # 1) القاعدة أولًا — توفير مفاتيح AI

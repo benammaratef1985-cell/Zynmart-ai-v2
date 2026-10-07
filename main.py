@@ -738,6 +738,23 @@ def _ensure_db_schema(cur):
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_ascend_log_identity ON ai_for_ascend_log(identity_key, created_at DESC)")
+    # ZYN ASCEND v2 — Ranks + Streaks + Genesis queue
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_ascend_ranks (
+        identity_key TEXT PRIMARY KEY,
+        rank_key TEXT NOT NULL DEFAULT 'none',
+        rank_label TEXT NOT NULL DEFAULT '',
+        highest_stage TEXT NOT NULL DEFAULT 'iron',
+        total_conversions BIGINT NOT NULL DEFAULT 0,
+        rank_position INTEGER NOT NULL DEFAULT 0,
+        streak_days INT NOT NULL DEFAULT 0,
+        best_streak INT NOT NULL DEFAULT 0,
+        last_activity_at TIMESTAMPTZ,
+        genesis_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+        genesis_position INTEGER,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_ascend_ranks_position ON ai_for_ascend_ranks(rank_position ASC)")
     # ============================================================
     # Security: Rate Limits + Events
     # ============================================================
@@ -4397,6 +4414,12 @@ function renderAscend(){
       <div class="small" style="color:#c8b6ff;margin-top:4px">ارتقِ من الحديد إلى الذهب</div>
     </div>
 
+    <div class="statusBox" id="ascendRank" style="background:linear-gradient(135deg,#4a2e7a,#2a1a4d);color:#fff;text-align:center">
+      <div style="font-size:40px" id="ascendRankEmoji">🥉</div>
+      <div style="font-size:18px;font-weight:800;margin-top:6px" id="ascendRankLabel">Iron Ascender</div>
+      <div class="small" style="opacity:.85;margin-top:6px" id="ascendRankPosition">—</div>
+    </div>
+
     <div class="statusBox" id="ascendPoints" style="background:linear-gradient(135deg,#a66cff,#7b4dd9);color:#fff">
       <div class="small" style="opacity:.85">ZYN Points المتاحة للتحويل</div>
       <div style="font-size:32px;font-weight:800" id="ascendPointsVal">—</div>
@@ -4414,6 +4437,18 @@ function renderAscend(){
       <div id="ascendMsg" class="small" style="margin-top:10px"></div>
     </div>
 
+    <div class="statusBox" id="ascendLegacyBox" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#c8b6ff">
+      <b>📜 إرثك الرقمي</b>
+      <div id="ascendLegacy" style="margin-top:10px">⏳</div>
+    </div>
+
+    <div class="statusBox" id="ascendGenesisBox" style="display:none;background:linear-gradient(135deg,#4a2e7a,#2a1a4d);color:#f5c84b;border:1px solid #f5c84b">
+      <b>🔮 المرحلة القادمة: Genesis</b>
+      <div id="ascendGenesis" class="small" style="margin-top:10px;color:#c8b6ff">⏳</div>
+      <button class="mini" style="margin-top:10px;background:#f5c84b;color:#1a0f2e;border:0;border-radius:12px;padding:8px 16px;font-weight:800" id="ascendTeaserBtn">🔮 استكشاف Genesis</button>
+      <div id="ascendTeaserResult" class="small" style="margin-top:8px"></div>
+    </div>
+
     <div class="statusBox">
       <b>🏅 المتصدرون</b>
       <div id="ascendLeaderboard" style="margin-top:10px">⏳</div>
@@ -4425,6 +4460,151 @@ function renderAscend(){
     </div>
   </section>`;
   loadAscend();
+}
+
+async function loadAscend(){
+  try{
+    let d = await platformSvc('ascend_state');
+    if(!d || !d.ok) throw new Error(d.error || 'load_failed');
+    let a = d.ascend || {};
+    let rank = d.rank || {};
+    let hints = d.hints || {};
+
+    // الرتبة
+    document.getElementById('ascendRankEmoji').textContent = rank.rank_emoji || '🥉';
+    document.getElementById('ascendRankLabel').textContent = rank.rank_label || 'بداية الرحلة';
+    let pos = rank.rank_position || 0;
+    let total = rank.total_players || 1;
+    document.getElementById('ascendRankPosition').textContent = '📍 الموقع: ' + pos + ' من ' + total + ' · ' + (rank.total_conversions || 0) + ' تحويل';
+
+    // النقاط
+    document.getElementById('ascendPointsVal').textContent = Number(d.zyn_points||0);
+    document.getElementById('ascendTotalConverted').textContent = 'إجمالي تحويلاتك: ' + Number(a.total_converted||0) + ' عنصر';
+
+    // المراحل
+    let stages = d.stages || [];
+    let html = '';
+    stages.forEach(function(st){
+      let cur = Number(a[st.key]||0);
+      let tgt = Number(st.target||10);
+      let pct = Math.min(100, Math.round((cur / tgt) * 100));
+      let barColor = '#8c8c8c';
+      if(st.key==='silver') barColor = '#c0c0c0';
+      else if(st.key==='gold') barColor = '#ffd700';
+      else if(st.key==='diamond') barColor = '#39d9ff';
+      else if(st.key==='golden') barColor = 'linear-gradient(90deg,#ff9f1c,#f5c84b)';
+      html += '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center"><b>'+st.emoji+' '+esc(st.name)+'</b><span class="small" style="opacity:.7">'+cur+' / '+tgt+'</span></div><div style="height:6px;background:#eee;border-radius:3px;overflow:hidden;margin-top:5px"><div style="height:100%;background:'+barColor+';width:'+pct+'%"></div></div></div>';
+    });
+    document.getElementById('ascendStages').innerHTML = html;
+
+    // التحويل
+    let pts = Number(d.zyn_points||0);
+    let acts = '';
+    let canIron = pts >= 100;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canIron?'#f5c84b':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canIron?'':'disabled')+' onclick="doAscend(\'zyn_points\')">🥉 100 نقطة → 1 Iron</button>';
+    let canSilver = Number(a.iron||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canSilver?'#c0c0c0':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canSilver?'':'disabled')+' onclick="doAscend(\'iron\')">🥈 10 Iron → 1 Silver</button>';
+    let canGold = Number(a.silver||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canGold?'#ffd700':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canGold?'':'disabled')+' onclick="doAscend(\'silver\')">🥇 10 Silver → 1 Gold</button>';
+    let canDiamond = Number(a.gold||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canDiamond?'#39d9ff':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canDiamond?'':'disabled')+' onclick="doAscend(\'gold\')">💎 10 Gold → 1 Diamond</button>';
+    let canGolden = Number(a.diamond||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:linear-gradient(135deg,#ff9f1c,#f5c84b);color:#1a0f2e;border:0;border-radius:10px;font-weight:800" '+(canGolden?'':'disabled')+' onclick="doAscend(\'diamond\')">👑 10 Diamond → 1 Golden</button>';
+    document.getElementById('ascendActions').innerHTML = acts;
+
+    // الإرث الرقمي
+    let legacy = '<div style="display:flex;justify-content:space-between;padding:5px 0"><span>🏆 أعلى مرحلة:</span><b>'+(rank.rank_label || 'بداية الرحلة')+'</b></div>';
+    legacy += '<div style="display:flex;justify-content:space-between;padding:5px 0"><span>📊 التحويلات الكلية:</span><b>'+(rank.total_conversions || 0)+'</b></div>';
+    legacy += '<div style="display:flex;justify-content:space-between;padding:5px 0"><span>📍 ترتيبك:</span><b>#'+(rank.rank_position || 0)+' من '+(rank.total_players || 1)+'</b></div>';
+    legacy += '<div class="small" style="margin-top:8px;opacity:.75">'+(hints.legacy_note || '')+'</div>';
+    document.getElementById('ascendLegacy').innerHTML = legacy;
+
+    // Genesis Teaser (يظهر إذا كان golden كامل أو تم عرض بعض التقدم)
+    let goldenCount = Number(a.golden||0);
+    if(goldenCount >= 1 || rank.rank_key === 'golden_1' || rank.genesis_eligible){
+      document.getElementById('ascendGenesisBox').style.display = 'block';
+      let gText = '<div style="padding:5px 0">🟡 التقدم: <b>'+goldenCount+' / 10 Golden</b></div>';
+      gText += '<div class="small" style="opacity:.85">'+(hints.genesis_teaser || '')+'</div>';
+      if(rank.genesis_eligible){
+        gText = '<div style="color:#f5c84b;font-weight:800">🎉 أنت مؤهل لمرحلة Genesis!</div>' + gText;
+      }
+      document.getElementById('ascendGenesis').innerHTML = gText;
+      document.getElementById('ascendTeaserBtn').onclick = function(){ loadGenesisTeaser(); };
+    } else {
+      document.getElementById('ascendGenesisBox').style.display = 'none';
+    }
+  }catch(e){
+    document.getElementById('ascendStages').textContent = '⚠️ ' + (e.message || 'تعذر التحميل');
+  }
+  // Leaderboard
+  try{
+    let d2 = await platformSvc('ascend_leaderboard');
+    let rows = (d2 && d2.leaderboard) || [];
+    if(!rows.length){
+      document.getElementById('ascendLeaderboard').innerHTML = '<div class="small">لا يوجد متنافسون بعد. كن الأول!</div>';
+    }else{
+      let html = rows.map(function(r, idx){
+        let medal = idx===0?'👑':idx===1?'🥈':idx===2?'🥉':'#'+(idx+1);
+        let isTop10 = idx < 10;
+        let highlight = isTop10 ? 'background:#fff9e6;padding:6px;border-radius:8px;margin-bottom:4px' : 'padding:6px 0;border-bottom:1px solid #eee';
+        return '<div style="'+highlight+'"><div style="display:flex;justify-content:space-between"><div><b>'+medal+' '+esc(r.name||'عضو')+'</b></div><div class="small">🥉'+Number(r.iron||0)+' 🥈'+Number(r.silver||0)+' 🥇'+Number(r.gold||0)+' 💎'+Number(r.diamond||0)+' 👑'+Number(r.golden||0)+'</div></div></div>';
+      }).join('');
+      document.getElementById('ascendLeaderboard').innerHTML = html + '<div class="small" style="margin-top:8px;opacity:.7">🏆 التواجد في Top 10 يمنحك مكانة مميزة في المرحلة القادمة.</div>';
+    }
+  }catch(e){
+    document.getElementById('ascendLeaderboard').textContent = '⚠️ تعذر تحميل المتصدرين';
+  }
+  // History
+  try{
+    let d3 = await platformSvc('ascend_history');
+    let rows = (d3 && d3.history) || [];
+    if(!rows.length){
+      document.getElementById('ascendHistory').innerHTML = 'لا توجد تحويلات بعد.';
+    }else{
+      document.getElementById('ascendHistory').innerHTML = rows.map(function(h){
+        return '<div style="padding:4px 0;border-top:1px solid #eee"><b>'+esc(h.from)+' → '+esc(h.to)+'</b> <span class="small" style="opacity:.6">('+Number(h.amount||0)+') · '+esc(timeAgo(h.created_at))+'</span></div>';
+      }).join('');
+    }
+  }catch(e){}
+}
+
+async function doAscend(from){
+  let msg = document.getElementById('ascendMsg');
+  if(msg) msg.textContent = '⏳ جاري التحويل...';
+  try{
+    let d = await platformSvc('ascend_convert', {from: from});
+    if(!d || !d.ok) throw new Error((d && d.error) || 'convert_failed');
+    if(msg) msg.innerHTML = '<span style="color:#0a6b3a">✅ تم التحويل بنجاح!</span>';
+    setTimeout(loadAscend, 500);
+  }catch(e){
+    let m = e.message || '';
+    if(m === 'insufficient') m = 'لا تملك رصيدًا كافيًا';
+    if(msg) msg.innerHTML = '<span style="color:#a33">⚠️ ' + m + '</span>';
+  }
+}
+
+async function loadGenesisTeaser(){
+  let r = document.getElementById('ascendTeaserResult');
+  if(r) r.innerHTML = '⏳ جاري تحميل المعلومات...';
+  try{
+    let d = await platformSvc('ascend_genesis_teaser');
+    if(!d || !d.ok) throw new Error(d.error || 'teaser_failed');
+    let html = '<div class="statusBox" style="background:#1a1a2e;color:#c8b6ff;margin-top:8px">';
+    html += '<div style="font-size:16px;font-weight:800;color:#f5c84b">🔮 Genesis</div>';
+    html += '<div class="small" style="margin-top:6px">' + esc(d.teaser_text || '') + '</div>';
+    html += '<div style="margin-top:8px"><b>🟡 تقدمك:</b> ' + Number(d.golden_progress||0) + ' / 10 Golden</div>';
+    html += '<div class="small" style="opacity:.7;margin-top:4px">👥 في قائمة الانتظار: ' + Number(d.waiting_count||0) + '</div>';
+    if(d.eligible){
+      html += '<div style="color:#31e981;font-weight:800;margin-top:8px">🎉 أنت مؤهل! تفاصيل أكثر قريبًا.</div>';
+    } else {
+      html += '<div class="small" style="color:#f5c84b;margin-top:8px">📍 استمر — الفارق يُبنى بالصبر.</div>';
+    }
+    html += '<div class="small" style="opacity:.6;margin-top:8px">' + esc(d.legacy_note || '') + '</div>';
+    html += '</div>';
+    if(r) r.innerHTML = html;
+  }catch(e){
+    if(r) r.innerHTML = '<div style="color:#a33">⚠️ ' + (e.message || 'تعذر التحميل') + '</div>';
+  }
 }
 
 async function loadAscend(){
@@ -6955,6 +7135,26 @@ ASCEND_STAGES = [
 ]
 ASCEND_STAGE_MAP = {s["key"]: s for s in ASCEND_STAGES}
 
+# ZYN ASCEND v2 — الرتب
+ASCEND_RANKS = [
+    {"key":"none",       "label":"",                  "min_stage":"iron",    "emoji":""},
+    {"key":"iron_1",     "label":"Iron Ascender",     "min_stage":"iron",    "emoji":"🥉", "min_count":1},
+    {"key":"silver_1",   "label":"Silver Seeker",     "min_stage":"silver",  "emoji":"🥈", "min_count":1},
+    {"key":"gold_1",     "label":"Gold Pioneer",      "min_stage":"gold",    "emoji":"🥇", "min_count":1},
+    {"key":"diamond_1",  "label":"Crystal Elite",     "min_stage":"diamond", "emoji":"💎", "min_count":1},
+    {"key":"golden_1",   "label":"Golden Legend",     "min_stage":"golden",  "emoji":"👑", "min_count":1},
+    {"key":"genesis",    "label":"Genesis Witness",   "min_stage":"golden",  "emoji":"🔮", "min_count":10},
+]
+
+# ZYN ASCEND v2 — نصوص إشارات ذكية (Lore)
+ASCEND_HINTS = {
+    "genesis_locked": "🔮 المرحلة القادمة قيد الإعداد — أخبار قريبًا.",
+    "genesis_teaser": "🔮 Genesis: مكان خاص لأولئك الذين وصلوا للذهبي. تابعنا.",
+    "golden_welcome": "👑 أنت الآن Golden Legend. النخبة الحقيقية تُبنى بالصبر والمثابرة.",
+    "top_10_bonus": "🏆 التواجد في Top 10 يمنحك مكانة مميزة في المرحلة القادمة.",
+    "legacy_note": "📜 إرثك الرقمي يُبنى هنا. كل تحويل يسجّل في قصتك.",
+}
+
 _QUIZ_LAST_TS = {}  # in-memory: {identity: last_timestamp}
 ZYN_POINTS_PER_TOKEN = 1000         # 1 ZYN = 1000 ZYN Points
 ZYN_MIN_CONVERSION = 1000           # الحد الأدنى 1000 نقطة (= 1 ZYN)
@@ -7872,7 +8072,55 @@ def webapp_platform_services():
             row = cur.fetchone()
             return int((row or {}).get("points") or 0)
         pts = _platform_db_query(q_pts) or 0
-        return jsonify({"ok":True, "ascend": r, "zyn_points": pts, "stages": ASCEND_STAGES})
+        # الرتبة + الإرث
+        def q_rank(cur):
+            cur.execute("SELECT rank_key, rank_label, highest_stage, total_conversions, rank_position, streak_days, best_streak, genesis_eligible, genesis_position FROM ai_for_ascend_ranks WHERE identity_key=%s", (identity,))
+            row = cur.fetchone()
+            # احسب الرتبة من الحالة الحالية إن لم يوجد صف
+            current_stage = "iron"
+            total_conv = r.get("total_converted", 0)
+            if r.get("golden", 0) >= 10: current_stage = "golden"
+            elif r.get("diamond", 0) >= 1: current_stage = "diamond"
+            elif r.get("gold", 0) >= 1: current_stage = "gold"
+            elif r.get("silver", 0) >= 1: current_stage = "silver"
+            elif r.get("iron", 0) >= 1: current_stage = "iron"
+            # ابحث عن الرتبة
+            rank = None
+            for rk in reversed(ASCEND_RANKS):
+                if rk["min_stage"] == current_stage and total_conv >= rk.get("min_count", 1):
+                    rank = rk
+                    break
+            if not rank: rank = ASCEND_RANKS[0]
+            # الموقع في leaderboard
+            cur.execute("SELECT COUNT(*) AS n FROM ai_for_ascend_players WHERE (golden*1000000 + diamond*10000 + gold*100 + silver) > (SELECT (golden*1000000 + diamond*10000 + gold*100 + silver) FROM ai_for_ascend_players WHERE identity_key=%s)", (identity,))
+            pos_row = cur.fetchone() or {}
+            position = int(pos_row.get("n") or 0) + 1
+            cur.execute("SELECT COUNT(*) AS n FROM ai_for_ascend_players")
+            total_row = cur.fetchone() or {}
+            total_players = int(total_row.get("n") or 1)
+            genesis_eligible = (current_stage == "golden" and r.get("golden", 0) >= 10)
+            return {
+                "rank_key": rank["key"],
+                "rank_label": rank["label"],
+                "rank_emoji": rank["emoji"],
+                "highest_stage": current_stage,
+                "total_conversions": total_conv,
+                "rank_position": position,
+                "total_players": total_players,
+                "streak_days": int((row or {}).get("streak_days") or 0),
+                "best_streak": int((row or {}).get("best_streak") or 0),
+                "genesis_eligible": genesis_eligible,
+                "genesis_position": int((row or {}).get("genesis_position") or 0) if row else None,
+            }
+        rank_info = _platform_db_query(q_rank) or {}
+        return jsonify({
+            "ok": True,
+            "ascend": r,
+            "zyn_points": pts,
+            "stages": ASCEND_STAGES,
+            "rank": rank_info,
+            "hints": ASCEND_HINTS,
+        })
 
     if op=="ascend_convert":
         identity = _platform_identity(user)
@@ -7970,6 +8218,27 @@ def webapp_platform_services():
         if r.get("error") == "invalid_source":
             return jsonify({"ok":False, **r}),400
         return jsonify({"ok":True, **r})
+
+    if op=="ascend_genesis_teaser":
+        identity = _platform_identity(user)
+        def q_teaser(cur):
+            cur.execute("SELECT iron,silver,gold,diamond,golden,total_converted FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+            row = cur.fetchone() or {}
+            golden_count = int(row.get("golden") or 0)
+            eligible = golden_count >= 10
+            # كم مستخدم في قائمة الانتظار
+            cur.execute("SELECT COUNT(*) AS n FROM ai_for_ascend_players WHERE golden >= 10")
+            waiting_row = cur.fetchone() or {}
+            waiting = int(waiting_row.get("n") or 0)
+            return {
+                "eligible": eligible,
+                "golden_progress": golden_count,
+                "waiting_count": waiting,
+                "teaser_text": ASCEND_HINTS["genesis_teaser"],
+                "legacy_note": ASCEND_HINTS["legacy_note"],
+            }
+        r = _platform_db_query(q_teaser)
+        return jsonify({"ok": True, **(r or {})})
 
     if op=="ascend_leaderboard":
         def q_lb(cur):

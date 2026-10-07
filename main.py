@@ -714,6 +714,30 @@ def _ensure_db_schema(cur):
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_bot_knowledge_active ON ai_for_bot_knowledge(active, priority DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_bot_knowledge_keywords ON ai_for_bot_knowledge USING GIN(keywords)")
+    # ZYN ASCEND — Prestige Progression System
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_ascend_players (
+        identity_key TEXT PRIMARY KEY,
+        iron BIGINT NOT NULL DEFAULT 0,
+        silver BIGINT NOT NULL DEFAULT 0,
+        gold BIGINT NOT NULL DEFAULT 0,
+        diamond BIGINT NOT NULL DEFAULT 0,
+        golden BIGINT NOT NULL DEFAULT 0,
+        total_converted BIGINT NOT NULL DEFAULT 0,
+        stage TEXT NOT NULL DEFAULT 'iron',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_ascend_updated ON ai_for_ascend_players(updated_at DESC)")
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_ascend_log (
+        log_id UUID PRIMARY KEY,
+        identity_key TEXT NOT NULL,
+        action TEXT NOT NULL,
+        from_currency TEXT NOT NULL DEFAULT '',
+        to_currency TEXT NOT NULL DEFAULT '',
+        amount BIGINT NOT NULL DEFAULT 0,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_ascend_log_identity ON ai_for_ascend_log(identity_key, created_at DESC)")
     # ============================================================
     # Security: Rate Limits + Events
     # ============================================================
@@ -3457,6 +3481,7 @@ PLATFORM_SECTION_META = {
     "revenue": ("💰", "مركز الدخل", "الاشتراكات والإعلانات والخدمات التجارية بأمان"),
     "external_apps": ("🔗", "التطبيقات الخارجية", "بوابة تطبيقات خارجية — Pi Browser والويب"),
     "nft": ("🖼️", "NFT Studio", "مساحة تصميم وإدارة NFT وبوابة عالمية للأصول الرقمية"),
+    "ascend": ("🏆", "ZYN ASCEND", "ارتقِ من الحديد إلى الذهب — نظام تطور طويل المدى"),
 }
 PLATFORM_STATUS = {
     "ai": {"active": ["دردشة AI", "بحث موثوق", "تحليل", "كتابة", "تلخيص", "ترجمة", "برمجة"], "soon": ["توليد الصور داخل التطبيق", "الفيديو", "الصوت"]},
@@ -3482,7 +3507,8 @@ PLATFORM_STATUS = {
     "autocore": {"active": ["واجهة مستقلة داخل AI for", "فصل الكود والصلاحيات", "تشغيل مستقل عن واجهة AI for", "Kill Switch / سجل تدقيق مخطط"], "soon": ["ربط الخدمة المستقلة", "التنفيذ التجاري الفعلي", "طبقة التسوية الآمنة"]},
     "revenue": {"active": ["Revenue Safety Gate", "منع المقامرة والـspam والنقرات الوهمية", "إخفاء البيانات المالية الشخصية", "تمييز المحتوى المدفوع بوضوح"], "soon": ["ZYNMART+", "شبكات الإعلانات", "Rewarded Ads وفق سياسات المزود", "Promoted Products/Stores", "خطط Business", "الفوترة والتسوية الآمنة"]},
     "external_apps": {"active": ["إضافة تطبيق خارجي بالرابط", "استخراج الاسم والهوية البصرية عند توفرها", "فتح مباشر للتطبيق", "تتبع زيارات الوصول داخل AI for"], "soon": ["برامج إحالة واتفاقيات Revenue Share", "Featured Apps", "خطط Business للتطبيقات"]},
-    "nft": {"active": ["مسودات المشاريع", "إنشاء Metadata JSON", "إدارة المشاريع", "مولد صورة NFT بخادم ذاتي عند الإعداد", "Marketplace ZynMart NFT", "الأسعار والمزادات والعروض", "شموع من صفقات Blockchain المؤكدة"], "soon": ["Minting تلقائي عبر خدمة توقيع آمنة", "التسوية التجارية الكاملة على السلسلة", "ZYN بعد الاعتماد"]}
+    "nft": {"active": ["مسودات المشاريع", "إنشاء Metadata JSON", "إدارة المشاريع", "مولد صورة NFT بخادم ذاتي عند الإعداد", "Marketplace ZynMart NFT", "الأسعار والمزادات والعروض", "شموع من صفقات Blockchain المؤكدة"], "soon": ["Minting تلقائي عبر خدمة توقيع آمنة", "التسوية التجارية الكاملة على السلسلة", "ZYN بعد الاعتماد"]},
+    "ascend": {"active": ["5 مراحل تطور", "نظام تحويل داخلي", "Leaderboard", "سجل التحويلات"], "soon": ["NFT Genesis بعد الوصول للذهبي", "Tournament Mode", "مكافآت Streak"]}
 }
 
 def _webapp_data_check(init_data):
@@ -4342,11 +4368,18 @@ function setNav(id){document.querySelectorAll('.nav').forEach(x=>x.classList.rem
 function goHome(){setNav('n-home');renderHome()}
 function applyTheme(){const t=state?.theme||{};Object.entries(t).forEach(([k,v])=>{if(typeof v==='string'&&/^--[A-Za-z0-9_-]+$/.test(k))document.documentElement.style.setProperty(k,v)})}
 function renderHome(){document.getElementById('view').innerHTML=`<section class="hero"><h1>🌐 AI for</h1><p>منصة موحدة تجمع الذكاء الاصطناعي والبحث والأدوات والتطبيقات المستقلة، مع فصل واضح بين ما هو متاح وما هو قيد التطوير.</p></section><div class="banner"><b>🟢 النظام متصل</b><div class="small">الدور: ${state.role==='owner'?'Owner':state.role==='admin'?'Admin':'User'} · الحماية مفعلة · كل ميزة غير جاهزة تظهر 🚧 قريبًا</div></div><div class="card" style="margin:14px 0"><h3>💳 Pi Payments</h3><p class="small">${window.PI_PAYMENTS_ENABLED?'دفع Pi مفعّل على '+(window.PI_SANDBOX?'Testnet':'Mainnet')+' بمبلغ '+Number(window.PI_PAYMENT_AMOUNT).toFixed(4)+' Pi.':'دفع Pi غير مفعّل حاليًا.'}</p><div class="actions"><button class="action" onclick="testPiPayment()">💳 دفع Pi</button></div><div id="paymentMsg" class="small" style="margin-top:8px"></div></div><div class="grid">${specialCards()}${state.sections.filter(s=>!['autocore','revenue','market'].includes(s.key)).map(card).join('')}</div>`}
-function specialCards(){let has=k=>state.sections.some(s=>s.key===k&&s.public_open);let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer" onclick="trackZynMartVisit()"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق (+10 نقاط)</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
+function specialCards(){
+  let has=k=>state.sections.some(s=>s.key===k&&s.public_open);
+  // ZYN ASCEND — بطاقة ذكية (تعرض "قريبًا" إذا كانت مغلقة)
+  let ascendOpen = (state.access && state.access.public_open_sections && state.access.public_open_sections.indexOf('ascend') >= 0);
+  let isPrivileged = (state.role==='owner'||state.role==='admin');
+  let ascendActive = ascendOpen || isPrivileged;
+  let ascendBadge = ascendActive ? '<span class="badge" style="background:#f5c84b;color:#1a0f2e;font-weight:800">👑 ALPHA</span>' : '<span class="badge soon" style="background:#3a2e0c;color:#ffd84d;font-weight:800">🔒 قريبًا</span>';
+  let ascendCard = '<button class="card" onclick="openSection(\'ascend\')" style="background:linear-gradient(135deg,#2a1a4d,#1a0f2e);border:1px solid #7b4dd9;box-shadow:0 8px 24px rgba(123,77,217,.25)"><div class="ico" style="font-size:36px">🏆</div><h3 style="color:#f5c84b">ZYN ASCEND</h3><p style="color:#c8b6ff">ارتقِ عبر 5 مراحل — من Iron إلى Golden. اجمع النقاط واصعد.</p>'+ascendBadge+'</button>';let ext=has('external_apps')?`<button class="card" onclick="openSection('external_apps')"><div class="ico">🔗</div><h3>التطبيقات الخارجية</h3><p>بوابة وصول للتطبيقات الخارجية وPi Browser.</p><span class="badge external">↗ فتح</span></button>`:'';let z=has('market')?`<a class="card zyn" href="${esc(state.links?.zynmart||'')}" target="_blank" rel="noopener noreferrer" onclick="trackZynMartVisit()"><img class="logo" src="${state.assets?.zynmart_logo||''}" alt="ZYNMART"><h3>ZYNMART</h3><p>بوابة الوصول إلى تطبيق ZYNMART المستقل.</p><span class="badge external">↗ فتح التطبيق (+10 نقاط)</span></a>`:'';let a=has('autocore')?`<button class="card autocore" onclick="openSection('autocore')"><div class="ico">🚀</div><h3>AUTO CORE</h3><p>بوابة إلى الوكيل المستقل مع بقاء محركه خارج AI for.</p><span class="badge">واجهة جاهزة</span></button>`:'';let r=has('revenue')?`<button class="card" onclick="openSection('revenue')"><div class="ico">💰</div><h3>مركز الدخل</h3><p>الخدمات التجارية ضمن قواعد أمان صارمة.</p><span class="badge soon">🛡️ آمن أولًا</span></button>`:'';return z+a+r}
 function card(s){return `<button class="card" onclick="openSection('${s.key}')"><div class="ico">${s.icon}</div><h3>${esc(s.title)}</h3><p>${esc(s.description)}</p><span class="badge ${s.state==='soon'?'soon':''}">${s.state==='active'?'🟢 متاح':'🚧 قريبًا'}</span></button>`}
 function openZynMart(){let url=state.links?.zynmart;if(!url)return;const a=document.createElement('a');a.href=url;a.target='_blank';a.rel='noopener noreferrer';a.style.display='none';document.body.appendChild(a);a.click();setTimeout(()=>a.remove(),1000)}
 function openAutoCore(){let url=state.links?.auto_core;if(!url){alert('🚀 واجهة Auto Core جاهزة، لكن رابط الخدمة المستقلة لم يُربط بعد.');return}window.location.assign(url)}
-function openSection(key){let s=state.sections.find(x=>x.key===key);let privileged=(state.role==='owner'||state.role==='admin');if(!s&&!privileged){setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>بانتظار تفعيل المالك</h2><p class="small">هذا القسم موجود في المنصة لكنه مغلق حاليًا. سيظهر محتواه للمستخدمين بعد أن يفعّله المالك من مركز تحكم المالك.</p><div class="statusBox"><div class="row">الدور الحالي: <span class="warn">User</span></div><div class="row">صلاحية الإدارة: <span class="danger">غير متاحة</span></div><div class="row">إعدادات المالك: <span class="danger">خاصة بالمالك فقط</span></div></div></div>';return}if(!s)return;if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}if(key==='stores'){renderNFTMarketplace();return}if(key==='tools'){toolsBox();return}if(key==='account'){accountBox();return}if(key==='support'){supportBox();return}if(key==='community'){communityBox();return}if(key==='messages'){messagesBox();return}if(key==='rewards'){rewardsBox();return}if(key==='plus'){plusBox();return}if(key==='fun'){funBox();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
+function openSection(key){let s=state.sections.find(x=>x.key===key);let privileged=(state.role==='owner'||state.role==='admin');if(!s&&!privileged){setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>بانتظار تفعيل المالك</h2><p class="small">هذا القسم موجود في المنصة لكنه مغلق حاليًا. سيظهر محتواه للمستخدمين بعد أن يفعّله المالك من مركز تحكم المالك.</p><div class="statusBox"><div class="row">الدور الحالي: <span class="warn">User</span></div><div class="row">صلاحية الإدارة: <span class="danger">غير متاحة</span></div><div class="row">إعدادات المالك: <span class="danger">خاصة بالمالك فقط</span></div></div></div>';return}if(!s)return;if(!s.public_open&&!privileged){document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>هذا القسم مغلق حاليًا</h2><p class="small">سيتم فتحه عندما يصبح متاحًا من إعدادات الوصول الخارجية.</p></div>';return}setNav(key==='ai'?'n-ai':key==='search'?'n-search':'n-more');if(key==='ascend'){renderAscend();return}if(key==='autocore'){renderAutoCore();return}if(key==='revenue'){renderRevenue();return}if(key==='external_apps'){renderExternalApps();return}if(key==='nft'){renderNFTStudio();return}if(key==='stores'){renderNFTMarketplace();return}if(key==='tools'){toolsBox();return}if(key==='account'){accountBox();return}if(key==='support'){supportBox();return}if(key==='community'){communityBox();return}if(key==='messages'){messagesBox();return}if(key==='rewards'){rewardsBox();return}if(key==='plus'){plusBox();return}if(key==='fun'){funBox();return}document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← رجوع</button><section class="detail"><div class="sectionTitle">${s.icon} ${esc(s.title)}</div><p class="small">${esc(s.description)}</p><div class="statusBox"><b>الحالة</b>${s.active.map(x=>`<div class="row"><span class="ok">✓</span> ${esc(x)}</div>`).join('')}${s.soon.map(x=>`<div class="row"><span class="warn">🚧</span> ${esc(x)} — قريبًا</div>`).join('')}</div>${key==='pi'?'<button class="action" onclick="piStatus()">📊 عرض حالة Pi الحالية</button>':''}${key==='ai'?'<button class="action" onclick="aiBox()">💬 فتح الدردشة</button>':''}${key==='search'?'<button class="action" onclick="searchBox()">🔎 اختبار البحث الموثوق</button>':''}${key==='news'?'<button class="action" onclick="searchBox()">📰 اختبار البحث الإخباري</button>':''}${key==='content'?'<button class="action" onclick="contentBox()">🎨 فتح مساحة المحتوى</button>':''}${key==='analytics'?'<button class="action" onclick="analyticsBox()">📊 فتح التحليلات</button>':''}</section>`}
 function more(){setNav('n-more');let allKeys=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps','nft'];let meta={};(state.sections||[]).forEach(x=>meta[x.key]=x);let labels={ai:'AI',search:'بحث',market:'السوق',stores:'المتاجر',community:'المجتمع',messages:'الرسائل',news:'الأخبار',pi:'Pi',content:'المحتوى',analytics:'التحليلات',tools:'الأدوات',fun:'الترفيه',plus:'Plus',ads:'الإعلانات',rewards:'المكافآت',account:'الحساب',security:'الأمان',knowledge:'المعرفة',support:'الدعم',lab:'ZYN LAB',autocore:'AUTO CORE',revenue:'مركز الدخل',external_apps:'التطبيقات الخارجية',nft:'NFT'};let cards=allKeys.map(k=>{let s=meta[k];if(s)return card(s);return `<button class="card" onclick="openSection('${k}')"><div class="ico">🔒</div><h3>${esc(labels[k]||k)}</h3><p>بانتظار تفعيل المالك.</p><span class="badge soon">🔒 مغلق حاليًا</span></button>`}).join('');document.getElementById('view').innerHTML=`<section class="hero"><h1>المزيد</h1><p>الأقسام المفتوحة متاحة للمستخدمين. الأقسام الأخرى تنتظر تفعيل المالك.</p></section><div class="grid">${cards}</div>`}
 async function renderExternalApps(){
  document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔗 التطبيقات الخارجية</div><p class="small">تطبيقات مستقلة يمكن فتحها مباشرة. هوية التطبيق تُستخرج من بياناته العامة عند الإضافة عندما تكون متاحة.</p><div id="externalAppsView" class="grid"></div></section>`;
@@ -4355,6 +4388,139 @@ async function renderExternalApps(){
  r.innerHTML=apps.filter(a=>a.public_open||state.role!=='user').map(a=>`<button class="card" onclick="openExternalApp('${esc(a.app_id)}')">${a.icon_url?`<img src="${esc(a.icon_url)}" alt="" style="width:54px;height:54px;object-fit:contain;border-radius:14px;background:#0b151e">`:'<div class="ico">🔗</div>'}<h3>${esc(a.name)}</h3><p>${esc(a.description||a.host)}</p><span class="badge external">↗ فتح التطبيق</span></button>`).join('');
 }
 async function openExternalApp(id){try{let d=await api('/api/app/external-apps/'+encodeURIComponent(id)+'/open',{method:'POST',body:'{}'});if(!d.ok)throw new Error(d.error||'app_unavailable');window.location.assign(d.url)}catch(e){alert('⚠️ تعذر فتح التطبيق: '+(e.message||''))}}
+function renderAscend(){
+  document.getElementById('view').innerHTML=`
+  <button class="back" onclick="goHome()">← المنصة</button>
+  <section class="detail">
+    <div class="sectionTitle" style="text-align:center;background:linear-gradient(135deg,#2a1a4d,#1a0f2e);color:#f5c84b;padding:14px;border-radius:16px;margin-bottom:14px;border:1px solid #7b4dd9">
+      🏆 ZYN ASCEND
+      <div class="small" style="color:#c8b6ff;margin-top:4px">ارتقِ من الحديد إلى الذهب</div>
+    </div>
+
+    <div class="statusBox" id="ascendPoints" style="background:linear-gradient(135deg,#a66cff,#7b4dd9);color:#fff">
+      <div class="small" style="opacity:.85">ZYN Points المتاحة للتحويل</div>
+      <div style="font-size:32px;font-weight:800" id="ascendPointsVal">—</div>
+      <div class="small" id="ascendTotalConverted" style="opacity:.85;margin-top:4px"></div>
+    </div>
+
+    <div class="statusBox">
+      <b>🎯 مراحل الصعود</b>
+      <div id="ascendStages" style="margin-top:10px">⏳</div>
+    </div>
+
+    <div class="statusBox">
+      <b>🔄 التحويل</b>
+      <div id="ascendActions" style="margin-top:10px">⏳</div>
+      <div id="ascendMsg" class="small" style="margin-top:10px"></div>
+    </div>
+
+    <div class="statusBox">
+      <b>🏅 المتصدرون</b>
+      <div id="ascendLeaderboard" style="margin-top:10px">⏳</div>
+    </div>
+
+    <div class="statusBox">
+      <b>📜 سجل تحويلاتك</b>
+      <div id="ascendHistory" class="small" style="margin-top:10px">⏳</div>
+    </div>
+  </section>`;
+  loadAscend();
+}
+
+async function loadAscend(){
+  try{
+    let d = await platformSvc('ascend_state');
+    if(!d || !d.ok) throw new Error(d.error || 'load_failed');
+    let a = d.ascend || {};
+    document.getElementById('ascendPointsVal').textContent = Number(d.zyn_points||0);
+    document.getElementById('ascendTotalConverted').textContent = 'إجمالي تحويلاتك: ' + Number(a.total_converted||0) + ' عنصر';
+    // رسم المراحل
+    let stages = d.stages || [];
+    let html = '';
+    stages.forEach(function(st, idx){
+      let cur = Number(a[st.key]||0);
+      let tgt = Number(st.target||10);
+      let pct = Math.min(100, Math.round((cur / tgt) * 100));
+      let barColor = '#f5c84b';
+      if(st.key==='iron') barColor = '#8c8c8c';
+      else if(st.key==='silver') barColor = '#c0c0c0';
+      else if(st.key==='gold') barColor = '#ffd700';
+      else if(st.key==='diamond') barColor = '#39d9ff';
+      else if(st.key==='golden') barColor = '#ff9f1c';
+      html += '<div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:center"><b>'+st.emoji+' '+esc(st.name)+'</b><span class="small" style="opacity:.7">'+cur+' / '+tgt+'</span></div><div style="height:6px;background:#eee;border-radius:3px;overflow:hidden;margin-top:5px"><div style="height:100%;background:'+barColor+';width:'+pct+'%"></div></div></div>';
+    });
+    document.getElementById('ascendStages').innerHTML = html;
+
+    // أزرار التحويل
+    let pts = Number(d.zyn_points||0);
+    let acts = '';
+    // Iron من ZYN Points
+    let canIron = pts >= 100;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canIron?'#f5c84b':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canIron?'':'disabled')+' onclick="doAscend(\'zyn_points\')">🥉 100 نقطة → 1 Iron</button>';
+    // Silver من Iron
+    let canSilver = Number(a.iron||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canSilver?'#c0c0c0':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canSilver?'':'disabled')+' onclick="doAscend(\'iron\')">🥈 10 Iron → 1 Silver</button>';
+    // Gold من Silver
+    let canGold = Number(a.silver||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canGold?'#ffd700':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canGold?'':'disabled')+' onclick="doAscend(\'silver\')">🥇 10 Silver → 1 Gold</button>';
+    // Diamond من Gold
+    let canDiamond = Number(a.gold||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:'+(canDiamond?'#39d9ff':'#eee')+';border:0;border-radius:10px;font-weight:700" '+(canDiamond?'':'disabled')+' onclick="doAscend(\'gold\')">💎 10 Gold → 1 Diamond</button>';
+    // Golden من Diamond
+    let canGolden = Number(a.diamond||0) >= 10;
+    acts += '<button class="mini" style="display:block;width:100%;text-align:right;margin-top:6px;padding:10px;background:linear-gradient(135deg,#ff9f1c,#f5c84b);color:#1a0f2e;border:0;border-radius:10px;font-weight:800" '+(canGolden?'':'disabled')+' onclick="doAscend(\'diamond\')">👑 10 Diamond → 1 Golden</button>';
+    document.getElementById('ascendActions').innerHTML = acts;
+  }catch(e){
+    document.getElementById('ascendStages').textContent = '⚠️ ' + (e.message || 'تعذر التحميل');
+  }
+  // Leaderboard
+  try{
+    let d2 = await platformSvc('ascend_leaderboard');
+    let rows = (d2 && d2.leaderboard) || [];
+    if(!rows.length){
+      document.getElementById('ascendLeaderboard').innerHTML = '<div class="small">لا يوجد متنافسون بعد. كن الأول!</div>';
+    }else{
+      let html = rows.map(function(r, idx){
+        let medal = idx===0?'👑':idx===1?'🥈':idx===2?'🥉':'#'+(idx+1);
+        return '<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #eee"><div><b>'+medal+' '+esc(r.name||'عضو')+'</b></div><div class="small">🥉'+Number(r.iron||0)+' 🥈'+Number(r.silver||0)+' 🥇'+Number(r.gold||0)+' 💎'+Number(r.diamond||0)+' 👑'+Number(r.golden||0)+'</div></div>';
+      }).join('');
+      document.getElementById('ascendLeaderboard').innerHTML = html;
+    }
+  }catch(e){
+    document.getElementById('ascendLeaderboard').textContent = '⚠️ تعذر تحميل المتصدرين';
+  }
+  // History
+  try{
+    let d3 = await platformSvc('ascend_history');
+    let rows = (d3 && d3.history) || [];
+    if(!rows.length){
+      document.getElementById('ascendHistory').innerHTML = 'لا توجد تحويلات بعد.';
+    }else{
+      document.getElementById('ascendHistory').innerHTML = rows.map(function(h){
+        return '<div style="padding:4px 0;border-top:1px solid #eee"><b>'+esc(h.from)+' → '+esc(h.to)+'</b> <span class="small" style="opacity:.6">('+Number(h.amount||0)+') · '+esc(timeAgo(h.created_at))+'</span></div>';
+      }).join('');
+    }
+  }catch(e){}
+}
+
+async function doAscend(from){
+  let msg = document.getElementById('ascendMsg');
+  if(msg) msg.textContent = '⏳ جاري التحويل...';
+  try{
+    let d = await platformSvc('ascend_convert', {from: from});
+    if(!d || !d.ok){
+      throw new Error((d && d.error) || 'convert_failed');
+    }
+    if(msg) msg.innerHTML = '<span style="color:#0a6b3a">✅ تم التحويل بنجاح!</span>';
+    // إعادة التحميل
+    setTimeout(loadAscend, 500);
+  }catch(e){
+    let m = e.message || '';
+    if(m === 'insufficient') m = 'لا تملك رصيدًا كافيًا';
+    if(msg) msg.innerHTML = '<span style="color:#a33">⚠️ ' + m + '</span>';
+  }
+}
+
 function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>🎨 مولد صورة NFT — AI مستقل</b><p class="small">مولد صور NFT مستقل عن مفاتيح الذكاء الاصطناعي النصي.</p><textarea id="nftImagePrompt" placeholder="اكتب وصف الصورة التي تريدها..." style="width:100%;min-height:80px;padding:12px;margin:7px 0;border-radius:10px"></textarea><button class="action green" onclick="generateNFTImage()">🎨 توليد الصورة</button><div id="nftImageResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRecipient" placeholder="عنوان Pi Testnet للمستلم" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="mintCurrentNFT()">⛓️ Mint NFT على Pi Testnet</button><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
 async function generateNFTImage(){let p=document.getElementById("nftImagePrompt")?.value.trim(),r=document.getElementById("nftImageResult");if(!p){if(r)r.textContent="⚠️ اكتب وصف الصورة أولًا.";return}if(r)r.textContent="⏳ جاري توليد الصورة...";try{let d=await api("/api/app/nft/image",{method:"POST",body:JSON.stringify({prompt:p,width:1024,height:1024,steps:4})});if(!d.ok)throw new Error(d.error||"image_generation_failed");r.innerHTML=(d.image_url?"<img src=\""+esc(d.image_url)+"\" style=\"width:100%;border-radius:16px;margin-top:8px\">":"<div class=\"statusBox\">تم التوليد، لكن الخدمة لم تعد رابط عرض مباشر.</div>")+"<div class=\"small\">النموذج: "+esc(d.model||"open model")+"</div>"}catch(e){if(r)r.textContent="⚠️ "+(e.message||"تعذر توليد الصورة")}}
 async function loadNFTStatus(){try{let x=await api('/api/app/nft/status');document.getElementById('nftInfra').innerHTML='<div class="row">IPFS: <span class="'+(x.ipfs?.configured?'ok':'warn')+'">'+(x.ipfs?.configured?'🟢 جاهز':'🟡 يحتاج إعداد الخادم')+'</span></div><div class="row">Pi Blockchain Contract: <span class="'+(x.contract?.configured?'ok':'warn')+'">'+(x.contract?.configured?'🟢 RPC + Contract مضبوط':'🟡 يحتاج Contract/RPC')+'</span></div><div class="row">Marketplace Fee: <b>'+((x.marketplace?.fee_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Default Royalty: <b>'+((x.marketplace?.default_royalty_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Currency: <b>Pi</b> · ZYN: '+(x.marketplace?.zyn?.enabled?'🟢 جاهز بعد الاعتماد':'🟡 مؤجل حتى اعتماد Mainnet')+'</div><div class="row">Genesis: '+(x.genesis?.enabled?'🔒 للمنصة فقط':'🟡 غير مفعّل')+'</div>'}catch(e){document.getElementById('nftInfra').textContent='⚠️ تعذر فحص NFT الآن.'}}
@@ -6779,6 +6945,16 @@ def _platform_db_query(fn):
 REPUTATION_EVENT_POINTS={"visit":1,"ai_use":0,"search_use":0,"marketplace_view":1,"nft_create":5,"nft_publish":10,"marketplace_listing":5,"community_post":1,"message_send":0,"support_ticket":1,"quiz_correct":1}
 
 # ZYN Arcade — ZYN Token Conversion Constants
+# ZYN ASCEND — Prestige Progression System
+ASCEND_STAGES = [
+    {"key":"iron",    "name":"Iron",    "emoji":"🥉", "from":"zyn_points", "rate":100, "target":10},
+    {"key":"silver",  "name":"Silver",  "emoji":"🥈", "from":"iron",       "rate":10,  "target":10},
+    {"key":"gold",    "name":"Gold",    "emoji":"🥇", "from":"silver",     "rate":10,  "target":10},
+    {"key":"diamond", "name":"Diamond", "emoji":"💎", "from":"gold",       "rate":10,  "target":10},
+    {"key":"golden",  "name":"Golden",  "emoji":"👑", "from":"diamond",    "rate":10,  "target":10},
+]
+ASCEND_STAGE_MAP = {s["key"]: s for s in ASCEND_STAGES}
+
 _QUIZ_LAST_TS = {}  # in-memory: {identity: last_timestamp}
 ZYN_POINTS_PER_TOKEN = 1000         # 1 ZYN = 1000 ZYN Points
 ZYN_MIN_CONVERSION = 1000           # الحد الأدنى 1000 نقطة (= 1 ZYN)
@@ -7675,6 +7851,127 @@ def webapp_platform_services():
             return {"reward": reward_val, "points": int((cur.fetchone() or {}).get("points") or 0)}
         r = _platform_db_query(q_zv)
         return jsonify({"ok": r is not None, **(r or {})})
+
+    if op=="ascend_state":
+        identity = _platform_identity(user)
+        def q_as(cur):
+            cur.execute("SELECT iron,silver,gold,diamond,golden,total_converted,stage,updated_at FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+            row = cur.fetchone()
+            if not row:
+                return {"iron":0,"silver":0,"gold":0,"diamond":0,"golden":0,"total_converted":0,"stage":"iron","updated_at":None}
+            return {"iron":int(row.get("iron") or 0),"silver":int(row.get("silver") or 0),"gold":int(row.get("gold") or 0),
+                    "diamond":int(row.get("diamond") or 0),"golden":int(row.get("golden") or 0),
+                    "total_converted":int(row.get("total_converted") or 0),"stage":str(row.get("stage") or "iron"),
+                    "updated_at":row.get("updated_at").isoformat() if row.get("updated_at") else None}
+        r = _platform_db_query(q_as)
+        if r is None:
+            return jsonify({"ok":False,"error":"db_unavailable"}),503
+        # نُرفق رصيد النقاط الحالي
+        def q_pts(cur):
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            row = cur.fetchone()
+            return int((row or {}).get("points") or 0)
+        pts = _platform_db_query(q_pts) or 0
+        return jsonify({"ok":True, "ascend": r, "zyn_points": pts, "stages": ASCEND_STAGES})
+
+    if op=="ascend_convert":
+        identity = _platform_identity(user)
+        from_cur = str(body.get("from") or "").strip().lower()
+        # نُحدّد المرحلة المستهدفة
+        target_stage = None
+        for s in ASCEND_STAGES:
+            if s["from"] == ("zyn_points" if from_cur == "zyn_points" else from_cur):
+                target_stage = s
+                break
+        if not target_stage:
+            return jsonify({"ok":False,"error":"invalid_conversion"}),400
+        rate = int(target_stage["rate"])
+        to_key = target_stage["key"]
+        def q_conv(cur):
+            # نتحقق من الرصيد
+            if from_cur == "zyn_points":
+                cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s FOR UPDATE", (identity,))
+                row = cur.fetchone()
+                src_points = int((row or {}).get("points") or 0)
+            else:
+                if from_cur not in ASCEND_STAGE_MAP:
+                    return {"error": "invalid_source"}
+                cur.execute(f"SELECT {from_cur} AS bal FROM ai_for_ascend_players WHERE identity_key=%s FOR UPDATE", (identity,))
+                row = cur.fetchone()
+                src_points = int((row or {}).get("bal") or 0)
+            if src_points < rate:
+                return {"error":"insufficient", "needed": rate, "have": src_points}
+            # خصم من المصدر
+            if from_cur == "zyn_points":
+                cur.execute("UPDATE ai_for_rewards SET points = points - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
+            else:
+                cur.execute(f"UPDATE ai_for_ascend_players SET {from_cur} = {from_cur} - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
+            # إضافة إلى الهدف
+            cur.execute("""INSERT INTO ai_for_ascend_players(identity_key, %s, total_converted, stage)
+                           VALUES(%%s, 1, 1, %%s)
+                           ON CONFLICT(identity_key) DO UPDATE
+                           SET %s = ai_for_ascend_players.%s + 1, total_converted = ai_for_ascend_players.total_converted + 1, stage = %%s, updated_at = NOW()""" % (to_key, to_key, to_key),
+                        (identity, to_key, identity, to_key))
+            # سجل
+            cur.execute("""INSERT INTO ai_for_ascend_log(log_id,identity_key,action,from_currency,to_currency,amount)
+                           VALUES(%s,%s,'convert',%s,%s,%s)""",
+                        (str(uuid.uuid4()), identity, from_cur, to_key, rate))
+            # النتيجة
+            cur.execute("SELECT iron,silver,gold,diamond,golden,total_converted,stage,updated_at FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+            new_row = cur.fetchone() or {}
+            if from_cur == "zyn_points":
+                cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+                new_src = int((cur.fetchone() or {}).get("points") or 0)
+            else:
+                cur.execute(f"SELECT {from_cur} AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+                new_src = int((cur.fetchone() or {}).get("bal") or 0)
+            return {"converted": True, "from": from_cur, "to": to_key,
+                    "source_remaining": new_src,
+                    "player": {"iron":int(new_row.get("iron") or 0),"silver":int(new_row.get("silver") or 0),"gold":int(new_row.get("gold") or 0),
+                               "diamond":int(new_row.get("diamond") or 0),"golden":int(new_row.get("golden") or 0),
+                               "total_converted":int(new_row.get("total_converted") or 0),"stage":str(new_row.get("stage") or "iron")}}
+        r = _platform_db_query(q_conv)
+        if not r:
+            return jsonify({"ok":False,"error":"db_unavailable"}),503
+        if r.get("error") == "insufficient":
+            return jsonify({"ok":False, **r}),400
+        if r.get("error") == "invalid_source":
+            return jsonify({"ok":False, **r}),400
+        return jsonify({"ok":True, **r})
+
+    if op=="ascend_leaderboard":
+        def q_lb(cur):
+            cur.execute("""SELECT identity_key, iron, silver, gold, diamond, golden, stage, updated_at
+                           FROM ai_for_ascend_players
+                           ORDER BY (golden*1000000 + diamond*10000 + gold*100 + silver) DESC
+                           LIMIT 30""")
+            rows = cur.fetchall()
+            out = []
+            for r in rows:
+                nm = _display_name_by_identity(cur, str(r["identity_key"]))
+                out.append({
+                    "identity": str(r["identity_key"]),
+                    "name": nm,
+                    "iron": int(r.get("iron") or 0),
+                    "silver": int(r.get("silver") or 0),
+                    "gold": int(r.get("gold") or 0),
+                    "diamond": int(r.get("diamond") or 0),
+                    "golden": int(r.get("golden") or 0),
+                    "stage": str(r.get("stage") or "iron"),
+                    "total": int(r.get("iron") or 0) + int(r.get("silver") or 0)*10 + int(r.get("gold") or 0)*100 + int(r.get("diamond") or 0)*1000 + int(r.get("golden") or 0)*10000
+                })
+            return out
+        r = _platform_db_query(q_lb)
+        return jsonify({"ok": True, "leaderboard": r or []})
+
+    if op=="ascend_history":
+        identity = _platform_identity(user)
+        def q_hist(cur):
+            cur.execute("SELECT action,from_currency,to_currency,amount,created_at FROM ai_for_ascend_log WHERE identity_key=%s ORDER BY created_at DESC LIMIT 30", (identity,))
+            return [{"action":r["action"],"from":r["from_currency"],"to":r["to_currency"],"amount":int(r["amount"] or 0),
+                     "created_at":r["created_at"].isoformat() if r.get("created_at") else None} for r in cur.fetchall()]
+        r = _platform_db_query(q_hist)
+        return jsonify({"ok": True, "history": r or []})
 
     if op=="zyn_status":
         identity = _platform_identity(user)

@@ -5535,7 +5535,7 @@ setNav('n-admin');
 document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🔐 مركز تحكم المالك</div><p class="small">ترتيب جديد من الصفر: كل إعداد هنا حقيقي ومحفوظ، وهذه المنطقة خاصة بالمالك فقط. لا تظهر للإدمن الثاني ولا لأي مستخدم، وكل عملياتها محمية من الخادم.</p><div id="ownerPanel"><div class="statusBox">⏳ جاري تحميل الإعدادات...</div></div></section>';
 try{
  let d=await api('/api/app/owner');
- let ordered=['ai','search','market','stores','community','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps','nft'];
+ let ordered=['ai','search','market','stores','community','ascend','messages','news','pi','content','analytics','tools','fun','plus','ads','rewards','account','security','knowledge','support','lab','autocore','revenue','external_apps','nft'];
  async function toggleExternalApp(id,open){try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_toggle',app_id:id,open:!!open})});if(!d.ok)throw new Error(d.error||'toggle_failed');state=await api('/api/app/bootstrap');applyTheme();await ownerArea()}catch(e){alert('⚠️ تعذر تغيير حالة التطبيق: '+(e.message||''))}}
 async function deleteExternalApp(id){if(!confirm('حذف التطبيق من AI for؟'))return;try{let d=await api('/api/app/owner',{method:'POST',body:JSON.stringify({action:'external_app_delete',app_id:id})});if(!d.ok)throw new Error(d.error||'delete_failed');state=await api('/api/app/bootstrap');await ownerArea()}catch(e){alert('⚠️ تعذر حذف التطبيق: '+(e.message||''))}}
 let byKey={};(state.sections||[]).forEach(s=>byKey[s.key]=s);
@@ -7901,17 +7901,38 @@ def webapp_platform_services():
                 src_points = int((row or {}).get("bal") or 0)
             if src_points < rate:
                 return {"error":"insufficient", "needed": rate, "have": src_points}
+            # نُحدّد اسم العمود بأمان (لا استخدام %s ديناميكي)
+            _cols = {"iron":0, "silver":0, "gold":0, "diamond":0, "golden":0}
+            if to_key not in _cols:
+                return {"error":"invalid_target"}
+            # نضمن وجود صف للاعب
+            cur.execute("INSERT INTO ai_for_ascend_players(identity_key) VALUES(%s) ON CONFLICT(identity_key) DO NOTHING", (identity,))
             # خصم من المصدر
             if from_cur == "zyn_points":
                 cur.execute("UPDATE ai_for_rewards SET points = points - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
             else:
-                cur.execute(f"UPDATE ai_for_ascend_players SET {from_cur} = {from_cur} - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
-            # إضافة إلى الهدف
-            cur.execute("""INSERT INTO ai_for_ascend_players(identity_key, %s, total_converted, stage)
-                           VALUES(%%s, 1, 1, %%s)
-                           ON CONFLICT(identity_key) DO UPDATE
-                           SET %s = ai_for_ascend_players.%s + 1, total_converted = ai_for_ascend_players.total_converted + 1, stage = %%s, updated_at = NOW()""" % (to_key, to_key, to_key),
-                        (identity, to_key, identity, to_key))
+                # خصم من عمود اللاعب (بـif/else لضمان SQL سليم)
+                if from_cur == "iron":
+                    cur.execute("UPDATE ai_for_ascend_players SET iron = iron - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
+                elif from_cur == "silver":
+                    cur.execute("UPDATE ai_for_ascend_players SET silver = silver - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
+                elif from_cur == "gold":
+                    cur.execute("UPDATE ai_for_ascend_players SET gold = gold - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
+                elif from_cur == "diamond":
+                    cur.execute("UPDATE ai_for_ascend_players SET diamond = diamond - %s, updated_at=NOW() WHERE identity_key=%s", (rate, identity))
+                else:
+                    return {"error":"invalid_source"}
+            # إضافة إلى العمود الهدف (بـif/else)
+            if to_key == "iron":
+                cur.execute("UPDATE ai_for_ascend_players SET iron = iron + 1, total_converted = total_converted + 1, stage = %s, updated_at = NOW() WHERE identity_key=%s", (to_key, identity))
+            elif to_key == "silver":
+                cur.execute("UPDATE ai_for_ascend_players SET silver = silver + 1, total_converted = total_converted + 1, stage = %s, updated_at = NOW() WHERE identity_key=%s", (to_key, identity))
+            elif to_key == "gold":
+                cur.execute("UPDATE ai_for_ascend_players SET gold = gold + 1, total_converted = total_converted + 1, stage = %s, updated_at = NOW() WHERE identity_key=%s", (to_key, identity))
+            elif to_key == "diamond":
+                cur.execute("UPDATE ai_for_ascend_players SET diamond = diamond + 1, total_converted = total_converted + 1, stage = %s, updated_at = NOW() WHERE identity_key=%s", (to_key, identity))
+            elif to_key == "golden":
+                cur.execute("UPDATE ai_for_ascend_players SET golden = golden + 1, total_converted = total_converted + 1, stage = %s, updated_at = NOW() WHERE identity_key=%s", (to_key, identity))
             # سجل
             cur.execute("""INSERT INTO ai_for_ascend_log(log_id,identity_key,action,from_currency,to_currency,amount)
                            VALUES(%s,%s,'convert',%s,%s,%s)""",
@@ -7923,7 +7944,18 @@ def webapp_platform_services():
                 cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
                 new_src = int((cur.fetchone() or {}).get("points") or 0)
             else:
-                cur.execute(f"SELECT {from_cur} AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+                # جلب الرصيد الحالي للمصدر
+                _src_col = from_cur if from_cur in ("iron","silver","gold","diamond","golden") else "iron"
+                if _src_col == "iron":
+                    cur.execute("SELECT iron AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+                elif _src_col == "silver":
+                    cur.execute("SELECT silver AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+                elif _src_col == "gold":
+                    cur.execute("SELECT gold AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+                elif _src_col == "diamond":
+                    cur.execute("SELECT diamond AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+                else:
+                    cur.execute("SELECT golden AS bal FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
                 new_src = int((cur.fetchone() or {}).get("bal") or 0)
             return {"converted": True, "from": from_cur, "to": to_key,
                     "source_remaining": new_src,

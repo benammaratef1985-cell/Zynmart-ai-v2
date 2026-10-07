@@ -7212,6 +7212,19 @@ def webapp_platform_services():
             cur.execute("INSERT INTO ai_for_community_comments(comment_id,post_id,author_identity,body) VALUES(%s,%s,%s,%s) RETURNING comment_id,created_at", (cid, post_id, identity, body_text))
             row = dict(cur.fetchone())
             cur.execute("UPDATE ai_for_community_posts SET comment_count=comment_count+1 WHERE post_id=%s", (post_id,))
+            # نتحقق من الحد اليومي للتعليقات
+            _cmt_reward_ok = False
+            try:
+                _ca, _ = _reward_check_limit(cur, identity, "community_comment")
+                if _ca:
+                    _reward_mark_used(cur, identity, "community_comment")
+                    _cmt_reward_ok = True
+            except Exception as _ce:
+                print(f"comment limit check: {_ce}")
+            # إذا لم يكن مسموحًا، لا نمنح نقاطًا
+            if not _cmt_reward_ok:
+                # نُسجّل الحدث بدون مكافأة (0 نقاط)
+                pass
             # إشعار لصاحب المنشور
             try:
                 cur.execute("SELECT author_identity FROM ai_for_community_posts WHERE post_id=%s", (post_id,))
@@ -7427,7 +7440,23 @@ def webapp_platform_services():
         row=_platform_post_create(user,post_body,body.get("image_url",""))
         if not row:
             return jsonify({"ok":False,"error":"community_post_failed","reason":"database_unavailable_or_empty_body"}),503
-        _record_reputation_event(user,"community_post",str(row.get("post_id") or uuid.uuid4()))
+        # نتحقق من الحد اليومي — إذا وصل، لا نمنح نقاطًا لكن النشر يستمر
+        _post_reward_ok = False
+        try:
+            _pconn = _membership_db_connect()
+            if _pconn:
+                with _pconn:
+                    with _pconn.cursor(cursor_factory=RealDictCursor) as _pcur:
+                        _allowed, _ = _reward_check_limit(_pcur, identity, "community_post")
+                        if _allowed:
+                            _reward_mark_used(_pcur, identity, "community_post")
+                            _post_reward_ok = True
+        except Exception as _pe:
+            print(f"community_post limit check: {_pe}")
+        finally:
+            _membership_db_release(_pconn)
+        if _post_reward_ok:
+            _record_reputation_event(user,"community_post",str(row.get("post_id") or uuid.uuid4()))
         # نُعالج @mentions — إشعار لكل مُشار إليه
         try:
             mentions = _extract_mentions(post_body)

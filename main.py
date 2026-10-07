@@ -5183,10 +5183,99 @@ async function loadNotifications(){
     let d=await r.json();
     let rows=(d&&d.notifications)||[];
     if(!rows.length){host.innerHTML='<div class="statusBox">لا توجد إشعارات.</div>';return}
-    host.innerHTML=rows.map(n=>renderNotification(n)).join('');
-    // نُحدّث شارة العداد
+    // نُجمّع الإشعارات حسب actor_identity (أو "system" للنظام)
+    let groups={};
+    rows.forEach(function(n){
+      let key = n.actor_identity || 'system';
+      if(!groups[key]){
+        groups[key] = {
+          identity: key,
+          name: n.actor_name || (key==='system' ? 'النظام' : 'عضو'),
+          items: [],
+          unread: 0,
+          last_at: n.created_at || null
+        };
+      }
+      groups[key].items.push(n);
+      if(!n.is_read) groups[key].unread++;
+      // تحديث آخر وقت
+      if(n.created_at && (!groups[key].last_at || n.created_at > groups[key].last_at)){
+        groups[key].last_at = n.created_at;
+      }
+    });
+    // نُرتّب المجموعات حسب آخر نشاط
+    let sorted = Object.values(groups).sort(function(a,b){
+      if(!a.last_at) return 1;
+      if(!b.last_at) return -1;
+      return a.last_at < b.last_at ? 1 : -1;
+    });
+    host.innerHTML = sorted.map(function(g){ return renderNotifGroup(g); }).join('');
     updateNotifBadge(d.unread);
+    // ربط الأزرار
+    setTimeout(function(){
+      host.querySelectorAll('.notif-group').forEach(function(el){
+        el.addEventListener('click', function(){
+          let ident = el.getAttribute('data-identity');
+          openNotifGroup(ident);
+        });
+      });
+    }, 50);
   }catch(e){host.textContent='⚠️ تعذر تحميل الإشعارات: '+(e.message||'');}
+}
+
+// نُخزّن الإشعارات مؤقتًا للوصول السريع
+let __notifCache = {};
+
+function renderNotifGroup(g){
+  __notifCache[g.identity] = g.items;
+  let isSystem = g.identity === 'system';
+  let avatar = isSystem
+    ? '<div style="width:40px;height:40px;border-radius:50%;background:#a66cff;display:flex;align-items:center;justify-content:center;font-size:20px">🔔</div>'
+    : avatarHtml(g.identity, g.name, 40);
+  let unreadBadge = g.unread>0
+    ? '<span style="background:#ff5f70;color:#fff;font-size:12px;font-weight:700;padding:3px 9px;border-radius:12px;min-width:22px;text-align:center">'+g.unread+'</span>'
+    : '';
+  let lastText = g.items[0] && g.items[0].body ? (g.items[0].body.substring(0,60)) : '';
+  return '<div class="statusBox notif-group" data-identity="'+esc(g.identity)+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+(g.unread>0?'#f4ecff':'#fff')+'"><div style="display:flex;gap:12px;align-items:center">'+avatar+'<div style="flex:1;min-width:0"><div style="display:flex;align-items:center;gap:6px"><b>'+esc(g.name)+'</b></div><div class="small" style="margin-top:2px;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">'+esc(lastText)+'</div><div class="small" style="opacity:.55;margin-top:2px">'+esc(timeAgo(g.last_at))+' · '+g.items.length+' إشعار</div></div>'+unreadBadge+'</div></div>';
+}
+
+async function openNotifGroup(identity){
+  let host=document.getElementById('notifList');if(!host)return;
+  let items = __notifCache[identity] || [];
+  if(!items.length){loadNotifications();return}
+  let isSystem = identity==='system';
+  let name = isSystem ? 'النظام' : (items[0].actor_name || 'عضو');
+  let avatar = isSystem
+    ? '<div style="width:40px;height:40px;border-radius:50%;background:#a66cff;display:flex;align-items:center;justify-content:center;font-size:20px">🔔</div>'
+    : avatarHtml(identity, name, 40);
+  let header = '<div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid #e5e7eb;margin-bottom:12px"><button class="mini" style="background:#f4f5f7" onclick="loadNotifications()">← رجوع</button>'+avatar+'<b style="font-size:16px">'+esc(name)+'</b><span class="small" style="opacity:.6">'+items.length+' إشعار</span></div>';
+  let list = items.map(function(n){ return renderNotificationItem(n); }).join('');
+  host.innerHTML = header + list;
+  // ربط النقرات
+  setTimeout(function(){
+    host.querySelectorAll('.notif-item').forEach(function(el){
+      el.addEventListener('click', function(){ openNotifTarget(el); });
+    });
+  }, 50);
+}
+
+function renderNotificationItem(n){
+  let kind=n.kind||'';
+  let icon='🔔';
+  if(kind==='comment')icon='💬';
+  else if(kind==='mention')icon='@';
+  else if(kind==='message')icon='✉️';
+  else if(kind==='reply')icon='↩️';
+  else if(kind==='comment_like')icon='❤️';
+  else if(kind==='like'||kind==='react')icon='❤️';
+  else if(kind==='follow')icon='👤';
+  let bg=n.is_read?'#fff':'#f4ecff';
+  let dot=n.is_read?'':'<span style="width:8px;height:8px;background:#a66cff;border-radius:50%;display:inline-block"></span>';
+  let payload = {post:'',dm:'',dmName:n.actor_name||''};
+  if(n.target_type==='post' && n.target_id){payload.post=String(n.target_id);}
+  if((n.target_type==='message'||n.target_type==='dm') && n.target_id){payload.dm=String(n.target_id);}
+  let dataJson = esc(JSON.stringify(payload));
+  return '<div class="statusBox notif-item" data-nid="'+esc(n.id)+'" data-payload="'+dataJson+'" style="padding:12px;margin-bottom:8px;cursor:pointer;background:'+bg+'"><div style="display:flex;gap:10px;align-items:flex-start"><div style="font-size:20px;line-height:1">'+icon+'</div><div style="flex:1;min-width:0"><div class="small" style="opacity:.85">'+esc(n.body||'')+' '+dot+'</div><div class="small" style="opacity:.55;margin-top:3px">'+esc(timeAgo(n.created_at))+'</div></div></div></div>';
 }
 
 function renderNotification(n){

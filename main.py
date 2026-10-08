@@ -4533,13 +4533,13 @@ async function loadAscend(){
       if (currentIdx < STAGE_FLOW.length - 1) {
         var nxt = STAGE_FLOW[currentIdx + 1];
         document.getElementById('ascendNextRankBox').style.display = 'block';
-        document.getElementById('ascendNextRankLabel').textContent = curStage.emoji + ' ' + curStage.rankLabel + '  ←  ' + nxt.nextRankLabel;
+        document.getElementById('ascendNextRankLabel').textContent = curStage.emoji + ' ' + curStage.rankLabel + '  ←  ' + nxt.rankLabel;
         document.getElementById('ascendNextRankPct').textContent = pct + '%';
         document.getElementById('ascendNextRankBar').style.width = pct + '%';
         if (curCount >= 10) {
           document.getElementById('ascendNextRankHint').textContent = '🚀 جاهز للترقية! اضغط التحويل الآن';
         } else {
-          document.getElementById('ascendNextRankHint').textContent = '🎯 تحتاج ' + need + ' ' + curStage.stageLabel + ' إضافي للوصول إلى ' + nxt.nextRankLabel;
+          document.getElementById('ascendNextRankHint').textContent = '🎯 تحتاج ' + need + ' ' + curStage.stageLabel + ' إضافي للوصول إلى ' + nxt.rankLabel;
         }
       } else {
         document.getElementById('ascendNextRankBox').style.display = 'none';

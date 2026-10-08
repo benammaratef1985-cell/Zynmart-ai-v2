@@ -4468,6 +4468,8 @@ function renderAscend(){
       <div id="ascendLegacy" style="margin-top:10px">⏳</div>
     </div>
 
+    <div id="ascendHintsBox" style="margin:14px 0"></div>
+
     <div class="statusBox" id="ascendGenesisBox" style="display:none;background:linear-gradient(135deg,#4a2e7a,#2a1a4d);color:#f5c84b;border:1px solid #f5c84b">
       <b>🔮 المرحلة القادمة: Genesis</b>
       <div id="ascendGenesis" class="small" style="margin-top:10px;color:#c8b6ff">⏳</div>
@@ -4533,7 +4535,7 @@ async function loadAscend(){
       if (currentIdx < STAGE_FLOW.length - 1) {
         var nxt = STAGE_FLOW[currentIdx + 1];
         document.getElementById('ascendNextRankBox').style.display = 'block';
-        document.getElementById('ascendNextRankLabel').textContent = curStage.emoji + ' ' + curStage.rankLabel + '  ←  ' + nxt.rankLabel;
+        document.getElementById('ascendNextRankLabel').textContent = curStage.emoji + ' ' + curStage.rankLabel + '  →  ' + nxt.rankLabel;
         document.getElementById('ascendNextRankPct').textContent = pct + '%';
         document.getElementById('ascendNextRankBar').style.width = pct + '%';
         if (curCount >= 10) {
@@ -4595,40 +4597,90 @@ async function loadAscend(){
     legacy += '<div class="small" style="margin-top:8px;opacity:.75">'+(hints.legacy_note || '')+'</div>';
     document.getElementById('ascendLegacy').innerHTML = legacy;
 
-    // Genesis Teaser (يظهر إذا كان golden كامل أو تم عرض بعض التقدم)
-    let goldenCount = Number(a.golden||0);
-    if(goldenCount >= 1 || rank.rank_key === 'golden_1' || rank.genesis_eligible){
-      document.getElementById('ascendGenesisBox').style.display = 'block';
-      let gText = '<div style="padding:5px 0">🟡 التقدم: <b>'+goldenCount+' / 10 Golden</b></div>';
-      gText += '<div class="small" style="opacity:.85">'+(hints.genesis_teaser || '')+'</div>';
-      if(rank.genesis_eligible){
-        gText = '<div style="color:#f5c84b;font-weight:800">🎉 أنت مؤهل لمرحلة Genesis!</div>' + gText;
+    // ZYN ASCEND v2 — Genesis teaser (يظهر دايمًا بغموض)
+    try{
+      let goldenCount = Number(a.golden||0);
+      let gBox = document.getElementById('ascendGenesisBox');
+      if(gBox){
+        gBox.style.display = 'block';
+        let gText = '<div dir="rtl" style="line-height:1.7">';
+        if(rank.genesis_eligible){
+          gText += '<div style="color:#f5c84b;font-weight:900;font-size:15px;margin-bottom:6px">🎉 أنت مؤهل لمرحلة Genesis!</div>';
+        }
+        gText += '<div style="color:#c8b6ff">' + (hints.genesis_teaser || '🔮 Genesis: مكان خاص لأولئك الذين وصلوا للذهبي. تابعنا.') + '</div>';
+        gText += '<div style="margin-top:8px;font-size:12px;color:#9d8fd0">🟡 التقدم الحالي: <b style="color:#f5c84b">' + goldenCount + ' / 10 Golden</b></div>';
+        gText += '<div style="margin-top:6px;font-size:11px;color:#7b6db0">📍 المكانة محفوظة لمن يصلون للقمة.</div>';
+        gText += '</div>';
+        document.getElementById('ascendGenesis').innerHTML = gText;
+        document.getElementById('ascendTeaserBtn').onclick = function(){ loadGenesisTeaser(); };
       }
-      document.getElementById('ascendGenesis').innerHTML = gText;
-      document.getElementById('ascendTeaserBtn').onclick = function(){ loadGenesisTeaser(); };
-    } else {
-      document.getElementById('ascendGenesisBox').style.display = 'none';
-    }
+    }catch(_){}
+
+    // ZYN ASCEND v2 — Hints (تلميحات ذكية)
+    try{
+      let hintBox = document.getElementById('ascendHintsBox');
+      if(hintBox){
+        let hintList = [
+          hints.top_10_bonus || '🏆 Top 10 يمنحك مكانة مميزة في المرحلة القادمة.',
+          hints.legacy_note || '📜 إرثك الرقمي يُبنى هنا — كل تحويل يُسجَّل في قصتك.',
+          '💎 النخبة الحقيقية تُبنى بالصبر والمثابرة.',
+          '🔮 ما تجمعه له مكانة خاصة — التفاصيل لاحقًا.'
+        ];
+        let idx = Math.floor(Math.random() * hintList.length);
+        hintBox.innerHTML = '<div dir="rtl" style="text-align:center;padding:10px;color:#c8b6ff;font-size:13px;line-height:1.6;background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border-radius:12px;border:1px dashed #7b4dd9">' + hintList[idx] + '</div>';
+      }
+    }catch(_){}
   }catch(e){
     document.getElementById('ascendStages').textContent = '⚠️ ' + (e.message || 'تعذر التحميل');
   }
-  // Leaderboard
+  // ZYN ASCEND v2 — Leaderboard احترافي (Top 3 + عرض المزيد)
   try{
-    let d2 = await platformSvc('ascend_leaderboard');
-    let rows = (d2 && d2.leaderboard) || [];
+    let d2 = await platformSvc('ascend_leaderboard_full');
+    let rows = (d2 && d2.rows) || [];
+    let mePos = (d2 && d2.me_position) || null;
+    let box = document.getElementById('ascendLeaderboard');
     if(!rows.length){
-      document.getElementById('ascendLeaderboard').innerHTML = '<div class="small">لا يوجد متنافسون بعد. كن الأول!</div>';
+      box.innerHTML = '<div dir="rtl" class="small" style="text-align:center;padding:12px;opacity:.7">لا يوجد متنافسون بعد. كن الأول! 🏆</div>';
     }else{
-      let html = rows.map(function(r, idx){
-        let medal = idx===0?'👑':idx===1?'🥈':idx===2?'🥉':'#'+(idx+1);
-        let isTop10 = idx < 10;
-        let highlight = isTop10 ? 'background:#fff9e6;padding:6px;border-radius:8px;margin-bottom:4px' : 'padding:6px 0;border-bottom:1px solid #eee';
-        return '<div style="'+highlight+'"><div style="display:flex;justify-content:space-between"><div><b>'+medal+' '+esc(r.name||'عضو')+'</b></div><div class="small">🥉'+Number(r.iron||0)+' 🥈'+Number(r.silver||0)+' 🥇'+Number(r.gold||0)+' 💎'+Number(r.diamond||0)+' 👑'+Number(r.golden||0)+'</div></div></div>';
-      }).join('');
-      document.getElementById('ascendLeaderboard').innerHTML = html + '<div class="small" style="margin-top:8px;opacity:.7">🏆 التواجد في Top 10 يمنحك مكانة مميزة في المرحلة القادمة.</div>';
+      let top3 = rows.slice(0, 3);
+      let medals = ['🥇','🥈','🥉'];
+      let colors = [
+        'linear-gradient(135deg,#f5c84b,#ff9f1c)',
+        'linear-gradient(135deg,#e0e0e0,#a0a0a0)',
+        'linear-gradient(135deg,#d4a574,#a67c52)'
+      ];
+      let html = '<div dir="rtl" style="display:flex;flex-direction:column;gap:10px">';
+      top3.forEach(function(r, idx){
+        let isMe = r.is_me;
+        let border = isMe ? '2px solid #f5c84b' : '1px solid #eee';
+        html += '<div style="background:'+colors[idx]+';padding:10px 12px;border-radius:14px;color:#1a0f2e;border:'+border+';box-shadow:0 3px 8px rgba(0,0,0,.1)">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center">';
+        html += '<div style="font-size:22px;font-weight:900">' + medals[idx] + '</div>';
+        html += '<div style="flex:1;padding:0 10px;text-align:right">';
+        html += '<div style="font-weight:900;font-size:15px">' + esc(r.name||'عضو') + (isMe?' <span style="font-size:11px;background:#fff;padding:2px 6px;border-radius:6px">أنت</span>':'') + '</div>';
+        html += '<div style="font-size:11px;opacity:.75;margin-top:2px">🥉'+Number(r.iron||0)+' 🥈'+Number(r.silver||0)+' 🥇'+Number(r.gold||0)+' 💎'+Number(r.diamond||0)+' 👑'+Number(r.golden||0)+'</div>';
+        html += '</div>';
+        html += '<div style="font-size:12px;font-weight:800;background:rgba(255,255,255,.4);padding:3px 8px;border-radius:8px">#'+(idx+1)+'</div>';
+        html += '</div></div>';
+      });
+      html += '</div>';
+
+      if(rows.length > 3){
+        html += '<button onclick="toggleAscendFullLeaderboard()" id="ascendLBMoreBtn" style="display:block;width:100%;margin-top:10px;padding:10px;background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:12px;font-weight:800;cursor:pointer">🏆 عرض Top 50</button>';
+        html += '<div id="ascendLBFull" style="display:none;margin-top:10px"></div>';
+        // نخزّن القائمة لعرضها لاحقًا
+        window.__ascendLBData = rows;
+        window.__ascendLBMePos = mePos;
+      } else if (rows.length > 0){
+        window.__ascendLBData = rows;
+      }
+
+      // ملاحظة Top 10
+      html += '<div dir="rtl" class="small" style="text-align:center;margin-top:10px;opacity:.75">🏆 التواجد في Top 10 يمنحك مكانة مميزة في المرحلة القادمة.</div>';
+      box.innerHTML = html;
     }
   }catch(e){
-    document.getElementById('ascendLeaderboard').textContent = '⚠️ تعذر تحميل المتصدرين';
+    document.getElementById('ascendLeaderboard').innerHTML = '<div class="small" style="text-align:center;opacity:.7">⚠️ تعذر تحميل المتصدرين</div>';
   }
   // History
   try{
@@ -4656,6 +4708,38 @@ async function doAscend(from){
     let m = e.message || '';
     if(m === 'insufficient') m = 'لا تملك رصيدًا كافيًا';
     if(msg) msg.innerHTML = '<span style="color:#a33">⚠️ ' + m + '</span>';
+  }
+}
+
+function toggleAscendFullLeaderboard(){
+  let full = document.getElementById('ascendLBFull');
+  let btn = document.getElementById('ascendLBMoreBtn');
+  if(!full || !btn) return;
+  if(full.style.display === 'none' || !full.style.display){
+    let rows = window.__ascendLBData || [];
+    let mePos = window.__ascendLBMePos;
+    if(!rows.length){ full.innerHTML = '<div class="small">لا يوجد لاعبون.</div>'; }
+    else{
+      let html = '<div dir="rtl" style="max-height:400px;overflow-y:auto;background:#fafafa;border-radius:12px;padding:8px">';
+      rows.forEach(function(r, idx){
+        let isMe = r.is_me;
+        let bg = isMe ? 'background:#fff9e6;border:1px solid #f5c84b' : (idx<10?'background:#f5f0ff':'background:#fff');
+        html += '<div style="'+bg+';padding:8px 10px;border-radius:10px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">';
+        html += '<div style="font-weight:800;font-size:13px">#' + (idx+1) + ' ' + esc(r.name||'عضو') + (isMe?' <span style="color:#7b4dd9;font-size:10px">(أنت)</span>':'') + '</div>';
+        html += '<div style="font-size:11px;opacity:.75">🥉'+Number(r.iron||0)+' 🥈'+Number(r.silver||0)+' 🥇'+Number(r.gold||0)+' 💎'+Number(r.diamond||0)+' 👑'+Number(r.golden||0)+'</div>';
+        html += '</div>';
+      });
+      if(mePos && mePos > 50){
+        html += '<div style="text-align:center;padding:10px;color:#7b4dd9;font-weight:800">📍 موقعك: #' + mePos + '</div>';
+      }
+      html += '</div>';
+      full.innerHTML = html;
+    }
+    full.style.display = 'block';
+    btn.textContent = '🔼 إخفاء القائمة';
+  } else {
+    full.style.display = 'none';
+    btn.textContent = '🏆 عرض Top 50';
   }
 }
 

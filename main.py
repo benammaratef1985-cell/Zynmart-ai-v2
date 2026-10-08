@@ -4414,10 +4414,36 @@ function renderAscend(){
       <div class="small" style="color:#c8b6ff;margin-top:4px">ارتقِ من الحديد إلى الذهب</div>
     </div>
 
-    <div class="statusBox" id="ascendRank" style="background:linear-gradient(135deg,#4a2e7a,#2a1a4d);color:#fff;text-align:center">
-      <div style="font-size:40px" id="ascendRankEmoji">🥉</div>
-      <div style="font-size:18px;font-weight:800;margin-top:6px" id="ascendRankLabel">Iron Ascender</div>
-      <div class="small" style="opacity:.85;margin-top:6px" id="ascendRankPosition">—</div>
+    <div class="statusBox" id="ascendRank" style="background:linear-gradient(135deg,#4a2e7a,#2a1a4d,#1a0f2e);color:#fff;text-align:center;border:1px solid #7b4dd9;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-30%;left:-30%;width:160%;height:160%;background:radial-gradient(circle,rgba(245,200,75,.15) 0%,transparent 60%);pointer-events:none"></div>
+      <div style="font-size:52px;filter:drop-shadow(0 4px 12px rgba(245,200,75,.5))" id="ascendRankEmoji">🥉</div>
+      <div style="font-size:20px;font-weight:900;margin-top:8px;letter-spacing:.5px" id="ascendRankLabel">Iron Ascender</div>
+      <div style="display:flex;justify-content:center;gap:18px;margin-top:12px;flex-wrap:wrap">
+        <div style="background:rgba(255,255,255,.08);padding:6px 12px;border-radius:10px">
+          <div style="font-size:11px;opacity:.7">📍 الموقع</div>
+          <div style="font-size:15px;font-weight:800" id="ascendRankPosition">—</div>
+        </div>
+        <div style="background:rgba(255,255,255,.08);padding:6px 12px;border-radius:10px">
+          <div style="font-size:11px;opacity:.7">🔥 سلسلة</div>
+          <div style="font-size:15px;font-weight:800" id="ascendStreak">—</div>
+        </div>
+        <div style="background:rgba(255,255,255,.08);padding:6px 12px;border-radius:10px">
+          <div style="font-size:11px;opacity:.7">⭐ الأفضل</div>
+          <div style="font-size:15px;font-weight:800" id="ascendBestStreak">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="statusBox" id="ascendNextRankBox" style="display:none;background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#f5c84b;border:1px solid #7b4dd9">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b>🎯 الرتبة التالية</b>
+        <span class="small" id="ascendNextRankPct" style="opacity:.8">—</span>
+      </div>
+      <div id="ascendNextRankLabel" style="margin-top:8px;font-size:15px;font-weight:800">—</div>
+      <div style="height:8px;background:#222;border-radius:4px;overflow:hidden;margin-top:10px">
+        <div id="ascendNextRankBar" style="height:100%;background:linear-gradient(90deg,#f5c84b,#ff9f1c);width:0%;transition:width .8s ease"></div>
+      </div>
+      <div class="small" id="ascendNextRankHint" style="margin-top:8px;opacity:.75">—</div>
     </div>
 
     <div class="statusBox" id="ascendPoints" style="background:linear-gradient(135deg,#a66cff,#7b4dd9);color:#fff">
@@ -4469,6 +4495,47 @@ async function loadAscend(){
     let a = d.ascend || {};
     let rank = d.rank || {};
     let hints = d.hints || {};
+
+    // ZYN ASCEND v2 — Hero Card: Streak + Next Rank
+    try {
+      document.getElementById('ascendStreak').textContent = (Number(rank.streak_days||0) > 0) ? (Number(rank.streak_days||0) + ' يوم') : '—';
+      document.getElementById('ascendBestStreak').textContent = (Number(rank.best_streak||0) > 0) ? (Number(rank.best_streak||0) + ' يوم') : '—';
+    } catch(_) {}
+
+    // الرتبة التالية
+    try {
+      var RANK_ORDER = [
+        {key:'iron_1',     label:'Iron Ascender',    min:0,    next:'silver_1',   nextLabel:'Silver Seeker'},
+        {key:'silver_1',   label:'Silver Seeker',    min:1,    next:'gold_1',     nextLabel:'Gold Pioneer'},
+        {key:'gold_1',     label:'Gold Pioneer',     min:2,    next:'diamond_1',  nextLabel:'Crystal Elite'},
+        {key:'diamond_1',  label:'Crystal Elite',    min:3,    next:'golden_1',   nextLabel:'Golden Legend'},
+        {key:'golden_1',   label:'Golden Legend',    min:4,    next:'genesis',    nextLabel:'Genesis Witness'}
+      ];
+      var currentKey = rank.rank_key || 'iron_1';
+      var idx = -1;
+      for (var i=0; i<RANK_ORDER.length; i++) { if (RANK_ORDER[i].key === currentKey) { idx = i; break; } }
+      if (idx >= 0 && idx < RANK_ORDER.length - 1) {
+        var cur = RANK_ORDER[idx];
+        var nxt = RANK_ORDER[idx + 1];
+        // نحسب التقدم التقريبي: كم تحويل في المستوى الحالي من أصل 10
+        var stageKey = (cur.key||'').replace('_1','');
+        var curCount = Number(a[stageKey] || 0);
+        var need = 10 - curCount;
+        if (need < 0) need = 0;
+        var pct = Math.min(100, Math.round((curCount / 10) * 100));
+        document.getElementById('ascendNextRankBox').style.display = 'block';
+        document.getElementById('ascendNextRankLabel').textContent = cur.label + ' ← ' + nxt.nextLabel;
+        document.getElementById('ascendNextRankPct').textContent = pct + '%';
+        document.getElementById('ascendNextRankBar').style.width = pct + '%';
+        if (need > 0) {
+          document.getElementById('ascendNextRankHint').textContent = '🎯 تحتاج ' + need + ' تحويل إضافي للوصول إلى ' + nxt.nextLabel;
+        } else {
+          document.getElementById('ascendNextRankHint').textContent = '🚀 جاهز للترقية! حوّل الآن';
+        }
+      } else {
+        document.getElementById('ascendNextRankBox').style.display = 'none';
+      }
+    } catch(_) {}
 
     // الرتبة
     document.getElementById('ascendRankEmoji').textContent = rank.rank_emoji || '🥉';
@@ -8184,6 +8251,51 @@ def webapp_platform_services():
         if r.get("error") == "invalid_source":
             return jsonify({"ok":False, **r}),400
         return jsonify({"ok":True, **r})
+
+    if op=="ascend_leaderboard_full":
+        # ZYN ASCEND v2 — قائمة موسّعة (Top 50 فقط)
+        identity = _platform_identity(user)
+        def q_lb_full(cur):
+            cur.execute("""
+                SELECT p.identity_key,
+                       COALESCE(u.display_name, u.username, 'عضو') AS name,
+                       p.iron, p.silver, p.gold, p.diamond, p.golden,
+                       (p.golden*1000000 + p.diamond*10000 + p.gold*100 + p.silver) AS score
+                FROM ai_for_ascend_players p
+                LEFT JOIN ai_for_users u ON u.identity_key = p.identity_key
+                ORDER BY score DESC, p.golden DESC, p.diamond DESC, p.gold DESC, p.silver DESC, p.iron DESC
+                LIMIT 50
+            """)
+            rows = cur.fetchall() or []
+            out = []
+            for i, row in enumerate(rows):
+                out.append({
+                    "position": i + 1,
+                    "name": _display_name_by_identity(cur, str(row["identity_key"])),
+                    "iron": int(row.get("iron") or 0),
+                    "silver": int(row.get("silver") or 0),
+                    "gold": int(row.get("gold") or 0),
+                    "diamond": int(row.get("diamond") or 0),
+                    "golden": int(row.get("golden") or 0),
+                    "is_me": (str(row.get("identity_key")) == str(identity)),
+                })
+            # مركز اللاعب الحالي إن لم يكن في Top 50
+            me_position = None
+            for item in out:
+                if item["is_me"]:
+                    me_position = item["position"]; break
+            if me_position is None:
+                cur.execute("""
+                    SELECT COUNT(*) AS n FROM ai_for_ascend_players p
+                    WHERE (p.golden*1000000 + p.diamond*10000 + p.gold*100 + p.silver) >
+                          (SELECT (golden*1000000 + diamond*10000 + gold*100 + silver)
+                           FROM ai_for_ascend_players WHERE identity_key=%s)
+                """, (identity,))
+                pos_row = cur.fetchone() or {}
+                me_position = int(pos_row.get("n") or 0) + 1
+            return {"rows": out, "me_position": me_position, "total": len(out)}
+        r = _platform_db_query(q_lb_full) or {"rows": [], "me_position": None, "total": 0}
+        return jsonify({"ok": True, **r})
 
     if op=="ascend_genesis_teaser":
         identity = _platform_identity(user)

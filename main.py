@@ -4468,14 +4468,14 @@ function renderAscend(){
       <div id="ascendLegacy" style="margin-top:10px">⏳</div>
     </div>
 
-    <div id="ascendHintsBox" style="margin:14px 0"></div>
-
     <div class="statusBox" id="ascendGenesisBox" style="display:none;background:linear-gradient(135deg,#4a2e7a,#2a1a4d);color:#f5c84b;border:1px solid #f5c84b">
       <b>🔮 المرحلة القادمة: Genesis</b>
       <div id="ascendGenesis" class="small" style="margin-top:10px;color:#c8b6ff">⏳</div>
       <button class="mini" style="margin-top:10px;background:#f5c84b;color:#1a0f2e;border:0;border-radius:12px;padding:8px 16px;font-weight:800" id="ascendTeaserBtn">🔮 استكشاف Genesis</button>
       <div id="ascendTeaserResult" class="small" style="margin-top:8px"></div>
     </div>
+
+    <div id="ascendHintsBox" style="margin:14px 0"></div>
 
     <div class="statusBox">
       <b>🏅 المتصدرون</b>
@@ -8350,13 +8350,10 @@ def webapp_platform_services():
         identity = _platform_identity(user)
         def q_lb_full(cur):
             cur.execute("""
-                SELECT p.identity_key,
-                       COALESCE(u.display_name, u.username, 'عضو') AS name,
-                       p.iron, p.silver, p.gold, p.diamond, p.golden,
-                       (p.golden*1000000 + p.diamond*10000 + p.gold*100 + p.silver) AS score
-                FROM ai_for_ascend_players p
-                LEFT JOIN ai_for_users u ON u.identity_key = p.identity_key
-                ORDER BY score DESC, p.golden DESC, p.diamond DESC, p.gold DESC, p.silver DESC, p.iron DESC
+                SELECT identity_key, iron, silver, gold, diamond, golden,
+                       (golden*1000000 + diamond*10000 + gold*100 + silver) AS score
+                FROM ai_for_ascend_players
+                ORDER BY score DESC, golden DESC, diamond DESC, gold DESC, silver DESC, iron DESC
                 LIMIT 50
             """)
             rows = cur.fetchall() or []

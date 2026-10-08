@@ -4553,7 +4553,7 @@ async function loadAscend(){
     document.getElementById('ascendRankLabel').textContent = rank.rank_label || 'بداية الرحلة';
     let pos = rank.rank_position || 0;
     let total = rank.total_players || 1;
-    document.getElementById('ascendRankPosition').textContent = '📍 الموقع: ' + pos + ' من ' + total + ' · ' + (rank.total_conversions || 0) + ' تحويل';
+    document.getElementById('ascendRankPosition').textContent = '#' + pos + ' من ' + total;
 
     // النقاط
     document.getElementById('ascendPointsVal').textContent = Number(d.zyn_points||0);
@@ -8210,6 +8210,58 @@ def webapp_platform_services():
             rank_info = _platform_db_query(q_rank) or {}
         except Exception:
             rank_info = {}
+
+        # ZYN ASCEND v2 — حساب Streak تلقائيًا (UPSERT)
+        # محمي: أي فشل لا يؤثر على ascend_state
+        try:
+            def q_streak(cur):
+                cur.execute("SELECT streak_days, best_streak, last_activity_at FROM ai_for_ascend_ranks WHERE identity_key=%s", (identity,))
+                srow = cur.fetchone() or {}
+                streak = int(srow.get("streak_days") or 0)
+                best = int(srow.get("best_streak") or 0)
+                last_at = srow.get("last_activity_at")
+                # نحسب الفرق بالأيام
+                import datetime as _dt
+                now = _dt.datetime.now(_dt.timezone.utc)
+                if last_at:
+                    try:
+                        if last_at.tzinfo is None:
+                            last_at = last_at.replace(tzinfo=_dt.timezone.utc)
+                        days_diff = (now.date() - last_at.date()).days
+                    except Exception:
+                        days_diff = 999
+                else:
+                    days_diff = 999
+                if days_diff == 0:
+                    new_streak = streak if streak > 0 else 1
+                elif days_diff == 1:
+                    new_streak = streak + 1
+                else:
+                    new_streak = 1
+                new_best = max(best, new_streak)
+                cur.execute("""INSERT INTO ai_for_ascend_ranks
+                    (identity_key, rank_key, rank_label, highest_stage, total_conversions,
+                     rank_position, streak_days, best_streak, last_activity_at, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW())
+                    ON CONFLICT (identity_key) DO UPDATE SET
+                        streak_days = EXCLUDED.streak_days,
+                        best_streak = EXCLUDED.best_streak,
+                        last_activity_at = NOW(),
+                        updated_at = NOW()""",
+                    (identity,
+                     rank_info.get("rank_key") or "none",
+                     rank_info.get("rank_label") or "",
+                     rank_info.get("highest_stage") or "iron",
+                     int(rank_info.get("total_conversions") or 0),
+                     int(rank_info.get("rank_position") or 0),
+                     new_streak, new_best))
+                return {"streak_days": new_streak, "best_streak": new_best}
+            sres = _platform_db_query(q_streak) or {}
+            if sres:
+                rank_info["streak_days"] = sres.get("streak_days", 0)
+                rank_info["best_streak"] = sres.get("best_streak", 0)
+        except Exception:
+            pass
 
         # ZYN ASCEND v2 — حفظ الرتبة تلقائيًا (UPSERT) في الجدول الجديد فقط
         # محمي بالكامل: أي فشل هنا لا يؤثر على ascend_state

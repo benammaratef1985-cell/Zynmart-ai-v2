@@ -8116,6 +8116,34 @@ def webapp_platform_services():
             rank_info = _platform_db_query(q_rank) or {}
         except Exception:
             rank_info = {}
+
+        # ZYN ASCEND v2 — حفظ الرتبة تلقائيًا (UPSERT) في الجدول الجديد فقط
+        # محمي بالكامل: أي فشل هنا لا يؤثر على ascend_state
+        try:
+            if rank_info:
+                def q_upsert(cur):
+                    cur.execute("""INSERT INTO ai_for_ascend_ranks
+                        (identity_key, rank_key, rank_label, highest_stage,
+                         total_conversions, rank_position, updated_at)
+                        VALUES (%s,%s,%s,%s,%s,%s,NOW())
+                        ON CONFLICT (identity_key) DO UPDATE SET
+                            rank_key = EXCLUDED.rank_key,
+                            rank_label = EXCLUDED.rank_label,
+                            highest_stage = EXCLUDED.highest_stage,
+                            total_conversions = EXCLUDED.total_conversions,
+                            rank_position = EXCLUDED.rank_position,
+                            updated_at = NOW()""",
+                        (identity,
+                         rank_info.get("rank_key") or "none",
+                         rank_info.get("rank_label") or "",
+                         rank_info.get("highest_stage") or "iron",
+                         int(rank_info.get("total_conversions") or 0),
+                         int(rank_info.get("rank_position") or 0)))
+                    return True
+                _platform_db_query(q_upsert)
+        except Exception:
+            pass
+
         return jsonify({
             "ok": True,
             "ascend": r,

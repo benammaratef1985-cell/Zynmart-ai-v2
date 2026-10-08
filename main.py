@@ -8074,16 +8074,25 @@ def webapp_platform_services():
         pts = _platform_db_query(q_pts) or 0
         # الرتبة + الإرث
         def q_rank(cur):
-            cur.execute("SELECT rank_key, rank_label, highest_stage, total_conversions, rank_position, streak_days, best_streak, genesis_eligible, genesis_position FROM ai_for_ascend_ranks WHERE identity_key=%s", (identity,))
-            row = cur.fetchone()
-            # احسب الرتبة من الحالة الحالية إن لم يوجد صف
+            # ZYN ASCEND v2 — قراءة الحالة الفعلية للاعب من ai_for_ascend_players
+            cur.execute("SELECT iron, silver, gold, diamond, golden, total_converted FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
+            prow = cur.fetchone() or {}
+            # صف الرتبة المخزّن (إن وجد) — للحقول الإضافية فقط (streak/genesis_position)
+            cur.execute("SELECT streak_days, best_streak, genesis_position FROM ai_for_ascend_ranks WHERE identity_key=%s", (identity,))
+            row = cur.fetchone() or {}
+            # احسب الرتبة من الحالة الحالية
             current_stage = "iron"
-            total_conv = r.get("total_converted", 0)
-            if r.get("golden", 0) >= 10: current_stage = "golden"
-            elif r.get("diamond", 0) >= 1: current_stage = "diamond"
-            elif r.get("gold", 0) >= 1: current_stage = "gold"
-            elif r.get("silver", 0) >= 1: current_stage = "silver"
-            elif r.get("iron", 0) >= 1: current_stage = "iron"
+            total_conv = int(prow.get("total_converted") or 0)
+            _golden   = int(prow.get("golden") or 0)
+            _diamond  = int(prow.get("diamond") or 0)
+            _gold     = int(prow.get("gold") or 0)
+            _silver   = int(prow.get("silver") or 0)
+            _iron     = int(prow.get("iron") or 0)
+            if _golden >= 10: current_stage = "golden"
+            elif _diamond >= 1: current_stage = "diamond"
+            elif _gold >= 1: current_stage = "gold"
+            elif _silver >= 1: current_stage = "silver"
+            elif _iron >= 1: current_stage = "iron"
             # ابحث عن الرتبة
             rank = None
             for rk in reversed(ASCEND_RANKS):
@@ -8098,7 +8107,7 @@ def webapp_platform_services():
             cur.execute("SELECT COUNT(*) AS n FROM ai_for_ascend_players")
             total_row = cur.fetchone() or {}
             total_players = int(total_row.get("n") or 1)
-            genesis_eligible = (current_stage == "golden" and r.get("golden", 0) >= 10)
+            genesis_eligible = (current_stage == "golden" and (_golden or 0) >= 10)
             return {
                 "rank_key": rank["key"],
                 "rank_label": rank["label"],

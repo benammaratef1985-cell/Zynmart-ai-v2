@@ -8112,7 +8112,10 @@ def webapp_platform_services():
                 "genesis_eligible": genesis_eligible,
                 "genesis_position": int((row or {}).get("genesis_position") or 0) if row else None,
             }
-        rank_info = _platform_db_query(q_rank) or {}
+        try:
+            rank_info = _platform_db_query(q_rank) or {}
+        except Exception:
+            rank_info = {}
         return jsonify({
             "ok": True,
             "ascend": r,
@@ -8188,6 +8191,7 @@ def webapp_platform_services():
             # النتيجة
             cur.execute("SELECT iron,silver,gold,diamond,golden,total_converted,stage,updated_at FROM ai_for_ascend_players WHERE identity_key=%s", (identity,))
             new_row = cur.fetchone() or {}
+            # (حماية) لا شيء إضافي — نبقي المنطق كما هو تمامًا
             if from_cur == "zyn_points":
                 cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
                 new_src = int((cur.fetchone() or {}).get("points") or 0)
@@ -8237,7 +8241,10 @@ def webapp_platform_services():
                 "teaser_text": ASCEND_HINTS["genesis_teaser"],
                 "legacy_note": ASCEND_HINTS["legacy_note"],
             }
-        r = _platform_db_query(q_teaser)
+        try:
+            r = _platform_db_query(q_teaser)
+        except Exception:
+            r = None
         return jsonify({"ok": True, **(r or {})})
 
     if op=="ascend_leaderboard":

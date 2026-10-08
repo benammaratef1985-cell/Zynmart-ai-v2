@@ -4418,32 +4418,32 @@ function renderAscend(){
       <div style="position:absolute;top:-30%;left:-30%;width:160%;height:160%;background:radial-gradient(circle,rgba(245,200,75,.15) 0%,transparent 60%);pointer-events:none"></div>
       <div style="font-size:52px;filter:drop-shadow(0 4px 12px rgba(245,200,75,.5))" id="ascendRankEmoji">🥉</div>
       <div style="font-size:20px;font-weight:900;margin-top:8px;letter-spacing:.5px" id="ascendRankLabel">Iron Ascender</div>
-      <div style="display:flex;justify-content:center;gap:18px;margin-top:12px;flex-wrap:wrap">
-        <div style="background:rgba(255,255,255,.08);padding:6px 12px;border-radius:10px">
-          <div style="font-size:11px;opacity:.7">📍 الموقع</div>
-          <div style="font-size:15px;font-weight:800" id="ascendRankPosition">—</div>
+      <div dir="rtl" style="display:flex;justify-content:center;gap:14px;margin-top:14px;flex-wrap:wrap">
+        <div style="background:rgba(255,255,255,.08);padding:8px 14px;border-radius:12px;min-width:80px;border:1px solid rgba(245,200,75,.25)">
+          <div style="font-size:11px;opacity:.75;margin-bottom:3px">📍 الموقع</div>
+          <div style="font-size:15px;font-weight:800;line-height:1.3" id="ascendRankPosition">—</div>
         </div>
-        <div style="background:rgba(255,255,255,.08);padding:6px 12px;border-radius:10px">
-          <div style="font-size:11px;opacity:.7">🔥 سلسلة</div>
-          <div style="font-size:15px;font-weight:800" id="ascendStreak">—</div>
+        <div style="background:rgba(255,255,255,.08);padding:8px 14px;border-radius:12px;min-width:80px;border:1px solid rgba(245,200,75,.25)">
+          <div style="font-size:11px;opacity:.75;margin-bottom:3px">🔥 سلسلة</div>
+          <div style="font-size:15px;font-weight:800;line-height:1.3" id="ascendStreak">—</div>
         </div>
-        <div style="background:rgba(255,255,255,.08);padding:6px 12px;border-radius:10px">
-          <div style="font-size:11px;opacity:.7">⭐ الأفضل</div>
-          <div style="font-size:15px;font-weight:800" id="ascendBestStreak">—</div>
+        <div style="background:rgba(255,255,255,.08);padding:8px 14px;border-radius:12px;min-width:80px;border:1px solid rgba(245,200,75,.25)">
+          <div style="font-size:11px;opacity:.75;margin-bottom:3px">⭐ الأفضل</div>
+          <div style="font-size:15px;font-weight:800;line-height:1.3" id="ascendBestStreak">—</div>
         </div>
       </div>
     </div>
 
-    <div class="statusBox" id="ascendNextRankBox" style="display:none;background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#f5c84b;border:1px solid #7b4dd9">
+    <div class="statusBox" id="ascendNextRankBox" dir="rtl" style="display:none;background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#f5c84b;border:1px solid #7b4dd9">
       <div style="display:flex;justify-content:space-between;align-items:center">
-        <b>🎯 الرتبة التالية</b>
-        <span class="small" id="ascendNextRankPct" style="opacity:.8">—</span>
+        <span class="small" id="ascendNextRankPct" style="opacity:.85;font-weight:800;background:rgba(245,200,75,.15);padding:3px 10px;border-radius:8px">—</span>
+        <b style="font-size:15px">🎯 الرتبة التالية</b>
       </div>
-      <div id="ascendNextRankLabel" style="margin-top:8px;font-size:15px;font-weight:800">—</div>
-      <div style="height:8px;background:#222;border-radius:4px;overflow:hidden;margin-top:10px">
-        <div id="ascendNextRankBar" style="height:100%;background:linear-gradient(90deg,#f5c84b,#ff9f1c);width:0%;transition:width .8s ease"></div>
+      <div id="ascendNextRankLabel" style="margin-top:10px;font-size:16px;font-weight:800;text-align:right">—</div>
+      <div style="height:10px;background:#222;border-radius:5px;overflow:hidden;margin-top:10px;position:relative">
+        <div id="ascendNextRankBar" style="height:100%;background:linear-gradient(90deg,#f5c84b,#ff9f1c);width:0%;transition:width .8s ease;border-radius:5px"></div>
       </div>
-      <div class="small" id="ascendNextRankHint" style="margin-top:8px;opacity:.75">—</div>
+      <div class="small" id="ascendNextRankHint" style="margin-top:10px;opacity:.85;text-align:right;line-height:1.5">—</div>
     </div>
 
     <div class="statusBox" id="ascendPoints" style="background:linear-gradient(135deg,#a66cff,#7b4dd9);color:#fff">
@@ -4502,35 +4502,44 @@ async function loadAscend(){
       document.getElementById('ascendBestStreak').textContent = (Number(rank.best_streak||0) > 0) ? (Number(rank.best_streak||0) + ' يوم') : '—';
     } catch(_) {}
 
-    // الرتبة التالية
+    // ZYN ASCEND v2 — الرتبة التالية (منطق صحيح: من المرحلة الفعلية)
     try {
-      var RANK_ORDER = [
-        {key:'iron_1',     label:'Iron Ascender',    min:0,    next:'silver_1',   nextLabel:'Silver Seeker'},
-        {key:'silver_1',   label:'Silver Seeker',    min:1,    next:'gold_1',     nextLabel:'Gold Pioneer'},
-        {key:'gold_1',     label:'Gold Pioneer',     min:2,    next:'diamond_1',  nextLabel:'Crystal Elite'},
-        {key:'diamond_1',  label:'Crystal Elite',    min:3,    next:'golden_1',   nextLabel:'Golden Legend'},
-        {key:'golden_1',   label:'Golden Legend',    min:4,    next:'genesis',    nextLabel:'Genesis Witness'}
+      // ترتيب المراحل الفعلي + الرتب المقابلة
+      var STAGE_FLOW = [
+        {stage:'iron',    stageLabel:'Iron',    rankLabel:'Iron Ascender',   emoji:'🥉', nextStage:'silver',  nextRankLabel:'Silver Seeker'},
+        {stage:'silver',  stageLabel:'Silver',  rankLabel:'Silver Seeker',   emoji:'🥈', nextStage:'gold',    nextRankLabel:'Gold Pioneer'},
+        {stage:'gold',    stageLabel:'Gold',    rankLabel:'Gold Pioneer',    emoji:'🥇', nextStage:'diamond', nextRankLabel:'Crystal Elite'},
+        {stage:'diamond', stageLabel:'Diamond', rankLabel:'Crystal Elite',   emoji:'💎', nextStage:'golden',  nextRankLabel:'Golden Legend'},
+        {stage:'golden',  stageLabel:'Golden',  rankLabel:'Golden Legend',   emoji:'👑', nextStage:'genesis', nextRankLabel:'Genesis Witness'}
       ];
-      var currentKey = rank.rank_key || 'iron_1';
-      var idx = -1;
-      for (var i=0; i<RANK_ORDER.length; i++) { if (RANK_ORDER[i].key === currentKey) { idx = i; break; } }
-      if (idx >= 0 && idx < RANK_ORDER.length - 1) {
-        var cur = RANK_ORDER[idx];
-        var nxt = RANK_ORDER[idx + 1];
-        // نحسب التقدم التقريبي: كم تحويل في المستوى الحالي من أصل 10
-        var stageKey = (cur.key||'').replace('_1','');
-        var curCount = Number(a[stageKey] || 0);
-        var need = 10 - curCount;
-        if (need < 0) need = 0;
-        var pct = Math.min(100, Math.round((curCount / 10) * 100));
+      // نحدد المرحلة الحالية: أعلى مرحلة فيها تحويل واحد على الأقل
+      var currentIdx = 0;
+      for (var i = STAGE_FLOW.length - 1; i >= 0; i--) {
+        var cnt = Number(a[STAGE_FLOW[i].stage] || 0);
+        var totalConv = Number(a.total_converted || 0);
+        // المرحلة الفعلية: iron إذا totalConv >= 1، وإلا iron
+        if (i === 0 && totalConv >= 1) { currentIdx = 0; break; }
+        if (cnt >= 1) { currentIdx = i; break; }
+      }
+      // إذا لا يوجد أي تحويل بعد → لا نعرض صندوق "الرتبة التالية" بشكل misleading
+      var totalConv = Number(a.total_converted || 0);
+      var curStage = STAGE_FLOW[currentIdx];
+      var curCount = Number(a[curStage.stage] || 0);
+      var need = 10 - curCount;
+      if (need < 0) need = 0;
+      var pct = Math.min(100, Math.round((curCount / 10) * 100));
+
+      // نعرض الصندوق إذا currentIdx < الأخير
+      if (currentIdx < STAGE_FLOW.length - 1) {
+        var nxt = STAGE_FLOW[currentIdx + 1];
         document.getElementById('ascendNextRankBox').style.display = 'block';
-        document.getElementById('ascendNextRankLabel').textContent = cur.label + ' ← ' + nxt.nextLabel;
+        document.getElementById('ascendNextRankLabel').textContent = curStage.emoji + ' ' + curStage.rankLabel + '  ←  ' + nxt.nextRankLabel;
         document.getElementById('ascendNextRankPct').textContent = pct + '%';
         document.getElementById('ascendNextRankBar').style.width = pct + '%';
-        if (need > 0) {
-          document.getElementById('ascendNextRankHint').textContent = '🎯 تحتاج ' + need + ' تحويل إضافي للوصول إلى ' + nxt.nextLabel;
+        if (curCount >= 10) {
+          document.getElementById('ascendNextRankHint').textContent = '🚀 جاهز للترقية! اضغط التحويل الآن';
         } else {
-          document.getElementById('ascendNextRankHint').textContent = '🚀 جاهز للترقية! حوّل الآن';
+          document.getElementById('ascendNextRankHint').textContent = '🎯 تحتاج ' + need + ' ' + curStage.stageLabel + ' إضافي للوصول إلى ' + nxt.nextRankLabel;
         }
       } else {
         document.getElementById('ascendNextRankBox').style.display = 'none';

@@ -5085,7 +5085,89 @@ async function pinNFTMetadata(){let m=document.getElementById('nftMsg');let meta
 async function mintCurrentNFT(){let m=document.getElementById('nftMsg'),id=window.__AI_FOR_NFT_PROJECT_ID||'',recipient=document.getElementById('nftRecipient')?.value.trim();if(!id){m.textContent='⚠️ احفظ المشروع أولًا.';return}if(!recipient){m.textContent='⚠️ أدخل عنوان Pi Testnet للمستلم.';return}m.textContent='⏳ جاري التحقق من Trustline وتنفيذ Mint على Pi Testnet...';try{let d=await api('/api/app/nft/projects/'+encodeURIComponent(id)+'/mint',{method:'POST',body:JSON.stringify({recipient_address:recipient})});if(!d.ok)throw new Error(d.error||'mint_failed');document.getElementById('nftAssetId').value=d.nft?.asset_id||'';m.innerHTML='<div class="statusBox">✅ تم Mint NFT على Pi Testnet.<br>Asset: <b>'+esc(d.nft?.asset_id||'')+'</b><br>TX: <b>'+esc(d.nft?.tx_hash||'')+'</b><br>المبلغ: 1 وحدة فريدة.</div>';loadNFTProjects();loadNFTStatus()}catch(e){m.textContent='⚠️ '+(e.message||'تعذر تنفيذ Mint. إذا ظهر recipient_trustline_required يجب إنشاء Trustline لهذا الأصل أولًا.')}}
 async function generateNFTMetadata(){let name=document.getElementById('nftName')?.value.trim()||'AI for NFT',description=document.getElementById('nftDescription')?.value.trim()||'',collection=document.getElementById('nftCollection')?.value.trim()||'';try{let d=await platformSvc('nft_metadata',{name,description,collection});document.getElementById('nftMsg').innerHTML='<div class="statusBox"><pre style="white-space:pre-wrap">'+esc(JSON.stringify(d.metadata,null,2))+'</pre></div>'}catch(e){document.getElementById('nftMsg').textContent='⚠️ تعذر إنشاء Metadata.'}}
 async function createNFTProject(){let m=document.getElementById('nftMsg');if(!m)return;m.textContent='⏳ جاري حفظ المسودة...';try{let d=await api('/api/app/nft/projects',{method:'POST',body:JSON.stringify({name:document.getElementById('nftName').value,collection_name:document.getElementById('nftCollection').value,description:document.getElementById('nftDescription').value,marketplace_url:'',genesis_enabled:false,genesis_benefits:'',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100),onchain_asset_id:document.getElementById('nftAssetId')?.value.trim()||''})});if(!d.ok)throw new Error(d.error||'save_failed');window.__AI_FOR_NFT_PROJECT_ID=d.project?.project_id||'';m.textContent='✅ تم حفظ مسودة NFT في PostgreSQL. استخدم زر نشر بجانب المشروع.';loadNFTProjects()}catch(e){m.textContent='⚠️ '+(e.message||'')}}
-async function loadNFTProjects(){let r=document.getElementById('nftProjects');if(!r)return;try{let d=await api('/api/app/nft/projects');if(!d.ok)throw new Error(d.error||'load_failed');r.innerHTML=(d.projects||[]).length?(d.projects||[]).map(p=>`<div class="row">🖼️ <b>${esc(p.name||'بدون اسم')}</b> · ${esc(p.collection_name||'بدون مجموعة')} · ${esc(p.status)} · Royalty ${(Number(p.royalty_bps||0)/100).toFixed(2)}%${p.onchain_asset_id?' · On-chain':''}<button class="mini" style="float:left" onclick="publishMyNFT('${esc(p.project_id)}')">نشر</button></div>`).join(''):'<span class="small">لا توجد مسودات بعد.</span>'}catch(e){r.textContent='⚠️ '+(e.message||'')}}
+async function loadNFTProjects(){
+  var r=document.getElementById('nftProjects');
+  if(!r)return;
+  try{
+    var d=await api('/api/app/nft/projects');
+    if(!d.ok)throw new Error(d.error||'load_failed');
+    var list=(d.projects||[]);
+    if(!list.length){r.innerHTML='<div class="small" style="text-align:center;padding:14px;opacity:.7">📭 لا توجد مشاريع بعد.</div>';return}
+    r.innerHTML=list.map(function(p){
+      var st=String(p.status||'draft');
+      var stColor = st==='draft' ? '#f5c84b' : (st==='published'||st==='ipfs_pinned') ? '#31e981' : (st==='minted' ? '#7b4dd9' : '#c8b6ff');
+      var stLabel = st==='draft' ? '📝 مسودة' : (st==='published' ? '✅ منشور' : (st==='ipfs_pinned' ? '📌 IPFS' : (st==='minted' ? '⛓️ Minted' : st)));
+      var isDraft = st==='draft';
+      return '<div style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border:1px solid #4a2e7a;border-radius:14px;padding:12px;margin-bottom:10px" dir="rtl">'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'+
+          '<div style="flex:1;text-align:right">'+
+            '<div style="font-weight:800;font-size:14px;color:#f5c84b">🖼️ '+esc(p.name||'بدون اسم')+'</div>'+
+            '<div class="small" style="color:#c8b6ff;margin-top:4px">'+esc(p.collection_name||'بدون مجموعة')+' · Royalty '+(Number(p.royalty_bps||0)/100).toFixed(2)+'%'+(p.onchain_asset_id?' · <span style="color:#31e981">On-chain</span>':'')+'</div>'+
+          '</div>'+
+          '<div style="background:'+stColor+';color:#1a0f2e;padding:3px 10px;border-radius:8px;font-size:11px;font-weight:800">'+stLabel+'</div>'+
+        '</div>'+
+        '<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">'+
+          (isDraft ? '<button type="button" onclick="editMyNFT(\''+esc(p.project_id)+'\')" style="background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:10px;padding:7px 12px;font-weight:800;font-size:12px;cursor:pointer">✏️ تعديل</button>' : '')+
+          (isDraft ? '<button type="button" onclick="deleteMyNFT(\''+esc(p.project_id)+'\')" style="background:linear-gradient(135deg,#a33,#721c1c);color:#fff;border:0;border-radius:10px;padding:7px 12px;font-weight:800;font-size:12px;cursor:pointer">🗑️ مسح</button>' : '')+
+          '<button type="button" onclick="publishMyNFT(\''+esc(p.project_id)+'\')" style="background:linear-gradient(135deg,#31e981,#0a6b3a);color:#fff;border:0;border-radius:10px;padding:7px 12px;font-weight:800;font-size:12px;cursor:pointer">🚀 نشر</button>'+
+        '</div>'+
+      '</div>';
+    }).join('');
+  }catch(e){r.innerHTML='<div class="small" style="color:#a33;text-align:center">⚠️ '+(e.message||'')+'</div>'}
+}
+
+async function deleteMyNFT(id){
+  if(!id) return;
+  if(!confirm('هل تريد حذف هذه المسودة نهائيًا؟')) return;
+  var m=document.getElementById('nftMsg');
+  if(m) m.textContent='⏳ جاري الحذف...';
+  try{
+    var d=await api('/api/app/nft/projects/'+encodeURIComponent(id),{method:'DELETE'});
+    if(!d.ok) throw new Error(d.error||'delete_failed');
+    if(m) m.innerHTML='<span style="color:#31e981">✅ تم حذف المسودة</span>';
+    loadNFTProjects();
+  }catch(e){
+    var msg=e.message||'';
+    if(msg==='only_drafts_can_be_deleted') msg='لا يمكن حذف مشروع منشور';
+    if(m) m.innerHTML='<span style="color:#a33">⚠️ '+msg+'</span>';
+  }
+}
+
+function editMyNFT(id){
+  if(!id) return;
+  // نبحث عن المشروع في الذاكرة إذا كانت القائمة محملة
+  var list = (window.__NFT_PROJECTS_CACHE || []);
+  var p = null;
+  for(var i=0;i<list.length;i++){ if(String(list[i].project_id)===String(id)){ p=list[i]; break; } }
+  if(!p){
+    // نحمّل الحقول من الخدمة
+    api('/api/app/nft/projects').then(function(d){
+      var arr=(d.projects||[]);
+      for(var j=0;j<arr.length;j++){ if(String(arr[j].project_id)===String(id)){ p=arr[j]; break; } }
+      if(!p) return;
+      fillEditForm(p);
+    });
+  } else {
+    fillEditForm(p);
+  }
+}
+
+function fillEditForm(p){
+  var nameEl=document.getElementById('nftName');
+  var collEl=document.getElementById('nftCollection');
+  var descEl=document.getElementById('nftDescription');
+  var royEl=document.getElementById('nftRoyalty');
+  if(nameEl) nameEl.value = p.name || '';
+  if(collEl) collEl.value = p.collection_name || '';
+  if(descEl) descEl.value = p.description || '';
+  if(royEl) royEl.value = ((Number(p.royalty_bps||500))/100).toFixed(2);
+  window.__AI_FOR_NFT_PROJECT_ID = p.project_id;
+  var m=document.getElementById('nftMsg');
+  if(m) m.innerHTML='<span style="color:#f5c84b">✏️ وضع التعديل — عدّل الحقول ثم اضغط "حفظ المشروع" للتحديث</span>';
+  // scroll للأعلى
+  var s=document.getElementById('nftName');
+  if(s) s.scrollIntoView({behavior:'smooth',block:'center'});
+}
 async function publishMyNFT(id){try{let d=await api('/api/app/nft/projects/'+encodeURIComponent(id)+'/publish',{method:'POST'});if(!d.ok)throw new Error(d.error||'publish_failed');window.__AI_FOR_NFT_PROJECT_ID=id;document.getElementById('nftMsg').textContent='✅ تم نشر NFT. الإدراج التجاري يتطلب أصل Pi Blockchain وIPFS.';loadNFTProjects()}catch(e){document.getElementById('nftMsg').textContent='⚠️ '+(e.message||'تعذر النشر')}}
 
 function openNFTListingForm(){let m=document.getElementById('nftMsg');if(!m)return;m.innerHTML='<div class="statusBox"><b>إدراج NFT في Marketplace</b><input id="marketPrice" type="number" min="0.0000001" step="0.0000001" placeholder="السعر بـ Pi" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><select id="marketType" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><option value="fixed">Fixed Price</option><option value="auction">Auction</option></select><input id="marketReserve" type="number" min="0" step="0.0000001" placeholder="Reserve Price (Auction اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="marketBuyNow" type="number" min="0" step="0.0000001" placeholder="Buy Now (Auction اختياري)" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="marketIncrement" type="number" min="0.01" max="100" step="0.01" value="1" placeholder="Minimum Bid Increment %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTListing()">🚀 نشر الإدراج</button><div class="small" style="margin-top:8px">عملة Marketplace الحالية: Pi. رسوم ZynMart تُحسب من الإعدادات الآمنة للخادم.</div></div>'}
@@ -7050,6 +7132,68 @@ def webapp_nft_projects():
     if result.get("ok"):
         control_audit(user["id"], "nft_project_create", result["project"]["project_id"], {"name": result["project"]["name"]})
     return jsonify(result), (201 if result.get("ok") else 503)
+
+@app.route("/api/app/nft/projects/<project_id>", methods=["DELETE"])
+def webapp_nft_project_delete(project_id):
+    """ZYN ASCEND v2 — حذف مسودة NFT (فقط draft)"""
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    pid = str(project_id or "").strip()
+    if not pid:
+        return jsonify({"ok":False,"error":"project_id_required"}),400
+    identity = _webapp_identity_key(user)
+    def q_delete(cur):
+        cur.execute("SELECT status FROM ai_for_nft_projects WHERE project_id=%s AND owner_identity=%s",(pid,identity))
+        row = cur.fetchone()
+        if not row:
+            return {"error":"not_found"}
+        st = str(row.get("status") or "")
+        if st not in ("draft",""):
+            return {"error":"only_drafts_can_be_deleted","current_status":st}
+        cur.execute("DELETE FROM ai_for_nft_projects WHERE project_id=%s AND owner_identity=%s",(pid,identity))
+        return {"ok":True,"deleted":pid}
+    r = _platform_db_query(q_delete) or {}
+    if r.get("error") == "not_found":
+        return jsonify({"ok":False,"error":"not_found"}),404
+    if r.get("error") == "only_drafts_can_be_deleted":
+        return jsonify({"ok":False,"error":"only_drafts_can_be_deleted","current_status":r.get("current_status")}),400
+    return jsonify({"ok":True,"deleted":pid})
+
+@app.route("/api/app/nft/projects/<project_id>/update", methods=["POST"])
+def webapp_nft_project_update(project_id):
+    """ZYN ASCEND v2 — تعديل مسودة NFT (فقط draft)"""
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    pid = str(project_id or "").strip()
+    if not pid:
+        return jsonify({"ok":False,"error":"project_id_required"}),400
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name") or "")[:160]
+    desc = str(body.get("description") or "")[:2000]
+    coll = str(body.get("collection_name") or "")[:160]
+    royalty = max(0, min(NFT_MAX_ROYALTY_BPS, int(body.get("royalty_bps") or NFT_DEFAULT_ROYALTY_BPS)))
+    identity = _webapp_identity_key(user)
+    def q_update(cur):
+        cur.execute("SELECT status FROM ai_for_nft_projects WHERE project_id=%s AND owner_identity=%s",(pid,identity))
+        row = cur.fetchone()
+        if not row:
+            return {"error":"not_found"}
+        st = str(row.get("status") or "")
+        if st not in ("draft",""):
+            return {"error":"only_drafts_can_be_edited","current_status":st}
+        cur.execute("UPDATE ai_for_nft_projects SET name=%s, description=%s, collection_name=%s, metadata = COALESCE(metadata,'{}'::jsonb) || %s::jsonb, updated_at=NOW() WHERE project_id=%s AND owner_identity=%s",
+                    (name, desc, coll, json.dumps({"royalty_bps":royalty}), pid, identity))
+        return {"ok":True,"updated":pid}
+    r = _platform_db_query(q_update) or {}
+    if r.get("error") == "not_found":
+        return jsonify({"ok":False,"error":"not_found"}),404
+    if r.get("error") == "only_drafts_can_be_edited":
+        return jsonify({"ok":False,"error":"only_drafts_can_be_edited","current_status":r.get("current_status")}),400
+    return jsonify({"ok":True,"updated":pid})
 
 @app.route("/api/app/nft/projects/<project_id>/publish", methods=["POST"])
 def webapp_nft_project_publish(project_id):

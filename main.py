@@ -4884,7 +4884,7 @@ async function handleNFTImageUpload(ev){
   var r = document.getElementById('nftImageResult');
   if(!f) return;
   // الحد الأقصى 5 ميجا قبل الضغط
-  if(f.size > 15*1024*1024){ if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ الصورة كبيرة جدًا (الحد 15MB قبل الضغط)</div>'; return; }
+  if(f.size > 3*1024*1024){ if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ الصورة كبيرة جدًا (الحد 3MB)</div>'; return; }
   if(r) r.innerHTML='<div style="text-align:center;color:#c8b6ff">⏳ جاري ضغط الصورة...</div>';
   try{
     var compressed = await compressImage(f, 1024, 0.85);
@@ -4896,27 +4896,13 @@ async function handleNFTImageUpload(ev){
 }
 
 function compressImage(file, maxDim, quality){
+  // قراءة مباشرة بدون Canvas (أكثر توافقًا مع Pi Browser)
   return new Promise(function(resolve, reject){
     var reader = new FileReader();
     reader.onload = function(e){
-      var img = new Image();
-      img.onload = function(){
-        var w = img.width, h = img.height;
-        if(w > h && w > maxDim){ h = Math.round(h * maxDim / w); w = maxDim; }
-        else if(h > maxDim){ w = Math.round(w * maxDim / h); h = maxDim; }
-        var canvas = document.createElement('canvas');
-        canvas.width = w; canvas.height = h;
-        var ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, w, h);
-        try {
-          var dataUrl = canvas.toDataURL('image/jpeg', quality);
-          resolve(dataUrl);
-        } catch(err){ reject(err); }
-      };
-      img.onerror = reject;
-      img.src = e.target.result;
+      resolve(e.target.result);
     };
-    reader.onerror = reject;
+    reader.onerror = function(err){ reject(err); };
     reader.readAsDataURL(file);
   });
 }

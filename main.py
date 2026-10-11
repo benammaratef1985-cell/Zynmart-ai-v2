@@ -4848,6 +4848,64 @@ function toggleAscendFullLeaderboard(){
   }
 }
 
+async function loadWalletHistory(){
+  var box = document.getElementById('walletHistoryBox');
+  if(!box) return;
+  box.innerHTML = '<div style="text-align:center;color:#c8b6ff;padding:14px">⏳ جاري تحميل السجل...</div>';
+  try{
+    var d = await platformSvc('wallet_history');
+    if(!d || !d.ok) throw new Error('history_failed');
+    var items = d.items || [];
+    var totals = d.totals || {};
+    var html = '';
+    // الإجماليات
+    html += '<div dir="rtl" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">';
+    html += '<div style="background:linear-gradient(135deg,#0a6b3a,#31e981);color:#fff;padding:10px;border-radius:12px;text-align:center"><div style="font-size:11px;opacity:.85">💰 إجمالي مكتسب</div><div style="font-size:18px;font-weight:900;margin-top:4px">+' + Number(totals.earned||0) + '</div></div>';
+    html += '<div style="background:linear-gradient(135deg,#721c1c,#a33);color:#fff;padding:10px;border-radius:12px;text-align:center"><div style="font-size:11px;opacity:.85">💸 إجمالي مصروف</div><div style="font-size:18px;font-weight:900;margin-top:4px">-' + Number(totals.spent||0) + '</div></div>';
+    html += '</div>';
+    // الرصيد الحالي
+    html += '<div style="background:linear-gradient(135deg,#4a2e7a,#7b4dd9);color:#fff;padding:10px;border-radius:12px;text-align:center;margin-bottom:12px"><div style="font-size:11px;opacity:.85">📊 الرصيد الحالي</div><div style="font-size:22px;font-weight:900;margin-top:4px">' + Number(totals.current||0) + ' <span style="font-size:12px">ZYN Points</span></div></div>';
+    // القائمة
+    if(!items.length){
+      html += '<div class="small" style="text-align:center;padding:14px;opacity:.7">لا توجد عمليات بعد.</div>';
+    } else {
+      var icons = {
+        earn: '💰',
+        ascend: '🏆',
+        zyn: '💎'
+      };
+      var labels = {
+        'community_post': '📝 منشور',
+        'visit': '👁️ زيارة',
+        'zynmart_first': '⭐ ZynMart',
+        'message_send': '💬 رسالة',
+        'ai_use': '🤖 AI',
+        'nft_create': '🎨 NFT',
+        'convert': '🔄 تحويل'
+      };
+      html += '<div dir="rtl" style="background:#0f0f1a;border-radius:12px;padding:8px;max-height:400px;overflow-y:auto">';
+      items.forEach(function(it){
+        var p = Number(it.points||0);
+        var sign = p > 0 ? '+' : '';
+        var color = p > 0 ? '#31e981' : '#a33';
+        var icon = icons[it.kind] || '•';
+        var lbl = labels[it.event_type] || it.label || it.event_type || '—';
+        var time = '';
+        try{ if(it.created_at){ time = timeAgo(it.created_at); } }catch(_){}
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;border-bottom:1px solid #222">';
+        html += '<div style="font-size:12px;color:#c8b6ff">' + time + '</div>';
+        html += '<div style="flex:1;text-align:right;padding:0 8px;color:#fff;font-size:13px">' + icon + ' ' + esc(lbl) + '</div>';
+        html += '<div style="font-weight:900;font-size:13px;color:' + color + '">' + sign + p + '</div>';
+        html += '</div>';
+      });
+      html += '</div>';
+    }
+    box.innerHTML = html;
+  }catch(e){
+    box.innerHTML = '<div style="color:#a33;text-align:center">⚠️ تعذر تحميل السجل</div>';
+  }
+}
+
 async function loadGenesisTeaser(){
   let r = document.getElementById('ascendTeaserResult');
   if(r) r.innerHTML = '⏳ جاري تحميل المعلومات...';
@@ -5715,8 +5773,16 @@ document.getElementById('view').innerHTML=`
     <div id="zrCode" class="small" style="margin-top:10px"></div>
   </div>
 
+  <div class="statusBox" dir="rtl" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border:1px solid #4a2e7a">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <b style="color:#f5c84b;font-size:15px">📊 السجل الموحّد</b>
+      <button type="button" onclick="loadWalletHistory()" style="background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:8px;padding:5px 12px;font-weight:800;font-size:11px;cursor:pointer">🔄 تحديث</button>
+    </div>
+    <div id="walletHistoryBox">⏳</div>
+  </div>
+
   <div class="statusBox">
-    <b>📜 سجل التحويلات</b>
+    <b>📜 سجل تحويلات ZYN Token</b>
     <div id="zrHistory" class="small" style="margin-top:8px">⏳</div>
   </div>
 
@@ -5724,7 +5790,9 @@ document.getElementById('view').innerHTML=`
     <div class="small">💡 النقاط داخلية ولا تمثل أموالًا. السمعة تُبنى من نشاطك (لا تُحوَّل).</div>
   </div>
 </section>`;
-loadZynStatus();}
+loadZynStatus();
+  setTimeout(function(){ try{ loadWalletHistory(); }catch(_){} }, 600);
+}
 
 async function loadZynStatus(){
   try{
@@ -9277,6 +9345,77 @@ def webapp_platform_services():
         if not result: return jsonify({"ok":False,"error":"database_unavailable"}),503
         if not result.get("already"): _reward_points(user,int(result.get("points",0)))
         return jsonify({"ok":True,"awarded":0 if result.get("already") else int(result.get("points",0)),"already_answered":bool(result.get("already")),"points":int(_reward_points(user,0) or 0)})
+    if op=="wallet_history":
+        # ZYN ASCEND v2 — سجل موحّد: كسب + صرف (ASCEND + NFT + ZYN)
+        identity = _platform_identity(user)
+        limit = 60
+        def q_wallet_history(cur):
+            rows = []
+            # 1) الكسب من reward_ledger
+            cur.execute("""SELECT event_type, points, source_key, created_at
+                           FROM ai_for_reward_ledger
+                           WHERE identity_key=%s
+                           ORDER BY created_at DESC LIMIT %s""", (identity, limit))
+            for r in cur.fetchall() or []:
+                rows.append({
+                    "kind": "earn",
+                    "event_type": str(r.get("event_type") or ""),
+                    "label": str(r.get("event_type") or ""),
+                    "points": int(r.get("points") or 0),
+                    "ref": str(r.get("source_key") or ""),
+                    "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                })
+            # 2) تحويلات ASCEND
+            try:
+                cur.execute("""SELECT action, from_currency, to_currency, amount, created_at
+                               FROM ai_for_ascend_log
+                               WHERE identity_key=%s
+                               ORDER BY created_at DESC LIMIT %s""", (identity, limit))
+                for r in cur.fetchall() or []:
+                    rows.append({
+                        "kind": "ascend",
+                        "event_type": str(r.get("action") or "convert"),
+                        "label": "🏆 " + str(r.get("from_currency") or "") + " → " + str(r.get("to_currency") or ""),
+                        "points": -int(r.get("amount") or 0),
+                        "ref": "",
+                        "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                    })
+            except Exception as _e:
+                print(f"wallet_history ascend skip: {_e}")
+            # 3) تحويلات ZYN Token (نقاط → ZYN)
+            try:
+                cur.execute("""SELECT points_spent, zyn_amount, status, created_at
+                               FROM ai_for_zyn_conversions
+                               WHERE identity_key=%s
+                               ORDER BY created_at DESC LIMIT %s""", (identity, limit))
+                for r in cur.fetchall() or []:
+                    rows.append({
+                        "kind": "zyn",
+                        "event_type": str(r.get("status") or "pending"),
+                        "label": "💎 " + str(int(r.get("points_spent") or 0)) + " نقطة → " + str(r.get("zyn_amount") or 0) + " ZYN",
+                        "points": -int(r.get("points_spent") or 0),
+                        "ref": "",
+                        "created_at": r.get("created_at").isoformat() if r.get("created_at") else None,
+                    })
+            except Exception as _e:
+                print(f"wallet_history zyn skip: {_e}")
+            # ترتيب حسب created_at
+            rows.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+            rows = rows[:limit]
+            # إجماليات
+            earned = sum(r["points"] for r in rows if r["points"] > 0)
+            spent = sum(-r["points"] for r in rows if r["points"] < 0)
+            cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+            pr = cur.fetchone() or {}
+            current = int(pr.get("points") or 0)
+            return {
+                "items": rows,
+                "totals": {"earned": earned, "spent": spent, "net": earned - spent, "current": current},
+                "count": len(rows),
+            }
+        r = _platform_db_query(q_wallet_history) or {"items": [], "totals": {}, "count": 0}
+        return jsonify({"ok": True, **r})
+
     if op=="nft_metadata":
         name=str(body.get("name","AI for NFT"))[:160]; desc=str(body.get("description",""))[:2000]; collection=str(body.get("collection",""))[:160]
         metadata={"name":name,"description":desc,"collection":collection,"attributes":body.get("attributes",[]),"generated_by":"AI for NFT Studio","schema":"ai-for-nft-v1"}

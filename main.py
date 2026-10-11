@@ -3859,12 +3859,28 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
         if not conn:return {"ok":False,"error":"database_unavailable"},503
         with conn:
             with conn.cursor() as cur:cur.execute("INSERT INTO ai_for_nft_image_jobs(job_id,identity_key,prompt,model,status) VALUES(%s,%s,%s,%s,'running')",(job_id,identity,prompt,NFT_IMAGE_AI_MODEL))
-        r=requests.post(NFT_IMAGE_AI_URL+"/generate",json={"prompt":prompt,"model":NFT_IMAGE_AI_MODEL,"width":width,"height":height,"steps":steps},timeout=NFT_IMAGE_AI_TIMEOUT)
-        try:data=r.json() or {}
-        except Exception:data={}
-        if not 200<=r.status_code<300:raise RuntimeError(f"image_service_http_{r.status_code}")
-        image_url=str(data.get("image_url") or data.get("url") or "").strip(); image_b64=str(data.get("b64_json") or "").strip()
-        if not image_url and not image_b64:raise RuntimeError("image_service_no_output")
+        # ZYN ASCEND v2 — Pollinations.ai (مجاني، بدون مفتاح، مفتوح للعامة)
+        # النموذج الأساسي: flux — الأفضل جودةً من الخدمات المجانية
+        import urllib.parse, random
+        _seed = random.randint(1, 2147483647)
+        _model = "flux"
+        _encoded = urllib.parse.quote(prompt, safe="")
+        image_url = (
+            f"https://image.pollinations.ai/prompt/{_encoded}"
+            f"?width={width}&height={height}"
+            f"&seed={_seed}&model={_model}&nologo=true&enhance=true"
+        )
+        # اختبار أن الصورة قابلة للتحميل (Pollinations يُنشئها عند الطلب)
+        try:
+            _probe = requests.get(image_url, timeout=max(30, NFT_IMAGE_AI_TIMEOUT), stream=True, allow_redirects=True)
+            if not (200 <= _probe.status_code < 300):
+                # Fallback: Tanvo المدمج
+                image_url = f"https://image.pollinations.ai/prompt/{_encoded}?width={width}&height={height}&seed={_seed}&nologo=true"
+            _probe.close()
+        except Exception:
+            # في حال فشل الاتصال، نُعيد الرابط على أي حال (Pollinations مولّد عند الطلب)
+            pass
+        image_b64=""
         conn2=_membership_db_connect()
         try:
             if conn2:

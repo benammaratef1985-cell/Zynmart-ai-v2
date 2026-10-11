@@ -3818,6 +3818,34 @@ def _nft_project_create(user, name='', description='', collection_name='', marke
         if not conn: return {"ok": False, "error": "database_unavailable"}
         with conn:
             with conn.cursor() as cur:
+                # ZYN NFT Studio — فحص الحصة + خصم ZYN Points (داخل نفس transaction)
+                cur.execute("SELECT total_created FROM ai_for_nft_quota WHERE identity_key=%s FOR UPDATE", (identity,))
+                qrow = cur.fetchone()
+                total_created = int((qrow or {}).get("total_created") or 0) if qrow else 0
+                cost, currency = _nft_price_for(total_created)
+                if cost > 0:
+                    cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s FOR UPDATE", (identity,))
+                    prow = cur.fetchone()
+                    current_points = int((prow or {}).get("points") or 0)
+                    if current_points < cost:
+                        return {"ok": False, "error": "insufficient_zym_points", "needed": cost, "have": current_points, "next_currency": currency}
+                    # خصم النقاط
+                    cur.execute("UPDATE ai_for_rewards SET points = points - %s, updated_at=NOW() WHERE identity_key=%s", (cost, identity))
+                # زيادة إجمالي NFTs المنشأة
+                if qrow:
+                    cur.execute("UPDATE ai_for_nft_quota SET total_created = total_created + 1, last_created_at = NOW(), updated_at = NOW() WHERE identity_key=%s", (identity,))
+                else:
+                    cur.execute("INSERT INTO ai_for_nft_quota (identity_key, free_used, paid_used, total_created, last_created_at) VALUES (%s, 0, 0, 1, NOW())", (identity,))
+                # تسجيل في ledger (إن كان مدفوعًا)
+                if cost > 0:
+                    try:
+                        cur.execute("""INSERT INTO ai_for_reward_ledger(ledger_id, identity_key, event_type, points, source_key)
+                                       VALUES(%s,%s,'nft_create_paid',%s,%s)
+                                       ON CONFLICT (identity_key, event_type, source_key) DO NOTHING""",
+                                    (str(uuid.uuid4()), identity, -cost, project_id))
+                    except Exception as _le:
+                        print(f"nft_create ledger log skip: {_le}")
+                # إنشاء المشروع (نفس السطر الأصلي)
                 cur.execute("""INSERT INTO ai_for_nft_projects
                     (project_id, owner_identity, name, description, collection_name, status, metadata, marketplace_url, contract_id, contract_network, genesis_enabled, genesis_benefits, royalty_bps, onchain_asset_id)
                     VALUES (%s,%s,%s,%s,%s,'draft',%s,%s,%s,%s,%s,%s,%s,%s)""",
@@ -3826,7 +3854,8 @@ def _nft_project_create(user, name='', description='', collection_name='', marke
                      bool(genesis_enabled and NFT_GENESIS_ENABLED and _webapp_is_owner(user)), str(genesis_benefits or NFT_GENESIS_BENEFITS)[:2000] if _webapp_is_owner(user) else '', max(0,min(NFT_MAX_ROYALTY_BPS,int(royalty_bps or NFT_DEFAULT_ROYALTY_BPS))), str(onchain_asset_id or '')[:200]))
         return {"ok": True, "project": {"project_id":project_id,"name":str(name or '')[:160],"description":str(description or '')[:2000],
                 "collection_name":str(collection_name or '')[:160],"status":"draft","marketplace_url":str(marketplace_url or NFT_MARKETPLACE_URL)[:500],
-                "contract_id":NFT_CONTRACT_ID,"contract_network":NFT_CONTRACT_NETWORK,"genesis_enabled":bool(genesis_enabled and NFT_GENESIS_ENABLED and _webapp_is_owner(user)),"royalty_bps":max(0,min(NFT_MAX_ROYALTY_BPS,int(royalty_bps or NFT_DEFAULT_ROYALTY_BPS))),"onchain_asset_id":str(onchain_asset_id or '')[:200]}}
+                "contract_id":NFT_CONTRACT_ID,"contract_network":NFT_CONTRACT_NETWORK,"genesis_enabled":bool(genesis_enabled and NFT_GENESIS_ENABLED and _webapp_is_owner(user)),"royalty_bps":max(0,min(NFT_MAX_ROYALTY_BPS,int(royalty_bps or NFT_DEFAULT_ROYALTY_BPS))),"onchain_asset_id":str(onchain_asset_id or '')[:200]},
+                "quota": {"cost_paid": cost, "currency": currency, "was_free": (cost == 0)}}
     except Exception as e:
         print(f"NFT project create error: {e}"); return {"ok": False, "error": "nft_project_create_failed"}
     finally: _membership_db_release(conn)

@@ -3898,6 +3898,23 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
     try:
         conn=_membership_db_connect()
         if not conn:return {"ok":False,"error":"database_unavailable"},503
+        # ZYN ASCEND v2 — Rate Limit قبل التوليد (10/ساعة · 30/يوم)
+        try:
+            with conn.cursor() as _rlc:
+                _rlc.execute("""SELECT
+                    COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '1 hour') AS h1,
+                    COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '24 hours') AS d1
+                    FROM ai_for_nft_image_jobs
+                    WHERE identity_key=%s AND status IN ('running','ready')""", (identity,))
+                _rl = _rlc.fetchone() or {}
+            _h1 = int(_rl.get("h1") or 0)
+            _d1 = int(_rl.get("d1") or 0)
+            if _h1 >= NFT_IMG_RL_PER_HOUR:
+                return {"ok":False,"error":"rate_limit_hourly","limit":NFT_IMG_RL_PER_HOUR},429
+            if _d1 >= NFT_IMG_RL_PER_DAY:
+                return {"ok":False,"error":"rate_limit_daily","limit":NFT_IMG_RL_PER_DAY},429
+        except Exception as _rle:
+            print(f"nft image rate-limit check skipped: {_rle}")
         with conn:
             with conn.cursor() as cur:cur.execute("INSERT INTO ai_for_nft_image_jobs(job_id,identity_key,prompt,model,status) VALUES(%s,%s,%s,%s,'running')",(job_id,identity,prompt,NFT_IMAGE_AI_MODEL))
         # ZYN ASCEND v2 — Pollinations.ai (مجاني، بدون مفتاح، مفتوح للعامة)
@@ -7792,6 +7809,10 @@ ASCEND_STAGES = [
     {"key":"golden",  "name":"Golden",  "emoji":"👑", "from":"diamond",    "rate":10,  "target":10},
 ]
 ASCEND_STAGE_MAP = {s["key"]: s for s in ASCEND_STAGES}
+
+# ZYN ASCEND v2 — حدود توليد الصور (Rate Limit)
+NFT_IMG_RL_PER_HOUR = 10   # 10 صور/ساعة لكل مستخدم
+NFT_IMG_RL_PER_DAY = 30    # 30 صورة/يوم لكل مستخدم
 
 # ZYN ASCEND v2 — تسعير NFT Studio (تدريجي)
 NFT_FREE_QUOTA = 5       # أول 5 NFTs مجانية

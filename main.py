@@ -3996,21 +3996,13 @@ def _nft_apply_watermark(image_bytes, text="ZYN Studio"):
         draw = ImageDraw.Draw(overlay)
         # حجم الخط يتناسب مع حجم الصورة
         try:
-            font_size = max(16, int(min(W, H) * 0.04))
-        except Exception:
-            font_size = 24
-        font = None
-        # نحاول load_default(size=...) أولًا (Pillow 10+)
-        try:
-            font = ImageFont.load_default(size=font_size)
-        except Exception:
-            pass
-        # fallback: load_default بدون حجم
-        if font is None:
+            font_size = max(16, int(min(W, H) * 0.035))
             try:
-                font = ImageFont.load_default()
+                font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
             except Exception:
-                font = None
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
         # النص
         label = "✨ " + str(text or "ZYN Studio")
         # قياس النص

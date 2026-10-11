@@ -6057,11 +6057,312 @@ document.getElementById('view').innerHTML=`
   </div>
 
   <div class="statusBox">
+    <b>🚦 لعبة تفريغ الطريق (Unblock)</b>
+    <p class="small" style="line-height:1.6">حرّك الأسهم/السيارات المتشابكة، أخرجها من المسار، وانتقل للمستوى التالي.</p>
+    <div style="display:flex;gap:6px;margin-top:10px;justify-content:center">
+      <button class="mini" id="ubModeArrows" onclick="ubSelectMode('arrows')" style="flex:1;background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:10px;padding:8px;font-weight:800">⬆️ أسهم</button>
+      <button class="mini" id="ubModeCars" onclick="ubSelectMode('cars')" style="flex:1;background:#eee;color:#333;border:0;border-radius:10px;padding:8px;font-weight:800">🚗 سيارات</button>
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
+      <div class="small">المستوى: <b id="ubLevel">1</b> / 10</div>
+      <div class="small">النقاط: <b id="ubScore">0</b></div>
+      <div class="small">الحركات: <b id="ubMoves">0</b></div>
+    </div>
+    <div style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border-radius:14px;padding:12px;margin-top:10px">
+      <div id="ubBoard" style="display:grid;gap:4px;background:#2a1a4d;border-radius:10px;padding:6px;aspect-ratio:1/1;max-width:360px;margin:0 auto"></div>
+    </div>
+    <div id="ubStatus" class="small" style="text-align:center;margin-top:10px;color:#c8b6ff">اختر قطعة ثم اضغط على الاتجاه</div>
+    <div class="toolbar" style="margin-top:10px;display:flex;gap:6px;justify-content:center">
+      <button class="mini" onclick="ubRestart()">🔄 إعادة المستوى</button>
+      <button class="mini" onclick="ubNextLevel()" id="ubNextBtn" style="display:none">➡️ المستوى التالي</button>
+    </div>
+    <div id="ubDailyInfo" class="small" style="text-align:center;margin-top:8px;opacity:.7">—</div>
+  </div>
+
+  <div class="statusBox">
     <b>📋 كيف تربح نقاط ZYN؟</b>
     <div id="arRules" class="small" style="margin-top:8px">⏳</div>
   </div>
 </section>`;
-xoReset();memReset();loadArcade();}
+xoReset();memReset();loadArcade();try{ubInit();}catch(_){}}
+
+
+// ============================================================
+// ZYN Arcade — Unblock Game
+// ============================================================
+var __ub = { mode:'arrows', level:1, score:0, moves:0, pieces:[], N:5, colors:['#f5c84b','#31e981','#39d9ff','#ff6b9d','#a66cff','#ff9f1c','#7b4dd9','#c8b6ff','#f5a623','#e91e63'] };
+
+var UB_LEVELS = [
+  // L1 — 4x4, 2 pieces
+  { N:4, pieces:[
+    {id:'a', dir:'R', cells:[[1,0],[1,1]], color:0},
+    {id:'b', dir:'R', cells:[[2,2],[2,3]], color:1}
+  ]},
+  // L2 — 4x4, 3 pieces chain
+  { N:4, pieces:[
+    {id:'a', dir:'R', cells:[[0,0],[0,1]], color:0},
+    {id:'b', dir:'R', cells:[[0,2],[0,3]], color:1},
+    {id:'c', dir:'R', cells:[[2,0],[2,1],[2,2]], color:2}
+  ]},
+  // L3 — 5x5, vertical blocker
+  { N:5, pieces:[
+    {id:'a', dir:'R', cells:[[1,0],[1,1]], color:0},
+    {id:'b', dir:'D', cells:[[1,2],[2,2]], color:1},
+    {id:'c', dir:'R', cells:[[3,2],[3,3]], color:2}
+  ]},
+  // L4 — 5x5, chain with vertical
+  { N:5, pieces:[
+    {id:'a', dir:'R', cells:[[0,0],[0,1]], color:0},
+    {id:'b', dir:'R', cells:[[0,2],[0,3]], color:1},
+    {id:'c', dir:'D', cells:[[1,3],[2,3]], color:2},
+    {id:'d', dir:'R', cells:[[3,3],[3,4]], color:3}
+  ]},
+  // L5 — 5x5, 4 pieces
+  { N:5, pieces:[
+    {id:'a', dir:'R', cells:[[1,0],[1,1]], color:0},
+    {id:'b', dir:'D', cells:[[1,2],[2,2],[3,2]], color:1},
+    {id:'c', dir:'R', cells:[[4,2],[4,3]], color:2},
+    {id:'d', dir:'R', cells:[[0,0],[0,1]], color:3}
+  ]},
+  // L6 — 6x6
+  { N:6, pieces:[
+    {id:'a', dir:'R', cells:[[1,0],[1,1]], color:0},
+    {id:'b', dir:'D', cells:[[1,2],[2,2]], color:1},
+    {id:'c', dir:'R', cells:[[3,2],[3,3],[3,4]], color:2},
+    {id:'d', dir:'D', cells:[[0,4],[0,5]], color:3}
+  ]},
+  // L7 — 6x6
+  { N:6, pieces:[
+    {id:'a', dir:'R', cells:[[0,0],[0,1]], color:0},
+    {id:'b', dir:'D', cells:[[0,2],[1,2],[2,2]], color:1},
+    {id:'c', dir:'R', cells:[[3,2],[3,3]], color:2},
+    {id:'d', dir:'R', cells:[[5,0],[5,1]], color:3},
+    {id:'e', dir:'L', cells:[[2,4],[2,5]], color:4}
+  ]},
+  // L8 — 6x6
+  { N:6, pieces:[
+    {id:'a', dir:'R', cells:[[1,0],[1,1]], color:0},
+    {id:'b', dir:'R', cells:[[1,2],[1,3]], color:1},
+    {id:'c', dir:'D', cells:[[2,3],[3,3]], color:2},
+    {id:'d', dir:'R', cells:[[4,3],[4,4]], color:3},
+    {id:'e', dir:'R', cells:[[0,0],[0,1],[0,2]], color:4}
+  ]},
+  // L9 — 6x6
+  { N:6, pieces:[
+    {id:'a', dir:'R', cells:[[0,0],[0,1]], color:0},
+    {id:'b', dir:'D', cells:[[0,2],[1,2]], color:1},
+    {id:'c', dir:'R', cells:[[2,2],[2,3]], color:2},
+    {id:'d', dir:'D', cells:[[3,3],[4,3]], color:3},
+    {id:'e', dir:'R', cells:[[5,3],[5,4]], color:4},
+    {id:'f', dir:'R', cells:[[2,0],[2,1]], color:5}
+  ]},
+  // L10 — 6x6 hardest
+  { N:6, pieces:[
+    {id:'a', dir:'R', cells:[[0,0],[0,1]], color:0},
+    {id:'b', dir:'D', cells:[[0,2],[1,2],[2,2]], color:1},
+    {id:'c', dir:'R', cells:[[3,2],[3,3]], color:2},
+    {id:'d', dir:'R', cells:[[5,0],[5,1]], color:3},
+    {id:'e', dir:'L', cells:[[3,4],[3,5]], color:4},
+    {id:'f', dir:'D', cells:[[1,4],[2,4]], color:5},
+    {id:'g', dir:'R', cells:[[4,4],[4,5]], color:6}
+  ]}
+];
+
+function ubInit(){
+  __ub.moves = 0;
+  __ub.score = 0;
+  var lvEl = document.getElementById('ubLevel');
+  if(lvEl) lvEl.textContent = __ub.level;
+  ubLoadLevel(__ub.level);
+  ubLoadDailyInfo();
+}
+
+async function ubLoadDailyInfo(){
+  try{
+    var el = document.getElementById('ubDailyInfo');
+    if(!el) return;
+    var d = await platformSvc('wallet_history');
+    if(!d || !d.ok){ el.textContent = ''; return; }
+    el.textContent = '💰 اربح حتى 40 نقطة يوميًا من هذه اللعبة';
+  }catch(e){}
+}
+
+function ubSelectMode(m){
+  __ub.mode = m;
+  var bAr = document.getElementById('ubModeArrows');
+  var bCa = document.getElementById('ubModeCars');
+  if(bAr && bCa){
+    if(m==='arrows'){
+      bAr.style.background = 'linear-gradient(135deg,#7b4dd9,#4a2e7a)'; bAr.style.color = '#fff';
+      bCa.style.background = '#eee'; bCa.style.color = '#333';
+    } else {
+      bCa.style.background = 'linear-gradient(135deg,#7b4dd9,#4a2e7a)'; bCa.style.color = '#fff';
+      bAr.style.background = '#eee'; bAr.style.color = '#333';
+    }
+  }
+  ubRenderBoard();
+}
+
+function ubLoadLevel(n){
+  var lv = UB_LEVELS[n-1];
+  if(!lv) return;
+  __ub.N = lv.N;
+  __ub.pieces = lv.pieces.map(function(p){
+    return { id:p.id, dir:p.dir, cells:p.cells.map(function(c){ return [c[0],c[1]]; }), color:p.color, out:false };
+  });
+  __ub.level = n;
+  __ub.moves = 0;
+  var lvEl = document.getElementById('ubLevel');
+  if(lvEl) lvEl.textContent = n;
+  var mvEl = document.getElementById('ubMoves');
+  if(mvEl) mvEl.textContent = 0;
+  var nx = document.getElementById('ubNextBtn');
+  if(nx) nx.style.display = 'none';
+  ubRenderBoard();
+  var st = document.getElementById('ubStatus');
+  if(st) st.textContent = 'اضغط قطعة لتحريرها 🚀';
+}
+
+function ubRenderBoard(){
+  var b = document.getElementById('ubBoard');
+  if(!b) return;
+  var N = __ub.N;
+  b.style.gridTemplateColumns = 'repeat(' + N + ', 1fr)';
+  var occupied = {};
+  __ub.pieces.forEach(function(p){
+    if(p.out) return;
+    p.cells.forEach(function(c){
+      if(c[0]>=0 && c[0]<N && c[1]>=0 && c[1]<N) occupied[c[0] + '_' + c[1]] = p.id;
+    });
+  });
+  var html = '';
+  for(var r=0; r<N; r++){
+    for(var c=0; c<N; c++){
+      var key = r + '_' + c;
+      var pid = occupied[key];
+      if(pid){
+        var p = __ub.pieces.find(function(x){ return x.id===pid; });
+        if(p){
+          var isHead = false;
+          var dr = ubDirDelta(p.dir)[0], dc = ubDirDelta(p.dir)[1];
+          for(var i=0; i<p.cells.length; i++){
+            if(p.cells[i][0]===r && p.cells[i][1]===c){
+              if(i === p.cells.length-1){ isHead = true; }
+              break;
+            }
+          }
+          var col = __ub.colors[p.color % __ub.colors.length];
+          var icon = ubIconFor(p.dir);
+          html += '<div onclick="ubClickPiece(\'' + p.id + '\')" style="background:' + col + ';border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:' + Math.max(14, Math.floor(180/N)) + 'px;cursor:pointer;box-shadow:inset 0 0 4px rgba(0,0,0,.3)">' + (isHead ? icon : '') + '</div>';
+        }
+      } else {
+        html += '<div style="background:#1a0f2e;border-radius:6px;border:1px solid #2a1a4d"></div>';
+      }
+    }
+  }
+  b.innerHTML = html;
+}
+
+function ubDirDelta(d){
+  if(d==='U') return [-1, 0];
+  if(d==='D') return [1, 0];
+  if(d==='L') return [0, -1];
+  if(d==='R') return [0, 1];
+  return [0, 0];
+}
+function ubIconFor(d){
+  if(__ub.mode === 'cars') return '🚗';
+  if(d==='U') return '⬆️';
+  if(d==='D') return '⬇️';
+  if(d==='L') return '⬅️';
+  if(d==='R') return '➡️';
+  return '🔲';
+}
+
+function ubClickPiece(id){
+  var p = __ub.pieces.find(function(x){ return x.id===id; });
+  if(!p || p.out) return;
+  var N = __ub.N;
+  var dr = ubDirDelta(p.dir)[0], dc = ubDirDelta(p.dir)[1];
+  var moved = 0;
+  while(true){
+    // tentatively move 1 step
+    var newCells = p.cells.map(function(c){ return [c[0]+dr, c[1]+dc]; });
+    // check collisions with other pieces
+    var occ = {};
+    __ub.pieces.forEach(function(q){
+      if(q.id === p.id || q.out) return;
+      q.cells.forEach(function(c){
+        if(c[0]>=0 && c[0]<N && c[1]>=0 && c[1]<N) occ[c[0] + '_' + c[1]] = true;
+      });
+    });
+    var blocked = false;
+    for(var i=0; i<newCells.length; i++){
+      var nc = newCells[i];
+      if(nc[0]>=0 && nc[0]<N && nc[1]>=0 && nc[1]<N && occ[nc[0] + '_' + nc[1]]){ blocked = true; break; }
+    }
+    if(blocked){ break; }
+    // Apply move
+    p.cells = newCells;
+    moved++;
+    // Check exit
+    var onGrid = p.cells.filter(function(c){ return c[0]>=0 && c[0]<N && c[1]>=0 && c[1]<N; });
+    if(onGrid.length === 0){ p.out = true; break; }
+  }
+  if(moved === 0){
+    var st = document.getElementById('ubStatus');
+    if(st) st.textContent = '⚠️ محجوزة — حرّر القطعة أمامها أولًا';
+    return;
+  }
+  __ub.moves++;
+  var mvEl = document.getElementById('ubMoves');
+  if(mvEl) mvEl.textContent = __ub.moves;
+  ubRenderBoard();
+  ubCheckWin();
+}
+
+function ubCheckWin(){
+  var remaining = __ub.pieces.filter(function(p){ return !p.out; });
+  if(remaining.length === 0){
+    var st = document.getElementById('ubStatus');
+    if(st) st.textContent = '🎉 ربحت المستوى ' + __ub.level + '!';
+    var nx = document.getElementById('ubNextBtn');
+    if(nx) nx.style.display = 'inline-block';
+    // أرسل المكافأة للسيرفر
+    try{
+      platformSvc('arcade_game_reward', { game:'unblock_win', level: __ub.level }).then(function(d){
+        if(d && d.ok){
+          if(d.reward > 0){
+            var st2 = document.getElementById('ubStatus');
+            if(st2) st2.textContent = '🎉 ربحت! +' + d.reward + ' نقطة · رصيدك: ' + d.points;
+          } else if(d.note === 'unblock_daily_cap'){
+            var st3 = document.getElementById('ubStatus');
+            if(st3) st3.textContent = '🎉 ربحت! (بلغت الحد اليومي 40 نقطة)';
+          } else if(d.note === 'daily_limit'){
+            var st4 = document.getElementById('ubStatus');
+            if(st4) st4.textContent = '🎉 ربحت! (حد المستويات اليومية)';
+          }
+        }
+      }).catch(function(){});
+    }catch(_){}
+  }
+}
+
+function ubRestart(){
+  ubLoadLevel(__ub.level);
+  var st = document.getElementById('ubStatus');
+  if(st) st.textContent = '🔄 أُعيد المستوى';
+}
+
+function ubNextLevel(){
+  var next = __ub.level + 1;
+  if(next > 10) next = 1;
+  ubLoadLevel(next);
+  var st = document.getElementById('ubStatus');
+  if(st) st.textContent = '🚀 المستوى ' + next;
+}
+
+
 
 async function loadArcade(){
   try{

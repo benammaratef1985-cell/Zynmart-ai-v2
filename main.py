@@ -4819,9 +4819,9 @@ function renderNFTStudio(){
     <div class="statusBox" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border:1px solid #7b4dd9">
       <div dir="rtl" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <b style="font-size:16px;color:#f5c84b">🎨 مولد صورة NFT — AI مستقل</b>
-        <span class="small" style="color:#c8b6ff;background:rgba(123,77,217,.3);padding:3px 8px;border-radius:8px">FLUX.1</span>
+        <span class="small" style="color:#c8b6ff;background:rgba(123,77,217,.3);padding:3px 8px;border-radius:8px">✨ ZYN Studio</span>
       </div>
-      <p class="small" dir="rtl" style="color:#c8b6ff;margin-bottom:10px">✨ مولد صور NFT مستقل — بدون مفاتيح، مجاني 100%</p>
+      <p class="small" dir="rtl" style="color:#c8b6ff;margin-bottom:10px">✨ محرك فني متقدم لإنشاء NFTs فريدة بهوية المنصة</p>
       <div dir="rtl" style="margin-bottom:10px">
         <div class="small" style="color:#c8b6ff;margin-bottom:6px">⚡ أنماط سريعة:</div>
         <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
@@ -4923,7 +4923,7 @@ function compressImage(file, maxDim, quality){
 
 function renderNFTImageBox(url, source){
   if(!url) return '';
-  var srcLabel = source === 'uploaded' ? '📤 صورة مرفوعة' : '🎨 مولّدة بالذكاء الاصطناعي';
+  var srcLabel = source === 'uploaded' ? '📤 من جهازك' : '✨ ZYN Studio Original';
   return '' +
     '<div style="position:relative;border-radius:16px;overflow:hidden;border:2px solid #7b4dd9;margin-top:8px">' +
       '<img src="'+esc(url)+'" style="width:100%;display:block;border-radius:14px">' +
@@ -4959,7 +4959,7 @@ async function generateNFTImage(){
     if(!d.ok) throw new Error(d.error || "image_generation_failed");
     if(!d.image_url) throw new Error("no_image_url");
     __NFT_LAST_GEN = {prompt:p, url:d.image_url};
-    if(r) r.innerHTML = renderNFTImageBox(d.image_url, 'generated') + '<div class="small" style="text-align:center;color:#c8b6ff;margin-top:6px">النموذج: '+esc(d.model||"FLUX.1")+'</div>';
+    if(r) r.innerHTML = renderNFTImageBox(d.image_url, 'generated');
   }catch(e){
     if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ '+(e.message||'تعذر توليد الصورة')+'</div>';
   }

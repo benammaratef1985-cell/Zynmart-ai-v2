@@ -3915,6 +3915,83 @@ def _pin_json_to_ipfs(metadata, filename="ai-for-nft.json"):
         return {"cid":cid,"uri":"ipfs://"+cid,"gateway":"https://gateway.pinata.cloud/ipfs/"+cid},None
     except Exception as e:print(f"IPFS pin error: {e}");return None,"ipfs_unavailable"
 
+def _pin_image_to_ipfs(image_input, filename="ai-for-nft.png", max_bytes=3*1024*1024):
+    """
+    ZYN ASCEND v2 — رفع صورة (Base64 أو URL) إلى IPFS (Pinata).
+    image_input: Data URL (data:image/png;base64,...) أو رابط http
+    يُرجع: dict {cid, uri, gateway} أو (None, error)
+    """
+    if not NFT_IPFS_JWT:
+        return None,"ipfs_not_configured"
+    if NFT_IPFS_PROVIDER != "pinata":
+        return None,"ipfs_provider_not_supported"
+    try:
+        import base64 as _b64
+        blob = None
+        mime = "image/png"
+        s = str(image_input or "").strip()
+        if not s:
+            return None,"image_input_empty"
+        # Data URL (Base64)
+        if s.startswith("data:image/"):
+            header, _, b64data = s.partition(",")
+            if not b64data:
+                return None,"image_data_invalid"
+            try:
+                mime = header.split(";")[0].replace("data:","").strip() or "image/png"
+            except Exception:
+                mime = "image/png"
+            try:
+                blob = _b64.b64decode(b64data, validate=False)
+            except Exception:
+                return None,"image_base64_invalid"
+        # رابط HTTP
+        elif s.startswith("http://") or s.startswith("https://"):
+            try:
+                rr = requests.get(s, timeout=60, stream=False)
+                if not (200 <= rr.status_code < 300):
+                    return None,"image_url_fetch_failed"
+                blob = rr.content
+                mime = str(rr.headers.get("Content-Type") or "image/png").split(";")[0].strip()
+            except Exception as e:
+                print(f"image fetch error: {e}")
+                return None,"image_url_fetch_failed"
+        else:
+            return None,"image_input_unsupported"
+
+        if not blob:
+            return None,"image_blob_empty"
+        if len(blob) > max_bytes:
+            return None,f"image_too_large_{len(blob)}"
+
+        # اختيار الامتداد من MIME
+        ext = "png"
+        if "jpeg" in mime or "jpg" in mime:
+            ext = "jpg"
+        elif "webp" in mime:
+            ext = "webp"
+        elif "gif" in mime:
+            ext = "gif"
+        safe_name = str(filename or "ai-for-nft").rsplit(".",1)[0][:60] + "." + ext
+
+        r = requests.post(
+            "https://api.pinata.cloud/pinning/pinFileToIPFS",
+            headers={"Authorization":"Bearer "+NFT_IPFS_JWT},
+            files={"file":(safe_name, blob, mime)},
+            data={"pinataMetadata":json.dumps({"name":safe_name})},
+            timeout=90
+        )
+        if r.status_code not in (200,201):
+            print(f"Pinata image HTTP {r.status_code}: {r.text[:300]}")
+            return None,"ipfs_pin_failed"
+        cid = str((r.json() or {}).get("IpfsHash") or "").strip()
+        if not cid:
+            return None,"ipfs_cid_missing"
+        return {"cid":cid,"uri":"ipfs://"+cid,"gateway":"https://gateway.pinata.cloud/ipfs/"+cid,"size":len(blob),"mime":mime},None
+    except Exception as e:
+        print(f"IPFS image pin error: {e}")
+        return None,"ipfs_unavailable"
+
 def _nft_contract_status():
     return {
         "configured": bool(NFT_APP_WALLET_SECRET and StellarServer and StellarKeypair and StellarAsset and StellarTransactionBuilder),
@@ -6970,6 +7047,47 @@ def webapp_nft_ipfs():
                 with conn.cursor() as cur:
                     cur.execute("UPDATE ai_for_nft_projects SET ipfs_cid=%s,ipfs_uri=%s,metadata=%s,status='ipfs_pinned',updated_at=NOW() WHERE project_id=%s AND owner_identity=%s",(pinned["cid"],pinned["uri"],json.dumps(metadata,ensure_ascii=False),project_id,_webapp_identity_key(user)))
         except Exception as e:print(f"NFT IPFS project update error: {e}")
+        finally:_membership_db_release(conn)
+    return jsonify({"ok":True,"ipfs":pinned})
+
+@app.route("/api/app/nft/ipfs/image", methods=["POST"])
+def webapp_nft_ipfs_image():
+    """ZYN ASCEND v2 — رفع صورة NFT إلى IPFS"""
+    global membership_db_ready
+    user, err, code=_webapp_auth()
+    if err:return err,code
+    denied=_webapp_require_section(user,"nft")
+    if denied[0]:return denied
+    body=request.get_json(silent=True) or {}
+    image_input = str(body.get("image") or "").strip()
+    filename = str(body.get("filename") or "ai-for-nft.png")[:80]
+    job_id = str(body.get("job_id") or "").strip()
+    project_id = str(body.get("project_id") or "").strip()
+    if not image_input:
+        return jsonify({"ok":False,"error":"image_required"}),400
+    pinned, pin_err = _pin_image_to_ipfs(image_input, filename)
+    if pin_err:
+        return jsonify({"ok":False,"error":pin_err,"configured":bool(NFT_IPFS_JWT)}),503
+    # تحديث job في DB (إن وُجد)
+    if job_id and membership_db_ready:
+        conn=None
+        try:
+            conn=_membership_db_connect()
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE ai_for_nft_image_jobs SET image_cid=%s,updated_at=NOW() WHERE job_id=%s",(pinned["cid"],job_id))
+        except Exception as e:print(f"NFT image IPFS job update error: {e}")
+        finally:_membership_db_release(conn)
+    # تحديث project metadata (إن وُجد)
+    if project_id and membership_db_ready:
+        conn=None
+        try:
+            conn=_membership_db_connect()
+            with conn:
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE ai_for_nft_projects SET metadata = COALESCE(metadata,'{}'::jsonb) || %s::jsonb, updated_at=NOW() WHERE project_id=%s AND owner_identity=%s",
+                                (json.dumps({"image_cid":pinned["cid"],"image_uri":pinned["uri"],"image_gateway":pinned["gateway"]}, ensure_ascii=False), project_id, _webapp_identity_key(user)))
+        except Exception as e:print(f"NFT image project update error: {e}")
         finally:_membership_db_release(conn)
     return jsonify({"ok":True,"ipfs":pinned})
 

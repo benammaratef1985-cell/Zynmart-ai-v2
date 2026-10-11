@@ -3848,7 +3848,8 @@ def _nft_projects_list(user):
 def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
     prompt=str(prompt or "").strip()[:2000]
     if not prompt:return {"ok":False,"error":"prompt_required"},400
-    if not NFT_IMAGE_AI_URL:return {"ok":False,"error":"nft_image_ai_not_configured","model":NFT_IMAGE_AI_MODEL},503
+    # ZYN ASCEND v2 — نستخدم Pollinations.ai (بدون خدمة خارجية)
+    # لا حاجة للتحقق من NFT_IMAGE_AI_URL
     try:
         width=max(256,min(2048,int(width))); height=max(256,min(2048,int(height))); steps=max(1,min(12,int(steps)))
         if width*height>NFT_IMAGE_MAX_PIXELS:return {"ok":False,"error":"image_too_large"},400
@@ -3872,7 +3873,7 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
         )
         # اختبار أن الصورة قابلة للتحميل (Pollinations يُنشئها عند الطلب)
         try:
-            _probe = requests.get(image_url, timeout=max(30, NFT_IMAGE_AI_TIMEOUT), stream=True, allow_redirects=True)
+            _probe = requests.get(image_url, timeout=90, stream=True, allow_redirects=True)
             if not (200 <= _probe.status_code < 300):
                 # Fallback: Tanvo المدمج
                 image_url = f"https://image.pollinations.ai/prompt/{_encoded}?width={width}&height={height}&seed={_seed}&nologo=true"

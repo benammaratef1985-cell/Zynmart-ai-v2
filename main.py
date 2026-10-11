@@ -755,6 +755,17 @@ def _ensure_db_schema(cur):
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )""")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_ascend_ranks_position ON ai_for_ascend_ranks(rank_position ASC)")
+    # ZYN NFT Studio — جدول الحصة + التسعير التدريجي
+    cur.execute("""CREATE TABLE IF NOT EXISTS ai_for_nft_quota (
+        identity_key TEXT PRIMARY KEY,
+        free_used INT NOT NULL DEFAULT 0,
+        paid_used INT NOT NULL DEFAULT 0,
+        total_created INT NOT NULL DEFAULT 0,
+        last_created_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )""")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_for_nft_quota_updated ON ai_for_nft_quota(updated_at DESC)")
     # ============================================================
     # Security: Rate Limits + Events
     # ============================================================
@@ -4893,6 +4904,14 @@ function renderNFTStudio(){
     <div class="statusBox" id="nftInfra" dir="rtl" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#c8b6ff;border:1px solid #7b4dd9">
       <div style="text-align:center;padding:10px">⏳ فحص البنية...</div>
     </div>
+
+    <div id="nftQuotaBox" dir="rtl" style="background:linear-gradient(135deg,#2a1a4d,#1a0f2e);color:#f5c84b;border:1px solid #f5c84b;border-radius:14px;padding:14px;margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <b style="font-size:15px">🎁 حصتك من NFTs</b>
+        <span id="nftQuotaBadge" style="background:rgba(245,200,75,.2);padding:3px 10px;border-radius:8px;font-size:12px;font-weight:800">⏳</span>
+      </div>
+      <div id="nftQuotaText" class="small" style="color:#c8b6ff;margin-top:8px;line-height:1.6">⏳ جاري الحساب...</div>
+    </div>
     <div class="statusBox" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border:1px solid #7b4dd9">
       <div dir="rtl" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
         <b style="font-size:16px;color:#f5c84b">🎨 مولد صورة NFT — AI مستقل</b>
@@ -4920,7 +4939,7 @@ function renderNFTStudio(){
     <div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRecipient" placeholder="عنوان Pi Testnet للمستلم" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="mintCurrentNFT()">⛓️ Mint NFT على Pi Testnet</button><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()"> 🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div>
     <div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div>
   </section>`;
-  loadNFTProjects();loadNFTStatus();
+  loadNFTProjects();loadNFTStatus();loadNFTQuota();
 }
 var __NFT_STYLES = {
   golden:    {prefix:"luxurious golden 3D render, ", suffix:", intricate circuit board patterns, glowing gold and cyan, cinematic lighting, dark navy background with golden particles, ultra detailed, 8K, masterpiece"},
@@ -5010,6 +5029,40 @@ async function regenerateNFTImage(){
   var ta = document.getElementById('nftImagePrompt');
   if(!ta || !ta.value.trim()){ return; }
   await generateNFTImage();
+}
+
+async function loadNFTQuota(){
+  var box = document.getElementById('nftQuotaBox');
+  var badge = document.getElementById('nftQuotaBadge');
+  var text = document.getElementById('nftQuotaText');
+  if(!box) return;
+  try{
+    var d = await platformSvc('nft_quota');
+    if(!d || !d.ok) throw new Error('quota_failed');
+    var total = Number(d.total_created||0);
+    var freeRem = Number(d.free_remaining||0);
+    var nextCost = Number(d.next_cost||0);
+    var nextCur = d.next_currency||'free';
+    window.__NFT_QUOTA = d;
+    if(freeRem > 0){
+      if(badge) badge.textContent = '🎉 ' + freeRem + ' مجاني متبقٍ';
+      if(text) text.innerHTML = 'أنشأت <b>' + total + '</b> NFT. لديك <b style="color:#31e981">' + freeRem + '</b> NFT مجاني متبقٍ من أصل ' + Number(d.free_quota||5) + '.';
+    } else {
+      if(badge) badge.textContent = '💰 ' + nextCost + ' ZYN Points';
+      if(text) text.innerHTML = 'أنشأت <b>' + total + '</b> NFT. تكلفة NFT التالي: <b style="color:#f5c84b">' + nextCost + ' ZYN Points</b>' + (nextCost >= Number(d.zyn_max||100) ? ' <span style="color:#c8b6ff">(الحد الأقصى)</span>' : '');
+    }
+  }catch(e){
+    if(text) text.innerHTML = '<span style="color:#c8b6ff;opacity:.7">⚠️ تعذر تحميل الحصة</span>';
+  }
+}
+
+function isNFTCreationAllowed(){
+  // للفحص السريع قبل التوليد — يعتمد على __NFT_QUOTA المُحدَّث
+  var q = window.__NFT_QUOTA;
+  if(!q) return {allowed:true, cost:0, currency:'free'};
+  var freeRem = Number(q.free_remaining||0);
+  if(freeRem > 0) return {allowed:true, cost:0, currency:'free'};
+  return {allowed:true, cost:Number(q.next_cost||0), currency:q.next_currency||'zyn_points'};
 }
 
 async function generateNFTImage(){
@@ -7500,6 +7553,26 @@ ASCEND_STAGES = [
 ]
 ASCEND_STAGE_MAP = {s["key"]: s for s in ASCEND_STAGES}
 
+# ZYN ASCEND v2 — تسعير NFT Studio (تدريجي)
+NFT_FREE_QUOTA = 5       # أول 5 NFTs مجانية
+NFT_ZYN_START = 50       # السعر الابتدائي عند NFT #6
+NFT_ZYN_STEP = 10        # زيادة 10 لكل NFT
+NFT_ZYN_MAX = 100        # السقف عند 100
+
+def _nft_price_for(total_created):
+    """يُعيد (cost, currency) حسب عدد NFTs المُنشأة.
+    - أول NFT_FREE_QUOTA: مجاني
+    - بعدها: ZYN تتصاعد من NFT_ZYN_START إلى NFT_ZYN_MAX
+    """
+    n = int(total_created or 0)
+    if n < NFT_FREE_QUOTA:
+        return (0, "free")
+    idx = n - NFT_FREE_QUOTA  # 0, 1, 2, ...
+    price = NFT_ZYN_START + (idx * NFT_ZYN_STEP)
+    if price > NFT_ZYN_MAX:
+        price = NFT_ZYN_MAX
+    return (price, "zyn_points")
+
 # ZYN ASCEND v2 — الرتب
 ASCEND_RANKS = [
     {"key":"none",       "label":"",                  "min_stage":"iron",    "emoji":""},
@@ -9064,6 +9137,29 @@ def webapp_platform_services():
         name=str(body.get("name","AI for NFT"))[:160]; desc=str(body.get("description",""))[:2000]; collection=str(body.get("collection",""))[:160]
         metadata={"name":name,"description":desc,"collection":collection,"attributes":body.get("attributes",[]),"generated_by":"AI for NFT Studio","schema":"ai-for-nft-v1"}
         return jsonify({"ok":True,"metadata":metadata,"filename":re.sub(r"[^A-Za-z0-9_-]+","_",name)[:80]+".json"})
+    if op=="nft_quota":
+        # ZYN NFT Studio — حالة الحصة + سعر NFT التالي
+        identity = _platform_identity(user)
+        def q_quota(cur):
+            cur.execute("SELECT free_used, paid_used, total_created, last_created_at FROM ai_for_nft_quota WHERE identity_key=%s", (identity,))
+            row = cur.fetchone() or {}
+            total = int(row.get("total_created") or 0)
+            return {"total_created": total}
+        r = _platform_db_query(q_quota) or {}
+        total = int(r.get("total_created") or 0)
+        cost, currency = _nft_price_for(total)
+        free_remaining = max(0, NFT_FREE_QUOTA - total)
+        return jsonify({
+            "ok": True,
+            "total_created": total,
+            "free_quota": NFT_FREE_QUOTA,
+            "free_remaining": free_remaining,
+            "next_cost": cost,
+            "next_currency": currency,
+            "zyn_start": NFT_ZYN_START,
+            "zyn_step": NFT_ZYN_STEP,
+            "zyn_max": NFT_ZYN_MAX,
+        })
     return jsonify({"ok":False,"error":"unknown_operation"}),400
 
 @app.route("/api/app/owner", methods=["GET", "POST"])

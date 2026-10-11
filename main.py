@@ -7645,6 +7645,7 @@ def _reward_limits_daily():
         "xo_win": 3,             # فوز XO: +2 × 3
         "rps_win": 5,            # فوز RPS: +1 × 5
         "memory_win": 2,         # إكمال ذاكرة: +2 × 2
+        "unblock_win": 10,       # إكمال متاهة: 10 مستويات × متغير
         "ai_use": 5,
     }
 
@@ -9308,9 +9309,19 @@ def webapp_platform_services():
         if not allowed:
             return jsonify({"ok": False, "error": "rate_limit"}), 429
         game = str(body.get("game") or "").strip()
-        if game not in ("xo_win","rps_win","memory_win"):
+        if game not in ("xo_win","rps_win","memory_win","unblock_win"):
             return jsonify({"ok": False, "error": "unknown_game"}), 400
-        reward_map = {"xo_win":2, "rps_win":1, "memory_win":2}
+        reward_map = {"xo_win":2, "rps_win":1, "memory_win":2, "unblock_win":0}
+        unblock_level_rewards = {1:1, 2:2, 3:3, 4:4, 5:5, 6:6, 7:6, 8:6, 9:6, 10:6}
+        UNBLOCK_DAILY_CAP = 40
+        unblock_level = 0
+        if game == "unblock_win":
+            try:
+                unblock_level = int(body.get("level") or 0)
+            except Exception:
+                unblock_level = 0
+            if unblock_level < 1 or unblock_level > 10:
+                return jsonify({"ok": False, "error": "invalid_level"}), 400
         def q_gr(cur):
             allowed, remaining = _reward_check_limit(cur, identity, game)
             if not allowed:
@@ -9319,6 +9330,29 @@ def webapp_platform_services():
                 return {"reward": 0, "note": "daily_limit", "points": p}
             _reward_mark_used(cur, identity, game)
             reward_val = reward_map[game]
+            if game == "unblock_win":
+                reward_val = int(unblock_level_rewards.get(unblock_level, 0))
+                try:
+                    cur.execute("""SELECT COALESCE(SUM(points),0) AS s
+                                   FROM ai_for_reward_ledger
+                                   WHERE identity_key=%s
+                                     AND event_type LIKE 'unblock%%'
+                                     AND created_at::date = CURRENT_DATE""", (identity,))
+                    _today_sum = int((cur.fetchone() or {}).get("s") or 0)
+                except Exception as _e:
+                    print(f"unblock daily sum skip: {_e}")
+                    _today_sum = 0
+                if _today_sum >= UNBLOCK_DAILY_CAP:
+                    cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+                    p = int((cur.fetchone() or {}).get("points") or 0)
+                    return {"reward": 0, "note": "unblock_daily_cap", "points": p, "cap": UNBLOCK_DAILY_CAP}
+                _remaining_cap = UNBLOCK_DAILY_CAP - _today_sum
+                if reward_val > _remaining_cap:
+                    reward_val = max(0, _remaining_cap)
+                if reward_val <= 0:
+                    cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
+                    p = int((cur.fetchone() or {}).get("points") or 0)
+                    return {"reward": 0, "note": "unblock_daily_cap", "points": p, "cap": UNBLOCK_DAILY_CAP}
             cur.execute("""INSERT INTO ai_for_rewards(identity_key, points) VALUES(%s, %s)
                            ON CONFLICT(identity_key) DO UPDATE SET points = ai_for_rewards.points + %s, updated_at=NOW()""",
                         (identity, reward_val, reward_val))

@@ -15,6 +15,16 @@ except Exception:
     RealDictCursor = None
     ThreadedConnectionPool = None
 
+# ZYN NFT Studio — Watermark (Pillow)
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    _PIL_AVAILABLE = True
+except Exception:
+    Image = None
+    ImageDraw = None
+    ImageFont = None
+    _PIL_AVAILABLE = False
+
 # Pi NFT on-chain layer: uses the existing AI for App Wallet as issuer.
 # This is a Pi-native unique asset on the Stellar-based Pi Testnet, not an EVM/ERC-721 contract.
 try:
@@ -3928,17 +3938,29 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
             f"?width={width}&height={height}"
             f"&seed={_seed}&model={_model}&nologo=true&enhance=true"
         )
-        # اختبار أن الصورة قابلة للتحميل (Pollinations يُنشئها عند الطلب)
+        # ZYN NFT Studio — نحمّل الصورة ونضيف Watermark ذهبي
         try:
-            _probe = requests.get(image_url, timeout=90, stream=True, allow_redirects=True)
-            if not (200 <= _probe.status_code < 300):
-                # Fallback: Tanvo المدمج
-                image_url = f"https://image.pollinations.ai/prompt/{_encoded}?width={width}&height={height}&seed={_seed}&nologo=true"
-            _probe.close()
-        except Exception:
-            # في حال فشل الاتصال، نُعيد الرابط على أي حال (Pollinations مولّد عند الطلب)
-            pass
-        image_b64=""
+            _img_resp = requests.get(image_url, timeout=90, stream=False, allow_redirects=True)
+            if 200 <= _img_resp.status_code < 300 and _img_resp.content:
+                _watermarked = _nft_apply_watermark(_img_resp.content, "ZYN Studio")
+                # تحويل إلى Data URL (Base64) لضمان الثبات
+                _b64_wm = base64.b64encode(_watermarked).decode("ascii")
+                image_b64 = "data:image/png;base64," + _b64_wm
+                # نحفظ الصورة المعدّلة في IPFS (اختياري — عبر Pinata)
+                try:
+                    _pinned, _perr = _pin_image_to_ipfs(image_b64, "nft_" + job_id[:8] + ".png")
+                    if _pinned and _pinned.get("gateway"):
+                        image_url = _pinned["gateway"]
+                    else:
+                        # إذا فشل IPFS، نستخدم Pollinations URL الأصلي
+                        pass
+                except Exception as _pe:
+                    print(f"Watermark IPFS skip: {_pe}")
+            else:
+                image_b64 = ""
+        except Exception as _ie:
+            print(f"Watermark fetch error: {_ie}")
+            image_b64 = ""
         conn2=_membership_db_connect()
         try:
             if conn2:
@@ -3958,6 +3980,57 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
         except Exception:pass
         finally:_membership_db_release(conn2 if 'conn2' in locals() else None)
         return {"ok":False,"error":"nft_image_generation_failed","detail":str(e)[:160]},503
+
+def _nft_apply_watermark(image_bytes, text="ZYN Studio"):
+    """ZYN NFT Studio — إضافة Watermark ذهبي على الصورة.
+    - image_bytes: bytes (PNG/JPG/WEBP)
+    - يُرجع: bytes جديدة (PNG) أو الأصل إذا فشل
+    """
+    if not _PIL_AVAILABLE:
+        return image_bytes
+    try:
+        img = Image.open(io.BytesIO(image_bytes)).convert("RGBA")
+        W, H = img.size
+        # إنشاء طبقة شفافة
+        overlay = Image.new("RGBA", (W, H), (0,0,0,0))
+        draw = ImageDraw.Draw(overlay)
+        # حجم الخط يتناسب مع حجم الصورة
+        try:
+            font_size = max(16, int(min(W, H) * 0.035))
+            try:
+                font = ImageFont.truetype("DejaVuSans-Bold.ttf", font_size)
+            except Exception:
+                font = ImageFont.load_default()
+        except Exception:
+            font = ImageFont.load_default()
+        # النص
+        label = "✨ " + str(text or "ZYN Studio")
+        # قياس النص
+        try:
+            bbox = draw.textbbox((0,0), label, font=font)
+            tw = bbox[2] - bbox[0]
+            th = bbox[3] - bbox[1]
+        except Exception:
+            tw, th = (len(label) * font_size // 2, font_size)
+        # الموقع: أسفل يمين + هوامش
+        pad = max(12, int(W * 0.02))
+        x = W - tw - pad * 2
+        y = H - th - pad * 3
+        # خلفية سوداء شبه شفافة
+        draw.rectangle(
+            [x - pad, y - pad, x + tw + pad, y + th + pad],
+            fill=(0, 0, 0, 160)
+        )
+        # نص ذهبي
+        draw.text((x, y), label, font=font, fill=(245, 200, 75, 255))
+        # دمج
+        out = Image.alpha_composite(img, overlay).convert("RGB")
+        buf = io.BytesIO()
+        out.save(buf, format="PNG", optimize=True)
+        return buf.getvalue()
+    except Exception as e:
+        print(f"Watermark error: {e}")
+        return image_bytes
 
 def _pin_json_to_ipfs(metadata, filename="ai-for-nft.json"):
     if not NFT_IPFS_JWT:return None,"ipfs_not_configured"

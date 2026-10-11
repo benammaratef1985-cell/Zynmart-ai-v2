@@ -4803,8 +4803,167 @@ async function doAscend(from){
   }
 }
 
-function renderNFTStudio(){document.getElementById('view').innerHTML=`<button class="back" onclick="goHome()">← المنصة</button><section class="detail"><div class="sectionTitle">🖼️ NFT Studio</div><p class="small">إنشاء NFT وMetadata وIPFS وتجهيز الأصل على Pi Blockchain. Genesis خاص بالمنصة ولا يظهر للمستخدم العام.</p><div id="nftInfra" class="statusBox">⏳ فحص البنية...</div><div class="statusBox"><b>🎨 مولد صورة NFT — AI مستقل</b><p class="small">مولد صور NFT مستقل عن مفاتيح الذكاء الاصطناعي النصي.</p><textarea id="nftImagePrompt" placeholder="اكتب وصف الصورة التي تريدها..." style="width:100%;min-height:80px;padding:12px;margin:7px 0;border-radius:10px"></textarea><button class="action green" onclick="generateNFTImage()">🎨 توليد الصورة</button><div id="nftImageResult" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRecipient" placeholder="عنوان Pi Testnet للمستلم" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="mintCurrentNFT()">⛓️ Mint NFT على Pi Testnet</button><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()">🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div><div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div></section>`;loadNFTProjects();loadNFTStatus()}
-async function generateNFTImage(){let p=document.getElementById("nftImagePrompt")?.value.trim(),r=document.getElementById("nftImageResult");if(!p){if(r)r.textContent="⚠️ اكتب وصف الصورة أولًا.";return}if(r)r.textContent="⏳ جاري توليد الصورة...";try{let d=await api("/api/app/nft/image",{method:"POST",body:JSON.stringify({prompt:p,width:1024,height:1024,steps:4})});if(!d.ok)throw new Error(d.error||"image_generation_failed");r.innerHTML=(d.image_url?"<img src=\""+esc(d.image_url)+"\" style=\"width:100%;border-radius:16px;margin-top:8px\">":"<div class=\"statusBox\">تم التوليد، لكن الخدمة لم تعد رابط عرض مباشر.</div>")+"<div class=\"small\">النموذج: "+esc(d.model||"open model")+"</div>"}catch(e){if(r)r.textContent="⚠️ "+(e.message||"تعذر توليد الصورة")}}
+function renderNFTStudio(){
+  document.getElementById('view').innerHTML=`
+  <button class="back" onclick="goHome()">← المنصة</button>
+  <section class="detail">
+    <div style="text-align:center;background:linear-gradient(135deg,#2a1a4d,#1a0f2e);color:#f5c84b;padding:18px;border-radius:18px;margin-bottom:16px;border:1px solid #7b4dd9;position:relative;overflow:hidden">
+      <div style="position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(245,200,75,.12) 0%,transparent 60%);pointer-events:none"></div>
+      <div style="font-size:36px;filter:drop-shadow(0 4px 12px rgba(245,200,75,.5))">🖼️</div>
+      <div style="font-size:22px;font-weight:900;margin-top:6px;letter-spacing:.5px">NFT Studio</div>
+      <div class="small" style="color:#c8b6ff;margin-top:6px;line-height:1.6">أنشئ NFT فريد بتقنية AI<br>Pi Blockchain · IPFS · Metadata</div>
+    </div>
+    <div class="statusBox" id="nftInfra" dir="rtl" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#c8b6ff;border:1px solid #7b4dd9">
+      <div style="text-align:center;padding:10px">⏳ فحص البنية...</div>
+    </div>
+    <div class="statusBox" style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border:1px solid #7b4dd9">
+      <div dir="rtl" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <b style="font-size:16px;color:#f5c84b">🎨 مولد صورة NFT — AI مستقل</b>
+        <span class="small" style="color:#c8b6ff;background:rgba(123,77,217,.3);padding:3px 8px;border-radius:8px">FLUX.1</span>
+      </div>
+      <p class="small" dir="rtl" style="color:#c8b6ff;margin-bottom:10px">✨ مولد صور NFT مستقل — بدون مفاتيح، مجاني 100%</p>
+      <div dir="rtl" style="margin-bottom:10px">
+        <div class="small" style="color:#c8b6ff;margin-bottom:6px">⚡ أنماط سريعة:</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end">
+          <button type="button" onclick="setNFTStyle('golden')" style="background:linear-gradient(135deg,#f5c84b,#ff9f1c);color:#1a0f2e;border:0;border-radius:10px;padding:6px 12px;font-weight:800;font-size:12px;cursor:pointer">🔑 ذهبي</button>
+          <button type="button" onclick="setNFTStyle('cyberpunk')" style="background:linear-gradient(135deg,#7b4dd9,#39d9ff);color:#fff;border:0;border-radius:10px;padding:6px 12px;font-weight:800;font-size:12px;cursor:pointer">🌃 سيبربانك</button>
+          <button type="button" onclick="setNFTStyle('art')" style="background:linear-gradient(135deg,#ff6b9d,#ff9f1c);color:#fff;border:0;border-radius:10px;padding:6px 12px;font-weight:800;font-size:12px;cursor:pointer">🎨 فني</button>
+          <button type="button" onclick="setNFTStyle('logo')" style="background:linear-gradient(135deg,#4a2e7a,#7b4dd9);color:#fff;border:0;border-radius:10px;padding:6px 12px;font-weight:800;font-size:12px;cursor:pointer">🏛️ شعار</button>
+          <button type="button" onclick="setNFTStyle('character')" style="background:linear-gradient(135deg,#31e981,#0a6b3a);color:#fff;border:0;border-radius:10px;padding:6px 12px;font-weight:800;font-size:12px;cursor:pointer">👤 شخصية</button>
+        </div>
+      </div>
+      <textarea id="nftImagePrompt" dir="rtl" placeholder="اكتب وصف الصورة التي تريدها..." style="width:100%;min-height:80px;padding:12px;margin:7px 0;border-radius:12px;background:#0f0f1a;color:#fff;border:1px solid #4a2e7a;font-family:inherit;font-size:14px"></textarea>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;margin-top:8px">
+        <button class="action green" onclick="generateNFTImage()" style="flex:1;min-width:140px;background:linear-gradient(135deg,#31e981,#0a6b3a);color:#fff;border:0;border-radius:12px;padding:12px;font-weight:800;font-size:14px;cursor:pointer">🎨 توليد الصورة</button>
+        <button type="button" onclick="uploadNFTImage()" style="background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:12px;padding:12px 16px;font-weight:800;font-size:14px;cursor:pointer">📤 رفع صورة</button>
+      </div>
+      <input type="file" id="nftImageFile" accept="image/png,image/jpeg,image/webp" style="display:none" onchange="handleNFTImageUpload(event)">
+      <div id="nftImageResult" style="margin-top:12px"></div>
+    </div>
+    <div class="statusBox"><b>مشروع NFT</b><input id="nftName" placeholder="اسم NFT" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftCollection" placeholder="اسم المجموعة" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><textarea id="nftDescription" placeholder="الوصف" style="width:100%;min-height:90px;padding:12px;margin:7px 0;border-radius:10px"></textarea><input id="nftMarketplace" type="hidden" value=""><input id="nftAssetId" placeholder="On-chain Asset ID بعد الـMint" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><input id="nftRecipient" placeholder="عنوان Pi Testnet للمستلم" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="mintCurrentNFT()">⛓️ Mint NFT على Pi Testnet</button><input id="nftRoyalty" type="number" min="0" max="10" step="0.1" value="5" placeholder="Creator Royalty %" style="width:100%;padding:12px;margin:7px 0;border-radius:10px"><button class="action green" onclick="createNFTProject()">💾 حفظ المشروع</button><button class="action" onclick="generateNFTMetadata()"> 🧾 إنشاء Metadata JSON</button><button class="action dark" onclick="pinNFTMetadata()">📌 رفع Metadata إلى IPFS</button><div id="nftMsg" class="small" style="margin-top:8px"></div></div>
+    <div class="statusBox"><b>مشاريعي</b><div id="nftProjects">⏳ جاري التحميل...</div></div>
+  </section>`;
+  loadNFTProjects();loadNFTStatus();
+}
+var __NFT_STYLES = {
+  golden:    {prefix:"luxurious golden 3D render, ", suffix:", intricate circuit board patterns, glowing gold and cyan, cinematic lighting, dark navy background with golden particles, ultra detailed, 8K, masterpiece"},
+  cyberpunk: {prefix:"cyberpunk neon style, ", suffix:", futuristic cityscape, vibrant neon lights, rain reflections, cinematic, ultra detailed, 8K, blade runner aesthetic"},
+  art:       {prefix:"artistic masterpiece, ", suffix:", oil painting style, expressive brushstrokes, rich colors, museum quality, trending on ArtStation"},
+  logo:      {prefix:"minimalist premium logo, ", suffix:", clean lines, golden accents, dark background, professional branding, vector art style, centered composition"},
+  character: {prefix:"epic character portrait, ", suffix:", heroic pose, detailed armor, dramatic lighting, cinematic composition, ultra realistic, 8K"}
+};
+var __NFT_LAST_GEN = {prompt:"", url:""};
+
+function setNFTStyle(style){
+  var s = __NFT_STYLES[style];
+  if(!s) return;
+  var ta = document.getElementById('nftImagePrompt');
+  if(!ta) return;
+  var base = (ta.value||'').trim();
+  if(!base){
+    ta.value = s.prefix + "Pi Network theme" + s.suffix;
+  } else {
+    // إزالة أي نمط سابق
+    var cleaned = base;
+    Object.values(__NFT_STYLES).forEach(function(x){
+      cleaned = cleaned.replace(x.prefix,'').replace(x.suffix,'');
+    });
+    cleaned = cleaned.trim();
+    ta.value = s.prefix + cleaned + s.suffix;
+  }
+  ta.focus();
+}
+
+function uploadNFTImage(){
+  var inp = document.getElementById('nftImageFile');
+  if(inp) inp.click();
+}
+
+async function handleNFTImageUpload(ev){
+  var f = ev && ev.target && ev.target.files && ev.target.files[0];
+  var r = document.getElementById('nftImageResult');
+  if(!f) return;
+  // الحد الأقصى 5 ميجا قبل الضغط
+  if(f.size > 15*1024*1024){ if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ الصورة كبيرة جدًا (الحد 15MB قبل الضغط)</div>'; return; }
+  if(r) r.innerHTML='<div style="text-align:center;color:#c8b6ff">⏳ جاري ضغط الصورة...</div>';
+  try{
+    var compressed = await compressImage(f, 1024, 0.85);
+    __NFT_LAST_GEN = {prompt:"(uploaded)", url: compressed};
+    if(r) r.innerHTML = renderNFTImageBox(compressed, 'uploaded');
+  }catch(e){
+    if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ تعذر معالجة الصورة</div>';
+  }
+}
+
+function compressImage(file, maxDim, quality){
+  return new Promise(function(resolve, reject){
+    var reader = new FileReader();
+    reader.onload = function(e){
+      var img = new Image();
+      img.onload = function(){
+        var w = img.width, h = img.height;
+        if(w > h && w > maxDim){ h = Math.round(h * maxDim / w); w = maxDim; }
+        else if(h > maxDim){ w = Math.round(w * maxDim / h); h = maxDim; }
+        var canvas = document.createElement('canvas');
+        canvas.width = w; canvas.height = h;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        try {
+          var dataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve(dataUrl);
+        } catch(err){ reject(err); }
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function renderNFTImageBox(url, source){
+  if(!url) return '';
+  var srcLabel = source === 'uploaded' ? '📤 صورة مرفوعة' : '🎨 مولّدة بالذكاء الاصطناعي';
+  return '' +
+    '<div style="position:relative;border-radius:16px;overflow:hidden;border:2px solid #7b4dd9;margin-top:8px">' +
+      '<img src="'+esc(url)+'" style="width:100%;display:block;border-radius:14px">' +
+      '<div style="position:absolute;top:8px;right:8px;background:rgba(0,0,0,.7);color:#f5c84b;padding:4px 10px;border-radius:8px;font-size:11px;font-weight:800">'+srcLabel+'</div>' +
+    '</div>' +
+    '<div style="display:flex;gap:6px;margin-top:10px;justify-content:flex-end">' +
+      (source === 'uploaded' ? '' : '<button type="button" onclick="regenerateNFTImage()" style="background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:10px;padding:8px 14px;font-weight:800;font-size:13px;cursor:pointer">🔄 إعادة توليد</button>') +
+      '<button type="button" onclick="clearNFTImage()" style="background:linear-gradient(135deg,#a33,#721c1c);color:#fff;border:0;border-radius:10px;padding:8px 14px;font-weight:800;font-size:13px;cursor:pointer">🗑️ مسح</button>' +
+    '</div>';
+}
+
+function clearNFTImage(){
+  __NFT_LAST_GEN = {prompt:"", url:""};
+  var r = document.getElementById('nftImageResult');
+  if(r) r.innerHTML = '';
+  var inp = document.getElementById('nftImageFile');
+  if(inp) inp.value = '';
+}
+
+async function regenerateNFTImage(){
+  var ta = document.getElementById('nftImagePrompt');
+  if(!ta || !ta.value.trim()){ return; }
+  await generateNFTImage();
+}
+
+async function generateNFTImage(){
+  var p = (document.getElementById("nftImagePrompt")?.value || '').trim();
+  var r = document.getElementById("nftImageResult");
+  if(!p){ if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ اكتب وصف الصورة أولًا.</div>'; return; }
+  if(r) r.innerHTML='<div style="text-align:center;color:#c8b6ff;padding:14px">⏳ جاري توليد الصورة... (قد يأخذ 10-30 ثانية)</div>';
+  try{
+    var d = await api("/api/app/nft/image", {method:"POST", body:JSON.stringify({prompt:p, width:1024, height:1024, steps:4})});
+    if(!d.ok) throw new Error(d.error || "image_generation_failed");
+    if(!d.image_url) throw new Error("no_image_url");
+    __NFT_LAST_GEN = {prompt:p, url:d.image_url};
+    if(r) r.innerHTML = renderNFTImageBox(d.image_url, 'generated') + '<div class="small" style="text-align:center;color:#c8b6ff;margin-top:6px">النموذج: '+esc(d.model||"FLUX.1")+'</div>';
+  }catch(e){
+    if(r) r.innerHTML='<div style="color:#a33;text-align:center">⚠️ '+(e.message||'تعذر توليد الصورة')+'</div>';
+  }
+}
 async function loadNFTStatus(){try{let x=await api('/api/app/nft/status');document.getElementById('nftInfra').innerHTML='<div class="row">IPFS: <span class="'+(x.ipfs?.configured?'ok':'warn')+'">'+(x.ipfs?.configured?'🟢 جاهز':'🟡 يحتاج إعداد الخادم')+'</span></div><div class="row">Pi Blockchain Contract: <span class="'+(x.contract?.configured?'ok':'warn')+'">'+(x.contract?.configured?'🟢 RPC + Contract مضبوط':'🟡 يحتاج Contract/RPC')+'</span></div><div class="row">Marketplace Fee: <b>'+((x.marketplace?.fee_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Default Royalty: <b>'+((x.marketplace?.default_royalty_bps||0)/100).toFixed(2)+'%</b></div><div class="row">Currency: <b>Pi</b> · ZYN: '+(x.marketplace?.zyn?.enabled?'🟢 جاهز بعد الاعتماد':'🟡 مؤجل حتى اعتماد Mainnet')+'</div><div class="row">Genesis: '+(x.genesis?.enabled?'🔒 للمنصة فقط':'🟡 غير مفعّل')+'</div>'}catch(e){document.getElementById('nftInfra').textContent='⚠️ تعذر فحص NFT الآن.'}}
 async function pinNFTMetadata(){let m=document.getElementById('nftMsg');let metadata={name:document.getElementById('nftName')?.value.trim()||'AI for NFT',description:document.getElementById('nftDescription')?.value.trim()||'',collection:document.getElementById('nftCollection')?.value.trim()||'',schema:'ai-for-nft-v3',blockchain:'Pi',royalty_bps:Math.round(Number(document.getElementById('nftRoyalty')?.value||5)*100)};m.textContent='⏳ جاري رفع Metadata إلى IPFS...';try{let d=await api('/api/app/nft/ipfs',{method:'POST',body:JSON.stringify({metadata})});m.innerHTML='<div class="statusBox">✅ IPFS: <b>'+esc(d.ipfs?.cid||'')+'</b><br>'+esc(d.ipfs?.uri||'')+'</div>'}catch(e){m.textContent='⚠️ '+(e.message||'ipfs_failed')}}
 async function mintCurrentNFT(){let m=document.getElementById('nftMsg'),id=window.__AI_FOR_NFT_PROJECT_ID||'',recipient=document.getElementById('nftRecipient')?.value.trim();if(!id){m.textContent='⚠️ احفظ المشروع أولًا.';return}if(!recipient){m.textContent='⚠️ أدخل عنوان Pi Testnet للمستلم.';return}m.textContent='⏳ جاري التحقق من Trustline وتنفيذ Mint على Pi Testnet...';try{let d=await api('/api/app/nft/projects/'+encodeURIComponent(id)+'/mint',{method:'POST',body:JSON.stringify({recipient_address:recipient})});if(!d.ok)throw new Error(d.error||'mint_failed');document.getElementById('nftAssetId').value=d.nft?.asset_id||'';m.innerHTML='<div class="statusBox">✅ تم Mint NFT على Pi Testnet.<br>Asset: <b>'+esc(d.nft?.asset_id||'')+'</b><br>TX: <b>'+esc(d.nft?.tx_hash||'')+'</b><br>المبلغ: 1 وحدة فريدة.</div>';loadNFTProjects();loadNFTStatus()}catch(e){m.textContent='⚠️ '+(e.message||'تعذر تنفيذ Mint. إذا ظهر recipient_trustline_required يجب إنشاء Trustline لهذا الأصل أولًا.')}}

@@ -3967,6 +3967,8 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
                 with conn2:
                     with conn2.cursor() as cur:cur.execute("UPDATE ai_for_nft_image_jobs SET status='ready',image_url=%s,updated_at=NOW() WHERE job_id=%s",(image_url,job_id))
         finally:_membership_db_release(conn2)
+        try: _membership_db_release(conn)
+        except Exception: pass
         out={"ok":True,"job_id":job_id,"model":NFT_IMAGE_AI_MODEL,"image_url":image_url,"generated_by":"self_hosted_open_model"}
         if image_b64:out["b64_json"]=image_b64
         return out,200
@@ -3978,7 +3980,11 @@ def _nft_image_generate(user,prompt,width=1024,height=1024,steps=4):
                 with conn2:
                     with conn2.cursor() as cur:cur.execute("UPDATE ai_for_nft_image_jobs SET status='failed',error=%s,updated_at=NOW() WHERE job_id=%s",(str(e)[:300],job_id))
         except Exception:pass
-        finally:_membership_db_release(conn2 if 'conn2' in locals() else None)
+        finally:
+            _membership_db_release(conn2 if 'conn2' in locals() else None)
+            # إصلاح تسرّب: نُغلق الاتصال الأصلي أيضًا
+            try: _membership_db_release(conn)
+            except Exception: pass
         return {"ok":False,"error":"nft_image_generation_failed","detail":str(e)[:160]},503
 
 def _nft_apply_watermark(image_bytes, text="ZYN Studio"):

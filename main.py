@@ -6063,34 +6063,11 @@ document.getElementById('view').innerHTML=`
   </div>
 
   <div class="statusBox">
-    <b>🚦 لعبة تفريغ الطريق (Unblock)</b>
-    <p class="small" style="line-height:1.6">حرّك الأسهم/السيارات المتشابكة، أخرجها من المسار، وانتقل للمستوى التالي.</p>
-    <div style="display:flex;gap:6px;margin-top:10px;justify-content:center">
-      <button class="mini" id="ubModeArrows" onclick="ubSelectMode('arrows')" style="flex:1;background:linear-gradient(135deg,#7b4dd9,#4a2e7a);color:#fff;border:0;border-radius:10px;padding:8px;font-weight:800">⬆️ أسهم</button>
-      <button class="mini" id="ubModeCars" onclick="ubSelectMode('cars')" style="flex:1;background:#eee;color:#333;border:0;border-radius:10px;padding:8px;font-weight:800">🚗 سيارات</button>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px">
-      <div class="small">المستوى: <b id="ubLevel">1</b> / 10</div>
-      <div class="small">النقاط: <b id="ubScore">0</b></div>
-      <div class="small">الحركات: <b id="ubMoves">0</b></div>
-    </div>
-    <div style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border-radius:14px;padding:12px;margin-top:10px">
-      <div id="ubBoard" style="display:grid;gap:4px;background:#2a1a4d;border-radius:10px;padding:6px;aspect-ratio:1/1;max-width:360px;margin:0 auto"></div>
-    </div>
-    <div id="ubStatus" class="small" style="text-align:center;margin-top:10px;color:#c8b6ff">اختر قطعة ثم اضغط على الاتجاه</div>
-    <div class="toolbar" style="margin-top:10px;display:flex;gap:6px;justify-content:center">
-      <button class="mini" onclick="ubRestart()">🔄 إعادة المستوى</button>
-      <button class="mini" onclick="ubNextLevel()" id="ubNextBtn" style="display:none">➡️ المستوى التالي</button>
-    </div>
-    <div id="ubDailyInfo" class="small" style="text-align:center;margin-top:8px;opacity:.7">—</div>
-  </div>
-
-  <div class="statusBox">
     <b>📋 كيف تربح نقاط ZYN؟</b>
     <div id="arRules" class="small" style="margin-top:8px">⏳</div>
   </div>
 </section>`;
-xoReset();memReset();loadArcade();try{ubInit();}catch(_){}}
+xoReset();memReset();loadArcade();}
 
 async function loadArcade(){
   try{

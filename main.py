@@ -9365,6 +9365,15 @@ def webapp_platform_services():
             cur.execute("""INSERT INTO ai_for_levels(identity_key, points_total) VALUES(%s, %s)
                            ON CONFLICT(identity_key) DO UPDATE SET points_total = ai_for_levels.points_total + %s, updated_at=NOW()""",
                         (identity, reward_val, reward_val))
+            # ZYN Arcade — تسجيل في السجل الموحّد (reward_ledger)
+            try:
+                _source_key = str(uuid.uuid4())
+                cur.execute("""INSERT INTO ai_for_reward_ledger(ledger_id, identity_key, event_type, points, source_key)
+                               VALUES(%s,%s,%s,%s,%s)
+                               ON CONFLICT (identity_key, event_type, source_key) DO NOTHING""",
+                            (str(uuid.uuid4()), identity, game, reward_val, _source_key))
+            except Exception as _le:
+                print(f"arcade ledger insert skip: {_le}")
             cur.execute("SELECT points FROM ai_for_rewards WHERE identity_key=%s", (identity,))
             return {"reward": reward_val, "points": int((cur.fetchone() or {}).get("points") or 0)}
         r = _platform_db_query(q_gr)

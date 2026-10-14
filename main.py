@@ -1271,7 +1271,7 @@ def _find_identity_link(provider,subject):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT identity_id,account_id,provider,provider_subject,provider_username,email,verified FROM ai_for_identity_links WHERE provider=%s AND provider_subject=%s LIMIT 1",(str(provider),str(subject)))
                 row=cur.fetchone()
-                if row:cur.execute("UPDATE ai_for_identity_links SET last_seen=NOW() WHERE identity_id=%s",(row["identity_id"],))
+                if row:cur.execute("UPDATE ai_for_identity_links SET last_seen=NOW() WHERE identity_id=%s AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL '5 minutes')",(row["identity_id"],))
                 return row
     except Exception as e: print(f"Identity link lookup error: {e}"); return None
     finally:_membership_db_release(conn)

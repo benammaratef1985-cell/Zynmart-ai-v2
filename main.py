@@ -1246,11 +1246,55 @@ def _web_issue_session(account_id):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE ai_for_web_accounts SET session_token_hash=%s,last_seen=NOW() WHERE account_id=%s AND status='active'",(_web_token_hash(token),str(account_id)))
+                _web_account_cache_clear(account_id)
                 return token if cur.rowcount==1 else None
     except Exception as e: print(f"Web session issue error: {e}"); return None
     finally:_membership_db_release(conn)
 
+# ZYN — Cache للـ web_account (يُقلل 30,000 استدعاء DB)
+_web_account_cache = {}
+_web_account_cache_ttl = 300  # 5 دقائق
+_web_account_cache_max = 2000  # حد أقصى
+
+def _web_account_cache_get(account_id):
+    try:
+        key = str(account_id or "").strip()
+        if not key: return None
+        entry = _web_account_cache.get(key)
+        if not entry: return None
+        if time.time() - entry["ts"] > _web_account_cache_ttl:
+            _web_account_cache.pop(key, None)
+            return None
+        return entry["data"]
+    except Exception:
+        return None
+
+def _web_account_cache_set(account_id, data):
+    try:
+        key = str(account_id or "").strip()
+        if not key or data is None: return
+        if len(_web_account_cache) >= _web_account_cache_max:
+            # حذف الأقدم (بسيط)
+            oldest = min(_web_account_cache.items(), key=lambda kv: kv[1].get("ts", 0))[0]
+            _web_account_cache.pop(oldest, None)
+        _web_account_cache[key] = {"ts": time.time(), "data": data}
+    except Exception:
+        pass
+
+def _web_account_cache_clear(account_id=None):
+    try:
+        if account_id is None:
+            _web_account_cache.clear()
+        else:
+            _web_account_cache.pop(str(account_id or "").strip(), None)
+    except Exception:
+        pass
+
 def _get_web_account_by_id(account_id):
+    # ZYN — Cache check أولًا
+    cached = _web_account_cache_get(account_id)
+    if cached is not None:
+        return cached
     conn=None
     try:
         conn=_membership_db_connect()
@@ -1258,7 +1302,10 @@ def _get_web_account_by_id(account_id):
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT account_id,display_name,username,email,email_verified,created_at,last_seen,status,role,metadata FROM ai_for_web_accounts WHERE account_id=%s AND status='active' LIMIT 1",(str(account_id),))
-                return cur.fetchone()
+                row = cur.fetchone()
+                if row:
+                    _web_account_cache_set(account_id, row)
+                return row
     except Exception as e: print(f"Web account by id error: {e}"); return None
     finally:_membership_db_release(conn)
 
@@ -1694,6 +1741,7 @@ def save_web_profile_photo(account_id, raw, mime):
         with conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE ai_for_web_accounts SET profile_photo=%s,profile_photo_mime=%s,photo_updated_at=NOW(),last_seen=NOW() WHERE account_id=%s AND status='active'",(psycopg2.Binary(raw),mime,str(account_id)))
+                _web_account_cache_clear(account_id)
                 return cur.rowcount==1
     except Exception as e:
         print(f"Web account photo save error: {e}")

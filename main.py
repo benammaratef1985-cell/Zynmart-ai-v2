@@ -6400,7 +6400,63 @@ async function loadWalletStatus(){let box=document.getElementById('walletBox');i
 
 async function linkWalletManual(){let inp=document.getElementById('manualWallet'),res=document.getElementById('manualWalletResult');if(!inp||!res)return;let addr=inp.value.trim().toUpperCase();if(!/^G[A-Z2-7]{55}$/.test(addr)){res.innerHTML='<span class="danger">⚠️ العنوان يجب أن يبدأ بـG ويكون 56 حرفًا</span>';return}res.innerHTML='⏳ جاري التحقق من الشبكة...';try{let r=await fetch('/api/app/account/wallet/manual',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({wallet_address:addr})});let d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'link_failed');res.innerHTML='<span class="ok">✅ تم الربط والتحقق من الشبكة</span>';setTimeout(()=>loadWalletStatus(),600)}catch(e){res.innerHTML='<span class="danger">⚠️ '+esc(e.message||'فشل')+'</span>'}}
 async function linkUserWallet(){let box=document.getElementById('walletBox');if(!window.Pi?.authenticate){if(box)box.innerHTML='<div class="danger">⚠️ افتح AI for داخل Pi Browser لربط محفظة Pi.</div>';return}try{if(box)box.innerHTML='<div class="checking">⏳ جاري توثيق محفظة Pi...</div>';let a=await window.Pi.authenticate(['username','payments','wallet_address'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let r=await fetch('/api/app/account/wallet',{method:'POST',headers:{...authHeaders(),'Authorization':'Bearer '+a.accessToken,'Content-Type':'application/json'},body:JSON.stringify({wallet_address:String(a.user?.wallet_address||a.user?.walletAddress||a.wallet_address||a.walletAddress||'').trim()})}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_link_failed');await loadWalletStatus()}catch(e){if(box)box.innerHTML='<div class="danger">⚠️ '+esc(e.message||'تعذر ربط المحفظة')+'</div><button class="action" onclick="linkUserWallet()">إعادة المحاولة</button>'}}
-function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row" style="display:flex;align-items:center;gap:12px">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox" id="walletBox"><b>👛 محفظتي</b><p class="small">جاري قراءة حالة محفظة Pi المرتبطة بالهوية...</p></div></section>';loadFavorites();loadIdentityStatus();loadProfilePhoto();loadWalletStatus()}
+async function loadAccountDashboard(){
+  try{
+    try{
+      var zs = await platformSvc("zyn_status");
+      if(zs && zs.ok){
+        var pEl = document.getElementById("dashPoints");
+        if(pEl) pEl.textContent = Number(zs.points||0);
+        var zEl = document.getElementById("dashZyn");
+        if(zEl) zEl.textContent = Number(zs.total_converted||0).toFixed(2);
+      }
+    }catch(_){}
+    try{
+      var wh = await platformSvc("wallet_history");
+      if(wh && wh.ok && wh.totals){
+        var todaySum = 0;
+        (wh.items||[]).forEach(function(it){
+          try{
+            var d = new Date(it.created_at);
+            var n = new Date();
+            if(d.toDateString() === n.toDateString() && Number(it.points)>0){
+              todaySum += Number(it.points);
+            }
+          }catch(_){}
+        });
+        var dEl = document.getElementById("dashDaily");
+        if(dEl) dEl.textContent = "+" + todaySum;
+      }
+    }catch(_){}
+    try{
+      var asc = await platformSvc("ascend_state");
+      if(asc && asc.ok && asc.rank){
+        var r = asc.rank;
+        var rpEl = document.getElementById("dashRankLabel");
+        if(rpEl) rpEl.textContent = (r.rank_emoji||"🥉") + " " + (r.rank_label||"Iron Ascender");
+        var rpcEl = document.getElementById("dashRankPct");
+        if(rpcEl) rpcEl.textContent = (r.total_conversions||0) + " تحويل";
+        var rpb = document.getElementById("dashRankBar");
+        if(rpb){
+          var stage = (r.highest_stage||"iron");
+          var count = Number((asc.ascend||{})[stage] || 0);
+          var pct = Math.min(100, Math.round((count/10)*100));
+          rpb.style.width = pct + "%";
+        }
+        var rnEl = document.getElementById("dashRankNext");
+        if(rnEl) rnEl.textContent = "📍 الموقع: #" + (r.rank_position||1) + " من " + (r.total_players||1);
+      }
+    }catch(_){}
+  }catch(e){}
+}
+
+function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div>
+
+<div style="background:linear-gradient(135deg,#4a2e7a,#7b4dd9,#4a2e7a);color:#fff;padding:18px;border-radius:18px;margin-bottom:14px;position:relative;overflow:hidden"><div style="position:absolute;top:-50%;right:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(255,255,255,.08) 0%,transparent 60%);pointer-events:none"></div><div style="text-align:center;margin-bottom:12px"><div style="font-size:36px;font-weight:900;line-height:1" id="dashPoints">—</div><div class="small" style="opacity:.9;margin-top:4px">ZYN Points</div></div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><div style="background:rgba(0,0,0,.2);border-radius:12px;padding:10px;text-align:center"><div class="small" style="opacity:.8">ZYN Token</div><div style="font-size:18px;font-weight:800" id="dashZyn">—</div></div><div style="background:rgba(0,0,0,.2);border-radius:12px;padding:10px;text-align:center"><div class="small" style="opacity:.8">💰 نشاط اليوم</div><div style="font-size:18px;font-weight:800" id="dashDaily">—</div></div></div></div>
+
+<div style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);color:#f5c84b;border:1px solid #f5c84b;border-radius:14px;padding:12px;margin-bottom:14px"><div style="display:flex;justify-content:space-between;align-items:center"><b style="font-size:14px">🏆 رتبتك</b><span class="small" id="dashRankPct" style="background:rgba(245,200,75,.2);padding:2px 8px;border-radius:8px">—</span></div><div style="font-size:15px;font-weight:800;margin-top:6px;text-align:center" id="dashRankLabel">—</div><div style="height:8px;background:#222;border-radius:4px;overflow:hidden;margin-top:8px"><div id="dashRankBar" style="height:100%;background:linear-gradient(90deg,#f5c84b,#ff9f1c);width:0%;transition:width .6s"></div></div><div class="small" style="text-align:center;margin-top:6px;opacity:.75" id="dashRankNext">—</div></div>
+
+<div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row" style="display:flex;align-items:center;gap:12px">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox" id="walletBox"><b>👛 محفظتي</b><p class="small">جاري قراءة حالة محفظة Pi المرتبطة بالهوية...</p></div></section>';loadFavorites();loadIdentityStatus();loadProfilePhoto();loadWalletStatus();setTimeout(function(){try{loadAccountDashboard();}catch(_){}},400)}
 async function loadProfilePhoto(){let box=document.getElementById('profileImageBox');if(!box)return;try{let r=await fetch('/api/app/account/photo?v='+Date.now(),{headers:authHeaders(),cache:'no-store'});if(!r.ok)throw new Error('no_photo');let blob=await r.blob();let im=new Image();im.className='profileAvatarLarge';im.onload=()=>{box.innerHTML='';box.appendChild(im)};im.src=URL.createObjectURL(blob);setHeaderAvatar(im.src)}catch(e){box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>';hideHeaderAvatar()}}
 async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f){if(r)r.textContent='⚠️ اختر صورة أولًا.';return}if(f.size>2*1024*1024){if(r)r.textContent='⚠️ الحد الأقصى للصورة 2MB.';return}if(r)r.textContent='⏳ جاري رفع الصورة...';try{let fd=new FormData();fd.append('photo',f);let h=authHeaders();delete h['Content-Type'];let res=await fetch('/api/app/account/photo',{method:'POST',headers:h,body:fd});let d=await res.json();if(!res.ok||!d.ok)throw new Error(d.error||'photo_upload_failed');if(r)r.innerHTML='<span class="ok">✅ تم حفظ الصورة الشخصية.</span>';await loadProfilePhoto()}catch(e){if(r)r.textContent='⚠️ '+(e.message||'تعذر رفع الصورة')}}
 function authHeaders(){let channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';let h={'X-AI-For-Channel':channel,'X-Telegram-Init-Data':channel==='pi'?'':(tg?.initData||'')};let token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';if(token)h.Authorization='Bearer '+token;return h}

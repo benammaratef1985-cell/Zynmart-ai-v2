@@ -1428,7 +1428,7 @@ def get_web_account(token):
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT account_id,display_name,username,email,email_verified,created_at,last_seen,status,role,metadata FROM ai_for_web_accounts WHERE session_token_hash=%s LIMIT 1",(_web_token_hash(token),)); row=cur.fetchone()
                 if not row or row["status"]!="active":return None
-                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s",(row["account_id"],)); return row
+                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL '5 minutes')",(row["account_id"],)); return row
     except Exception as e: print(f"Web account lookup error: {e}"); return None
     finally:_membership_db_release(conn)
 

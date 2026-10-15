@@ -1247,6 +1247,10 @@ def _web_issue_session(account_id):
             with conn.cursor() as cur:
                 cur.execute("UPDATE ai_for_web_accounts SET session_token_hash=%s,last_seen=NOW() WHERE account_id=%s AND status='active'",(_web_token_hash(token),str(account_id)))
                 _web_account_cache_clear(account_id)
+                # إفراغ Cache الـtoken (الجلسة القديمة انتهت)
+                try:
+                    _web_account_cache_clear("tk:" + _web_token_hash(token))
+                except Exception: pass
                 return token if cur.rowcount==1 else None
     except Exception as e: print(f"Web session issue error: {e}"); return None
     finally:_membership_db_release(conn)
@@ -1467,15 +1471,22 @@ def create_web_account(display_name="",username="",email="",password=""):
 def get_web_account(token):
     global membership_db_ready
     if not token or not membership_db_ready:return None
+    # ZYN — Cache للـ session token (يُقلل آلاف الاستدعاءات)
+    _tk_hash = _web_token_hash(token)
+    _cached_acct = _web_account_cache_get("tk:" + _tk_hash)
+    if _cached_acct is not None:
+        return _cached_acct
     conn=None
     try:
         conn=_membership_db_connect()
         if not conn:return None
         with conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT account_id,display_name,username,email,email_verified,created_at,last_seen,status,role,metadata FROM ai_for_web_accounts WHERE session_token_hash=%s LIMIT 1",(_web_token_hash(token),)); row=cur.fetchone()
+                cur.execute("SELECT account_id,display_name,username,email,email_verified,created_at,last_seen,status,role,metadata FROM ai_for_web_accounts WHERE session_token_hash=%s LIMIT 1",(_tk_hash,)); row=cur.fetchone()
                 if not row or row["status"]!="active":return None
-                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL '5 minutes')",(row["account_id"],)); return row
+                cur.execute("UPDATE ai_for_web_accounts SET last_seen=NOW() WHERE account_id=%s AND (last_seen IS NULL OR last_seen < NOW() - INTERVAL '5 minutes')",(row["account_id"],))
+                _web_account_cache_set("tk:" + _tk_hash, row)
+                return row
     except Exception as e: print(f"Web account lookup error: {e}"); return None
     finally:_membership_db_release(conn)
 

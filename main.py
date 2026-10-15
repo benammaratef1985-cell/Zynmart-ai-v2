@@ -6433,22 +6433,51 @@ function accountBox(){
   }, 300);
 }
 
+var __accProCache = {ts:0, data:null};
+
 async function loadAccProStats(){
+  var now = Date.now();
+  // ZYN — استخدام Cache إذا مرت أقل من 60 ثانية
+  if(__accProCache.data && (now - __accProCache.ts) < 60000){
+    try{ __accProApply(__accProCache.data); }catch(_){}
+    return;
+  }
+  var result = {zs:null, asc:null, wh:null};
   // 1) الرصيد + ZYN Token
   try{
     var zs = await platformSvc('zyn_status');
-    if(zs && zs.ok){
-      var pEl = document.getElementById('accProPoints');
-      if(pEl) pEl.textContent = Number(zs.points||0).toLocaleString('en-US');
-      var zEl = document.getElementById('accProZyn');
-      if(zEl) zEl.textContent = Number(zs.total_converted||0).toFixed(2);
-    }
+    if(zs && zs.ok) result.zs = zs;
   }catch(_){}
   // 2) الرتبة
   try{
     var asc = await platformSvc('ascend_state');
-    if(asc && asc.ok && asc.rank){
-      var r = asc.rank;
+    if(asc && asc.ok) result.asc = asc;
+  }catch(_){}
+  // 3) نشاط اليوم
+  try{
+    var wh = await platformSvc('wallet_history');
+    if(wh && wh.ok) result.wh = wh;
+  }catch(_){}
+  // تخزين في Cache + تطبيق
+  __accProCache.ts = Date.now();
+  __accProCache.data = result;
+  __accProApply(result);
+}
+
+function __accProApply(result){
+  // 1) الرصيد + ZYN Token
+  try{
+    if(result.zs){
+      var pEl = document.getElementById('accProPoints');
+      if(pEl) pEl.textContent = Number(result.zs.points||0).toLocaleString('en-US');
+      var zEl = document.getElementById('accProZyn');
+      if(zEl) zEl.textContent = Number(result.zs.total_converted||0).toFixed(2);
+    }
+  }catch(_){}
+  // 2) الرتبة
+  try{
+    if(result.asc && result.asc.rank){
+      var r = result.asc.rank;
       var rlEl = document.getElementById('accProRankLabel');
       if(rlEl) rlEl.textContent = (r.rank_emoji||'🥉') + ' ' + (r.rank_label||'Iron Ascender');
       var rpEl = document.getElementById('accProRankPct');
@@ -6456,7 +6485,7 @@ async function loadAccProStats(){
       var rpb = document.getElementById('accProRankBar');
       if(rpb){
         var stage = (r.highest_stage||'iron');
-        var cnt = Number((asc.ascend||{})[stage] || 0);
+        var cnt = Number((result.asc.ascend||{})[stage] || 0);
         var pct = Math.min(100, Math.round((cnt/10)*100));
         rpb.style.width = pct + '%';
       }
@@ -6466,11 +6495,10 @@ async function loadAccProStats(){
   }catch(_){}
   // 3) نشاط اليوم
   try{
-    var wh = await platformSvc('wallet_history');
-    if(wh && wh.ok && wh.items){
+    if(result.wh && result.wh.items){
       var sum = 0;
       var n = new Date();
-      (wh.items||[]).forEach(function(it){
+      (result.wh.items||[]).forEach(function(it){
         try{
           var d = new Date(it.created_at);
           if(d.toDateString() === n.toDateString() && Number(it.points)>0) sum += Number(it.points);

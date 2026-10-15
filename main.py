@@ -6400,7 +6400,89 @@ async function loadWalletStatus(){let box=document.getElementById('walletBox');i
 
 async function linkWalletManual(){let inp=document.getElementById('manualWallet'),res=document.getElementById('manualWalletResult');if(!inp||!res)return;let addr=inp.value.trim().toUpperCase();if(!/^G[A-Z2-7]{55}$/.test(addr)){res.innerHTML='<span class="danger">⚠️ العنوان يجب أن يبدأ بـG ويكون 56 حرفًا</span>';return}res.innerHTML='⏳ جاري التحقق من الشبكة...';try{let r=await fetch('/api/app/account/wallet/manual',{method:'POST',headers:{...authHeaders(),'Content-Type':'application/json'},cache:'no-store',body:JSON.stringify({wallet_address:addr})});let d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'link_failed');res.innerHTML='<span class="ok">✅ تم الربط والتحقق من الشبكة</span>';setTimeout(()=>loadWalletStatus(),600)}catch(e){res.innerHTML='<span class="danger">⚠️ '+esc(e.message||'فشل')+'</span>'}}
 async function linkUserWallet(){let box=document.getElementById('walletBox');if(!window.Pi?.authenticate){if(box)box.innerHTML='<div class="danger">⚠️ افتح AI for داخل Pi Browser لربط محفظة Pi.</div>';return}try{if(box)box.innerHTML='<div class="checking">⏳ جاري توثيق محفظة Pi...</div>';let a=await window.Pi.authenticate(['username','payments','wallet_address'],()=>{});if(!a?.accessToken)throw new Error('pi_auth_failed');window.__PI_ACCESS_TOKEN=a.accessToken;sessionStorage.setItem('ai_for_pi_access_token',a.accessToken);let r=await fetch('/api/app/account/wallet',{method:'POST',headers:{...authHeaders(),'Authorization':'Bearer '+a.accessToken,'Content-Type':'application/json'},body:JSON.stringify({wallet_address:String(a.user?.wallet_address||a.user?.walletAddress||a.wallet_address||a.walletAddress||'').trim()})}),d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||'wallet_link_failed');await loadWalletStatus()}catch(e){if(box)box.innerHTML='<div class="danger">⚠️ '+esc(e.message||'تعذر ربط المحفظة')+'</div><button class="action" onclick="linkUserWallet()">إعادة المحاولة</button>'}}
-function accountBox(){document.getElementById('view').innerHTML='<button class="back" onclick="goHome()">← الحساب</button><section class="detail"><div class="sectionTitle">👤 حسابي</div><div class="statusBox"><div class="row">الاسم: '+esc(state.user.first_name||'')+'</div><div class="row">Username: '+esc(state.user.username?'@'+state.user.username:'غير موجود')+'</div><div class="row">ID: '+esc(state.user.id)+'</div><div class="row">الدور: '+esc(state.role)+'</div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div><div id="profileImageBox" class="row" style="display:flex;align-items:center;gap:12px">🖼️ الصورة: <span class="small">جاري التحقق...</span></div></div><div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" value="'+esc(state.user.first_name||'')+'" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" value="'+esc(state.user.username||'')+'" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة ولا يمكن استبداله يدويًا.</p></div><div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div><div class="filebox"><b>🖼️ الصورة الشخصية</b><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div><div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div><div class="filebox" id="walletBox"><b>👛 محفظتي</b><p class="small">جاري قراءة حالة محفظة Pi المرتبطة بالهوية...</p></div></section>';loadFavorites();loadIdentityStatus();loadProfilePhoto();loadWalletStatus()}
+function accountBox(){
+  var tpl = document.getElementById('accountProTemplate');
+  if(!tpl){ return; }
+  document.getElementById('view').innerHTML = tpl.innerHTML;
+  // ملء البيانات الأساسية (آمن — textContent)
+  try{
+    var u = (state && state.user) ? state.user : {};
+    var nameEl = document.getElementById('accProName');
+    if(nameEl) nameEl.textContent = u.first_name || 'عضو';
+    var handleEl = document.getElementById('accProHandle');
+    if(handleEl) handleEl.textContent = u.username ? ('@' + u.username) : '';
+    var idEl = document.getElementById('accProId');
+    if(idEl) idEl.textContent = u.id || '—';
+    var userEl = document.getElementById('accProUser');
+    if(userEl) userEl.textContent = u.username ? ('@' + u.username) : 'غير موجود';
+    var roleEl = document.getElementById('accProRole');
+    if(roleEl) roleEl.textContent = (state && state.role) ? state.role : '—';
+    var edName = document.getElementById('editDisplayName');
+    if(edName) edName.value = u.first_name || '';
+    var edUser = document.getElementById('editUsername');
+    if(edUser) edUser.value = u.username || '';
+  }catch(_){}
+  // استدعاءات (محمية)
+  try{ loadFavorites(); }catch(_){}
+  try{ loadIdentityStatus(); }catch(_){}
+  try{ loadProfilePhoto(); }catch(_){}
+  try{ loadWalletStatus(); }catch(_){}
+  // استدعاءات البطاقات الجديدة (مؤجلة — آمنة)
+  setTimeout(function(){
+    try{ loadAccProStats(); }catch(_){}
+  }, 300);
+}
+
+async function loadAccProStats(){
+  // 1) الرصيد + ZYN Token
+  try{
+    var zs = await platformSvc('zyn_status');
+    if(zs && zs.ok){
+      var pEl = document.getElementById('accProPoints');
+      if(pEl) pEl.textContent = Number(zs.points||0).toLocaleString('en-US');
+      var zEl = document.getElementById('accProZyn');
+      if(zEl) zEl.textContent = Number(zs.total_converted||0).toFixed(2);
+    }
+  }catch(_){}
+  // 2) الرتبة
+  try{
+    var asc = await platformSvc('ascend_state');
+    if(asc && asc.ok && asc.rank){
+      var r = asc.rank;
+      var rlEl = document.getElementById('accProRankLabel');
+      if(rlEl) rlEl.textContent = (r.rank_emoji||'🥉') + ' ' + (r.rank_label||'Iron Ascender');
+      var rpEl = document.getElementById('accProRankPct');
+      if(rpEl) rpEl.textContent = (r.total_conversions||0) + ' تحويل';
+      var rpb = document.getElementById('accProRankBar');
+      if(rpb){
+        var stage = (r.highest_stage||'iron');
+        var cnt = Number((asc.ascend||{})[stage] || 0);
+        var pct = Math.min(100, Math.round((cnt/10)*100));
+        rpb.style.width = pct + '%';
+      }
+      var rnEl = document.getElementById('accProRankNext');
+      if(rnEl) rnEl.textContent = '📍 الموقع: #' + (r.rank_position||1) + ' من ' + (r.total_players||1);
+    }
+  }catch(_){}
+  // 3) نشاط اليوم
+  try{
+    var wh = await platformSvc('wallet_history');
+    if(wh && wh.ok && wh.items){
+      var sum = 0;
+      var n = new Date();
+      (wh.items||[]).forEach(function(it){
+        try{
+          var d = new Date(it.created_at);
+          if(d.toDateString() === n.toDateString() && Number(it.points)>0) sum += Number(it.points);
+        }catch(_){}
+      });
+      var dEl = document.getElementById('accProDaily');
+      if(dEl) dEl.textContent = '+' + sum;
+      var acEl = document.getElementById('accProActivity');
+      if(acEl) acEl.textContent = 'آخر تحديث: ' + new Date().toLocaleTimeString('ar-TN', {hour:'2-digit', minute:'2-digit'});
+    }
+  }catch(_){}
+}
 async function loadProfilePhoto(){let box=document.getElementById('profileImageBox');if(!box)return;try{let r=await fetch('/api/app/account/photo?v='+Date.now(),{headers:authHeaders(),cache:'no-store'});if(!r.ok)throw new Error('no_photo');let blob=await r.blob();let im=new Image();im.className='profileAvatarLarge';im.onload=()=>{box.innerHTML='';box.appendChild(im)};im.src=URL.createObjectURL(blob);setHeaderAvatar(im.src)}catch(e){box.innerHTML='🖼️ الصورة: <span class="small">لا توجد صورة محفوظة.</span>';hideHeaderAvatar()}}
 async function uploadProfilePhoto(){let f=document.getElementById('profilePhoto')?.files?.[0],r=document.getElementById('photoResult');if(!f){if(r)r.textContent='⚠️ اختر صورة أولًا.';return}if(f.size>2*1024*1024){if(r)r.textContent='⚠️ الحد الأقصى للصورة 2MB.';return}if(r)r.textContent='⏳ جاري رفع الصورة...';try{let fd=new FormData();fd.append('photo',f);let h=authHeaders();delete h['Content-Type'];let res=await fetch('/api/app/account/photo',{method:'POST',headers:h,body:fd});let d=await res.json();if(!res.ok||!d.ok)throw new Error(d.error||'photo_upload_failed');if(r)r.innerHTML='<span class="ok">✅ تم حفظ الصورة الشخصية.</span>';await loadProfilePhoto()}catch(e){if(r)r.textContent='⚠️ '+(e.message||'تعذر رفع الصورة')}}
 function authHeaders(){let channel=new URLSearchParams(location.search).get('channel')==='pi'?'pi':'telegram';let h={'X-AI-For-Channel':channel,'X-Telegram-Init-Data':channel==='pi'?'':(tg?.initData||'')};let token=sessionStorage.getItem('ai_for_pi_access_token')||window.__PI_ACCESS_TOKEN||'';if(token)h.Authorization='Bearer '+token;return h}
@@ -6475,7 +6557,70 @@ function esc(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&l
 function openPiPlatform(){const url=location.origin+'/platform';try{if(tg?.openLink){tg.openLink(url,{try_instant_view:false});return}}catch(_){}try{window.open(url,'_blank','noopener,noreferrer')}catch(_){location.href=url}}
 async function start(){try{
   try{setInterval(refreshNotifBadge,30000);refreshNotifBadge();}catch(_){}try{let me=await api('/api/platform/me').catch(()=>null);if(me&&me.ok&&me.account&&me.account.account_id){/* account already verified; nothing to persist here */}}catch(_){}let lastError=null;for(let attempt=1;attempt<=2;attempt++){try{state=await api('/api/app/bootstrap');lastError=null;break}catch(e){lastError=e;if(attempt<2)await new Promise(r=>setTimeout(r,1200));}}if(lastError)throw lastError;applyTheme();if(state.role==='user'){document.getElementById('n-admin')?.remove();}applyTheme();document.getElementById('userline').textContent=(state.user.first_name||'')+(state.user.username?' · @'+state.user.username:'');loadProfilePhoto();renderHome()}catch(e){let title='الوصول غير متاح',msg='لا يوجد وصول عام لهذا الحساب أو لا توجد أقسام مفتوحة حاليًا.';if(!tg){title='لم يتم تسجيل الدخول';msg='أنشئ حساب AI for من الصفحة الرئيسية للمنصة. يمكنك لاحقًا الدخول من Pi Browser أو أي متصفح.'}else if(e?.message==='pi_auth_required'){title='تسجيل الدخول عبر Pi مطلوب';msg='تم فتح المنصة من Telegram، لكن تصفح المنصة وتوثيق الهوية يتطلبان تسجيل الدخول بهوية Pi.';document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🟣</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><button class="action" onclick="openPiPlatform()">🟣 فتح AI for في Pi Browser</button><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">Pi Identity: <span class="danger">مطلوبة</span></div><div class="row">طريقة الدخول: <span class="info">Pi Browser</span></div><div class="row">HTTP: '+esc(e?.status||'401')+'</div><div class="row">الخطأ: pi_auth_required</div></div></div>';return}else if(e?.status===401||e?.message==='invalid_webapp_auth'){title='فشل التحقق من الهوية';msg='يجب تسجيل الدخول والتحقق من هوية Pi قبل استخدام المنصة.'}else if(e?.status===403||e?.message==='access_denied'){title='تم التحقق لكن الوصول مرفوض';msg='تم التعرف على Telegram، لكن السيرفر لم يعتبر هذا الحساب Owner/Admin أو مستخدمًا مسموحًا. لا نغيّر Owner ID من الواجهة.'}else if(e?.status===503){title='قاعدة البيانات غير متاحة';msg='تم الوصول إلى المنصة لكن PostgreSQL لم يكن جاهزًا لحفظ العضوية.'}else if(e?.status===504||e?.message==='request_timeout'){title='تأخر اتصال الخادم';msg='الخادم لم يُكمل التحقق خلال 15 ثانية. أعد المحاولة الآن؛ لن يتم اعتبار البيانات محذوفة بسبب هذا التأخر.'}document.getElementById('view').innerHTML='<div class="center"><div style="font-size:40px">🔒</div><h2>'+esc(title)+'</h2><p class="small">'+esc(msg)+'</p><div class="statusBox"><div class="row">Telegram WebApp: '+(tg?'متصل':'غير متصل')+'</div><div class="row">initData: '+(tg?.initData?'وصل':'فارغ')+'</div><div class="row">HTTP: '+esc(e?.status||'—')+'</div><div class="row">الخطأ: '+esc(e?.message||'unknown')+'</div></div></div>'}}start();
-</script></body></html>
+</script>
+<template id="accountProTemplate">
+<button class="back" onclick="goHome()">← الحساب</button>
+<section class="detail">
+
+<div style="background:linear-gradient(135deg,#0f0f1a 0%,#2a1a4d 50%,#4a2e7a 100%);border-radius:20px;padding:24px 18px 20px;margin-bottom:14px;position:relative;overflow:hidden;border:1px solid rgba(245,200,75,.3)">
+<div style="position:absolute;top:-40%;right:-40%;width:180%;height:180%;background:radial-gradient(circle,rgba(245,200,75,.15) 0%,transparent 60%);pointer-events:none"></div>
+<div style="position:absolute;bottom:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle,rgba(123,77,217,.1) 0%,transparent 60%);pointer-events:none"></div>
+<div style="position:relative;z-index:1;text-align:center">
+<div style="font-size:12px;letter-spacing:5px;color:#f5c84b;font-weight:900;opacity:.95">✦ A I &nbsp; F O R ✦</div>
+<div style="height:1px;background:linear-gradient(90deg,transparent,#f5c84b,transparent);margin:12px auto;width:70%"></div>
+<div id="accProAvatar" style="width:96px;height:96px;border-radius:50%;margin:16px auto 12px;background:linear-gradient(135deg,#4a2e7a,#7b4dd9);border:3px solid #f5c84b;box-shadow:0 0 30px rgba(245,200,75,.5);display:flex;align-items:center;justify-content:center;font-size:40px;color:#fff;font-weight:900;overflow:hidden">👤</div>
+<div id="accProName" style="font-size:22px;font-weight:900;color:#fff;letter-spacing:.5px">—</div>
+<div id="accProHandle" class="small" style="color:#c8b6ff;margin-top:6px">—</div>
+<div id="accProBadge" style="margin-top:10px;display:inline-block;background:linear-gradient(135deg,#f5c84b,#ff9f1c);color:#1a0f2e;font-size:11px;font-weight:900;padding:4px 14px;border-radius:20px">🏆 عضوية</div>
+</div>
+</div>
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
+<div style="background:linear-gradient(135deg,#4a2e7a,#7b4dd9);border-radius:16px;padding:14px;text-align:center;color:#fff">
+<div class="small" style="opacity:.85">💎 ZYN Points</div>
+<div id="accProPoints" style="font-size:26px;font-weight:900;margin-top:4px">—</div>
+</div>
+<div style="background:linear-gradient(135deg,#0a6b3a,#31e981);border-radius:16px;padding:14px;text-align:center;color:#fff">
+<div class="small" style="opacity:.85">🪙 ZYN Token</div>
+<div id="accProZyn" style="font-size:26px;font-weight:900;margin-top:4px">—</div>
+</div>
+</div>
+
+<div style="background:linear-gradient(135deg,#1a1a2e,#0f0f1a);border:1px solid #f5c84b;border-radius:16px;padding:14px;margin-bottom:14px">
+<div style="display:flex;justify-content:space-between;align-items:center">
+<b style="font-size:14px;color:#f5c84b">🏆 رتبتك في ASCEND</b>
+<span class="small" id="accProRankPct" style="background:rgba(245,200,75,.2);padding:2px 10px;border-radius:8px;color:#f5c84b">—</span>
+</div>
+<div id="accProRankLabel" style="font-size:16px;font-weight:900;margin-top:8px;text-align:center;color:#fff">—</div>
+<div style="height:8px;background:#222;border-radius:4px;overflow:hidden;margin-top:10px">
+<div id="accProRankBar" style="height:100%;background:linear-gradient(90deg,#f5c84b,#ff9f1c);width:0%;transition:width .6s"></div>
+</div>
+<div id="accProRankNext" class="small" style="text-align:center;margin-top:8px;color:#c8b6ff">—</div>
+</div>
+
+<div style="background:linear-gradient(135deg,#0f0f1a,#2a1a4d);border-radius:16px;padding:14px;margin-bottom:14px">
+<div style="display:flex;justify-content:space-between;align-items:center">
+<b style="color:#c8b6ff;font-size:14px">💰 نشاط اليوم</b>
+<span id="accProDaily" style="font-size:18px;font-weight:900;color:#31e981">—</span>
+</div>
+<div id="accProActivity" class="small" style="color:#7b6db0;margin-top:6px">آخر تحديث: —</div>
+</div>
+
+<div class="statusBox"><div class="row">🆔 ID: <b id="accProId">—</b></div><div class="row">👤 Username: <b id="accProUser">—</b></div><div class="row">🎭 الدور: <b id="accProRole">—</b></div><div id="identityStatus" class="row">🔐 مزودو الدخول: ⏳</div></div>
+
+<div class="filebox"><b>✏️ تعديل الحساب</b><input id="editDisplayName" placeholder="الاسم المعروض" style="width:100%;padding:10px;margin-top:8px"><input id="editUsername" placeholder="اسم المستخدم" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="updateProfile()">حفظ التعديل</button><div id="profileEditResult"></div><p class="small">إذا كان الحساب مرتبطًا بـPi أو Telegram، اسم المستخدم يأتي من الهوية الموثقة.</p></div>
+
+<div class="filebox"><b>🔗 ربط الهويات</b><div id="identityLinks" class="small">⏳</div><div class="actions"><button class="action" onclick="linkPi()">🟣 ربط Pi</button><button class="action" onclick="linkGoogle()">🔵 ربط Google</button><button class="action" onclick="linkTelegram()">✈️ ربط Telegram</button></div><div id="linkResult"></div></div>
+
+<div class="filebox"><b>🖼️ الصورة الشخصية</b><div id="profileImageBox" class="row">🖼️ الصورة: <span class="small">جاري التحقق...</span></div><input id="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp" style="width:100%;margin-top:10px"><button class="action" onclick="uploadProfilePhoto()">رفع الصورة</button><div id="photoResult"></div></div>
+
+<div class="filebox"><b>❤️ المفضلة</b><input id="favTitle" placeholder="عنوان العنصر" style="width:100%;padding:10px;margin-top:8px"><input id="favUrl" placeholder="الرابط (اختياري)" style="width:100%;padding:10px;margin-top:8px"><button class="action" onclick="addFavorite()">حفظ في المفضلة</button><div id="favResult"></div><div id="favList" class="small">⏳</div></div>
+
+<div class="filebox" id="walletBox"><b>👛 محفظتي</b><p class="small">جاري قراءة حالة محفظة Pi المرتبطة بالهوية...</p></div>
+
+</section>
+</template>
+</body></html>
 '''
 
 PLATFORM_HTML = r"""<!doctype html>

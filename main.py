@@ -9147,8 +9147,16 @@ def webapp_platform_services():
                     rank = rk
                     break
             if not rank: rank = ASCEND_RANKS[0]
-            # الموقع في leaderboard
-            cur.execute("SELECT COUNT(*) AS n FROM ai_for_ascend_players WHERE (golden*1000000 + diamond*10000 + gold*100 + silver) > (SELECT (golden*1000000 + diamond*10000 + gold*100 + silver) FROM ai_for_ascend_players WHERE identity_key=%s)", (identity,))
+            # الموقع في leaderboard (يطابق ascend_leaderboard_full تمامًا)
+            cur.execute("""SELECT COUNT(*) AS n FROM ai_for_ascend_players p
+                           WHERE (
+                             (p.golden*1000000 + p.diamond*10000 + p.gold*100 + p.silver),
+                             p.golden, p.diamond, p.gold, p.silver, p.iron
+                           ) > (
+                             SELECT (q.golden*1000000 + q.diamond*10000 + q.gold*100 + q.silver),
+                                    q.golden, q.diamond, q.gold, q.silver, q.iron
+                             FROM ai_for_ascend_players q WHERE q.identity_key=%s
+                           )""", (identity,))
             pos_row = cur.fetchone() or {}
             position = int(pos_row.get("n") or 0) + 1
             cur.execute("SELECT COUNT(*) AS n FROM ai_for_ascend_players")

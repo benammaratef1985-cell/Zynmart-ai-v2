@@ -6465,6 +6465,41 @@ async function loadAccProStats(){
 }
 
 function __accProApply(result){
+  // ZYN — شارات الإنجاز
+  try{
+    var bEl = document.getElementById('accProBadges');
+    if(bEl){
+      var badges = [];
+      var asc = result.asc;
+      var zs = result.zs;
+      // 🏆 Top 10
+      if(asc && asc.rank && Number(asc.rank.rank_position||999) <= 10){
+        badges.push({e:'🏆', t:'Top 10', c:'linear-gradient(135deg,#f5c84b,#ff9f1c)', tc:'#1a0f2e'});
+      }
+      // 👑 Golden / Diamond
+      if(asc && asc.rank){
+        var st = asc.rank.highest_stage || 'iron';
+        if(st === 'golden') badges.push({e:'👑', t:'Golden', c:'linear-gradient(135deg,#f5c84b,#ff9f1c)', tc:'#1a0f2e'});
+        else if(st === 'diamond') badges.push({e:'💎', t:'Diamond', c:'linear-gradient(135deg,#39d9ff,#7b4dd9)', tc:'#fff'});
+        else if(st === 'gold') badges.push({e:'🥇', t:'Gold', c:'linear-gradient(135deg,#ffd700,#f5c84b)', tc:'#1a0f2e'});
+        else if(st === 'silver') badges.push({e:'🥈', t:'Silver', c:'linear-gradient(135deg,#c0c0c0,#8c8c8c)', tc:'#1a0f2e'});
+      }
+      // 💰 Rich (نقاط كثيرة)
+      if(zs && Number(zs.points||0) >= 100){
+        badges.push({e:'💰', t:'Rich', c:'linear-gradient(135deg,#31e981,#0a6b3a)', tc:'#fff'});
+      }
+      // 🔥 عضو جديد نشط
+      if(zs && Number(zs.points||0) >= 10){
+        badges.push({e:'🔥', t:'Active', c:'linear-gradient(135deg,#ff6b9d,#a33)', tc:'#fff'});
+      }
+      // 🆕 عضو جديد
+      badges.push({e:'🆕', t:'عضو', c:'linear-gradient(135deg,#4a2e7a,#7b4dd9)', tc:'#fff'});
+      // نعرض
+      bEl.innerHTML = badges.map(function(b){
+        return '<span style="background:'+b.c+';color:'+b.tc+';font-size:11px;font-weight:900;padding:4px 12px;border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.3)">'+b.e+' '+b.t+'</span>';
+      }).join('');
+    }
+  }catch(_){}
   // 1) الرصيد + ZYN Token
   try{
     if(result.zs){
@@ -6600,6 +6635,7 @@ async function start(){try{
 <div id="accProName" style="font-size:22px;font-weight:900;color:#fff;letter-spacing:.5px">—</div>
 <div id="accProHandle" class="small" style="color:#c8b6ff;margin-top:6px">—</div>
 <div id="accProBadge" style="margin-top:10px;display:inline-block;background:linear-gradient(135deg,#f5c84b,#ff9f1c);color:#1a0f2e;font-size:11px;font-weight:900;padding:4px 14px;border-radius:20px">🏆 عضوية</div>
+<div id="accProBadges" style="margin-top:14px;display:flex;flex-wrap:wrap;gap:6px;justify-content:center"></div>
 </div>
 </div>
 
